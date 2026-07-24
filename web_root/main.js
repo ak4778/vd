@@ -384,9 +384,22 @@ function Events({}) {
         if (r.status === 'true') {
           savedCount++;
           if (savedCount === allChanges.length) {
+            // 直接更新本地状态，不需要重新请求
+            setData(prev => ({
+              ...prev,
+              nodes: prev.nodes.map(node => {
+                if (allChanges.includes(node.id)) {
+                  return {
+                    ...node,
+                    operation: editedOperations[node.id] || '',
+                    customOperation: editedCustomOperations[node.id] || ''
+                  };
+                }
+                return node;
+              })
+            }));
             setEditedOperations({});
             setEditedCustomOperations({});
-            loadData(page, isOnlineFilter, cameraTypeFilter, operationFilter);
           }
         }
       })
