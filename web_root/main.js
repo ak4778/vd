@@ -208,11 +208,11 @@ function Events({}) {
               <div class="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 p-2 min-w-[120px]">
                 <label class="flex items-center px-2 py-1 cursor-pointer hover:bg-gray-50">
                   <input type="checkbox" checked=${isOnlineFilter.includes('1')} onclick=${() => toggleOnlineFilter('1')} class="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" />
-                  <span class="ml-2 text-sm text-slate-700">在线</span>
+                  <span class="ml-2 text-sm text-green-600 font-medium">在线</span>
                 </label>
                 <label class="flex items-center px-2 py-1 cursor-pointer hover:bg-gray-50">
                   <input type="checkbox" checked=${isOnlineFilter.includes('0')} onclick=${() => toggleOnlineFilter('0')} class="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" />
-                  <span class="ml-2 text-sm text-slate-700">离线</span>
+                  <span class="ml-2 text-sm text-red-600 font-medium">离线</span>
                 </label>
               </div>
             `}
@@ -235,15 +235,15 @@ function Events({}) {
               <div class="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 p-2 min-w-[140px]">
                 <label class="flex items-center px-2 py-1 cursor-pointer hover:bg-gray-50">
                   <input type="checkbox" checked=${cameraTypeFilter.includes('1')} onclick=${() => toggleCameraTypeFilter('1')} class="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" />
-                  <span class="ml-2 text-sm text-slate-700">枪机</span>
+                  <span class="ml-2 text-sm text-blue-600 font-medium">枪机</span>
                 </label>
                 <label class="flex items-center px-2 py-1 cursor-pointer hover:bg-gray-50">
                   <input type="checkbox" checked=${cameraTypeFilter.includes('2')} onclick=${() => toggleCameraTypeFilter('2')} class="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" />
-                  <span class="ml-2 text-sm text-slate-700">球机</span>
+                  <span class="ml-2 text-sm text-purple-600 font-medium">球机</span>
                 </label>
                 <label class="flex items-center px-2 py-1 cursor-pointer hover:bg-gray-50">
                   <input type="checkbox" checked=${cameraTypeFilter.includes('3')} onclick=${() => toggleCameraTypeFilter('3')} class="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" />
-                  <span class="ml-2 text-sm text-slate-700">半球</span>
+                  <span class="ml-2 text-sm text-orange-600 font-medium">半球</span>
                 </label>
               </div>
             `}
@@ -266,23 +266,23 @@ function Events({}) {
               <div class="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 p-2 min-w-[160px]">
                 <label class="flex items-center px-2 py-1 cursor-pointer hover:bg-gray-50">
                   <input type="checkbox" checked=${operationFilter.includes('')} onclick=${() => toggleOperationFilter('')} class="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" />
-                  <span class="ml-2 text-sm text-slate-700">未标记</span>
+                  <span class="ml-2 text-sm text-gray-500 font-medium">未标记</span>
                 </label>
                 <label class="flex items-center px-2 py-1 cursor-pointer hover:bg-gray-50">
                   <input type="checkbox" checked=${operationFilter.includes('1')} onclick=${() => toggleOperationFilter('1')} class="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" />
-                  <span class="ml-2 text-sm text-slate-700">重点区域</span>
+                  <span class="ml-2 text-sm text-blue-600 font-medium">重点区域</span>
                 </label>
                 <label class="flex items-center px-2 py-1 cursor-pointer hover:bg-gray-50">
                   <input type="checkbox" checked=${operationFilter.includes('2')} onclick=${() => toggleOperationFilter('2')} class="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" />
-                  <span class="ml-2 text-sm text-slate-700">高风险作业</span>
+                  <span class="ml-2 text-sm text-orange-600 font-medium">高风险作业</span>
                 </label>
                 <label class="flex items-center px-2 py-1 cursor-pointer hover:bg-gray-50">
                   <input type="checkbox" checked=${operationFilter.includes('3')} onclick=${() => toggleOperationFilter('3')} class="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" />
-                  <span class="ml-2 text-sm text-slate-700">应急值守</span>
+                  <span class="ml-2 text-sm text-yellow-600 font-medium">应急值守</span>
                 </label>
                 <label class="flex items-center px-2 py-1 cursor-pointer hover:bg-gray-50">
                   <input type="checkbox" checked=${operationFilter.includes('4')} onclick=${() => toggleOperationFilter('4')} class="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" />
-                  <span class="ml-2 text-sm text-slate-700">自定义</span>
+                  <span class="ml-2 text-sm text-purple-600 font-medium">自定义</span>
                 </label>
               </div>
             `}
