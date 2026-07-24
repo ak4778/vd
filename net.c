@@ -375,6 +375,40 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
   int camera_idx = -1;
   int operation_idx = -1;
   char line[4096];
+  
+  // 解析 fields 配置，只返回配置中定义的字段
+  char field_keys[32][64] = {""};
+  int field_key_count = 0;
+  int field_indices[32];
+  struct mg_str cfg_fields_tok = mg_json_get_tok(mg_str(cfg_buf), "$.fields");
+  if (cfg_fields_tok.len > 0) {
+    char *fields_str = (char *) malloc((size_t) cfg_fields_tok.len + 1);
+    if (fields_str != NULL) {
+      memcpy(fields_str, cfg_fields_tok.buf, (size_t) cfg_fields_tok.len);
+      fields_str[cfg_fields_tok.len] = '\0';
+      char *ptr = fields_str;
+      while (*ptr != '\0' && field_key_count < 32) {
+        char *key_ptr = strstr(ptr, "\"key\"");
+        if (key_ptr == NULL) break;
+        key_ptr += 5; // skip "\"key\""
+        // skip optional whitespace and colon
+        while (*key_ptr == ' ' || *key_ptr == '\t' || *key_ptr == ':') key_ptr++;
+        while (*key_ptr == ' ' || *key_ptr == '\t') key_ptr++;
+        if (*key_ptr != '"') break;
+        key_ptr++; // skip opening quote
+        char *end_ptr = strchr(key_ptr, '"');
+        if (end_ptr == NULL) break;
+        int len = (int) (end_ptr - key_ptr);
+        if (len > 0 && len < 64) {
+          strncpy(field_keys[field_key_count], key_ptr, len);
+          field_keys[field_key_count][len] = '\0';
+          field_key_count++;
+        }
+        ptr = end_ptr + 1;
+      }
+      free(fields_str);
+    }
+  }
 
   if (fgets(line, sizeof(line), fp_data) == NULL) {
     fclose(fp_data);
@@ -401,6 +435,17 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
     }
     while ((*end == ',' || *end == '\n' || *end == '\r') && *end != '\0') end++;
     h = end;
+  }
+  
+  // 建立字段 key 到 CSV 列索引的映射
+  for (int i = 0; i < field_key_count; i++) {
+    field_indices[i] = -1;
+    for (int j = 0; j < header_count; j++) {
+      if (strcmp(field_keys[i], headers[j]) == 0) {
+        field_indices[i] = j;
+        break;
+      }
+    }
   }
 
   row_count = 0;
@@ -502,20 +547,22 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
     count++;
 
     pos += snprintf(response + pos, total_size - pos, "{");
-    for (int i = 0; i < header_count; i++) {
+    for (int i = 0; i < field_key_count; i++) {
       if (i > 0) pos += snprintf(response + pos, total_size - pos, ",");
-      pos += snprintf(response + pos, total_size - pos, "\"%s\":\"", headers[i]);
+      pos += snprintf(response + pos, total_size - pos, "\"%s\":\"", field_keys[i]);
 
-      char field_val[512] = "";
-      get_csv_field(line_start, i, field_val, sizeof(field_val));
+      if (field_indices[i] >= 0) {
+        char field_val[512] = "";
+        get_csv_field(line_start, field_indices[i], field_val, sizeof(field_val));
 
-      const char *output_val = field_val;
+        const char *output_val = field_val;
 
-      for (int j = 0; output_val[j] != '\0'; j++) {
-        if (output_val[j] == '"' || output_val[j] == '\\') {
-          pos += snprintf(response + pos, total_size - pos, "\\");
+        for (int j = 0; output_val[j] != '\0'; j++) {
+          if (output_val[j] == '"' || output_val[j] == '\\') {
+            pos += snprintf(response + pos, total_size - pos, "\\");
+          }
+          pos += snprintf(response + pos, total_size - pos, "%c", output_val[j]);
         }
-        pos += snprintf(response + pos, total_size - pos, "%c", output_val[j]);
       }
       pos += snprintf(response + pos, total_size - pos, "\"");
     }
