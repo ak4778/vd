@@ -491,7 +491,7 @@ function Events({}) {
             onchange=${(e) => handleCustomOperationChange(node.id, e.target.value)}
             placeholder="请输入自定义内容"
             class="px-2 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            style="width:180px" />
+            style="width:300px" />
         `;
       }
       return '-';
