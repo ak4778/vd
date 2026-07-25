@@ -314,6 +314,7 @@ function Events({}) {
 
   const [editedOperations, setEditedOperations] = useState({});
   const [editedCustomOperations, setEditedCustomOperations] = useState({});
+  const [hasPendingChanges, setHasPendingChanges] = useState(false);
   const [selectedNodes, setSelectedNodes] = useState([]);
   const [batchField, setBatchField] = useState('operation');
   const [batchValue, setBatchValue] = useState('');
@@ -382,11 +383,14 @@ function Events({}) {
     if (allChanges.length === 0) return;
 
     // 一次性发送所有修改
-    const updates = allChanges.map(nodeId => ({
-      id: nodeId,
-      operation: editedOperations[nodeId] || '',
-      customOperation: editedCustomOperations[nodeId] || ''
-    }));
+    const updates = allChanges.map(nodeId => {
+      const node = data.nodes.find(n => n.id === nodeId);
+      return {
+        id: nodeId,
+        operation: editedOperations[nodeId] || (node ? node.operation : ''),
+        customOperation: editedCustomOperations[nodeId] || (node ? node.customOperation : '')
+      };
+    });
 
     fetch(`api/nodes/batchset`, {
       method: 'POST',
@@ -403,8 +407,8 @@ function Events({}) {
             if (allChanges.includes(node.id)) {
               return {
                 ...node,
-                operation: editedOperations[node.id] || '',
-                customOperation: editedCustomOperations[node.id] || ''
+                operation: editedOperations[node.id] || node.operation,
+                customOperation: editedCustomOperations[node.id] || node.customOperation
               };
             }
             return node;
@@ -412,6 +416,7 @@ function Events({}) {
         }));
         setEditedOperations({});
         setEditedCustomOperations({});
+        setHasPendingChanges(false);
       }
     })
     .catch(err => console.error('Save error:', err));
@@ -484,6 +489,7 @@ function Events({}) {
           <input 
             type="text" 
             value=${editedCustomOperations[node.id] || node.customOperation || ''}
+            onfocus=${() => setHasPendingChanges(true)}
             onchange=${(e) => handleCustomOperationChange(node.id, e.target.value)}
             placeholder="请输入自定义内容"
             class="px-2 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -548,7 +554,7 @@ return html`
       `}
       <button 
         onclick=${saveAllOperations}
-        disabled=${Object.keys(editedOperations).length === 0 && Object.keys(editedCustomOperations).length === 0}
+        disabled=${Object.keys(editedOperations).length === 0 && Object.keys(editedCustomOperations).length === 0 && !hasPendingChanges}
             class="px-3 py-1 bg-green-600 text-white text-sm rounded hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed">保存全部修改</button>
     </div>
     <${Pagination} currentPage=${page} setPageFn=${handlePageChange} totalItems=${totalItems} itemsPerPage=${itemsPerPage} />
