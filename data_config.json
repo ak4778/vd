@@ -6,7 +6,7 @@
         {"key": "channelCode", "label": "通道编号", "editable": false, "type": "string", "width": 120},
         {"key": "isOnline", "label": "状态", "editable": false, "type": "string", "width": 60},
         {"key": "cameraType", "label": "设备类型", "editable": false, "type": "string", "width": 60},
-        {"key": "operation", "label": "操作", "editable": true, "type": "string", "width": 150},
+        {"key": "operation", "label": "操作", "editable": true, "type": "string", "width": 60},
         {"key": "customOperation", "label": "自定义", "editable": true, "type": "string", "width": 200}
     ]
 }
