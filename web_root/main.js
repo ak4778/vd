@@ -44,7 +44,7 @@ function Sidebar({url, show}) {
       <${Logo} class="h-full"/> Your Brand
     <//>
     <div class="flex flex-1 flex-col">
-      <${NavLink} title="视频设备" icon=${Icons.alert} href="/events" url=${url} />
+      <${NavLink} title="视频设备" icon=${Icons.camera} href="/events" url=${url} />
     <//>
   <//>
 <//>`;
