@@ -368,43 +368,41 @@ function Events({}) {
     const customChanges = Object.keys(editedCustomOperations);
     const allChanges = [...new Set([...changes, ...customChanges])];
     if (allChanges.length === 0) return;
-    
-    let savedCount = 0;
-    allChanges.forEach(nodeId => {
-      const operation = editedOperations[nodeId] || '';
-      const customOperation = editedCustomOperations[nodeId] || '';
-      
-      fetch(`api/nodes/set`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: nodeId, operation: operation, customOperation: customOperation })
-      })
-      .then(r => r.json())
-      .then(r => {
-        if (r.status === 'true') {
-          savedCount++;
-          if (savedCount === allChanges.length) {
-            // 直接更新本地状态，不需要重新请求
-            setData(prev => ({
-              ...prev,
-              nodes: prev.nodes.map(node => {
-                if (allChanges.includes(node.id)) {
-                  return {
-                    ...node,
-                    operation: editedOperations[node.id] || '',
-                    customOperation: editedCustomOperations[node.id] || ''
-                  };
-                }
-                return node;
-              })
-            }));
-            setEditedOperations({});
-            setEditedCustomOperations({});
-          }
-        }
-      })
-      .catch(err => console.error('Save error:', err));
-    });
+
+    // 一次性发送所有修改
+    const updates = allChanges.map(nodeId => ({
+      id: nodeId,
+      operation: editedOperations[nodeId] || '',
+      customOperation: editedCustomOperations[nodeId] || ''
+    }));
+
+    fetch(`api/nodes/batchset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ updates })
+    })
+    .then(r => r.json())
+    .then(r => {
+      if (r.status === 'true') {
+        // 直接更新本地状态，不需要重新请求
+        setData(prev => ({
+          ...prev,
+          nodes: prev.nodes.map(node => {
+            if (allChanges.includes(node.id)) {
+              return {
+                ...node,
+                operation: editedOperations[node.id] || '',
+                customOperation: editedCustomOperations[node.id] || ''
+              };
+            }
+            return node;
+          })
+        }));
+        setEditedOperations({});
+        setEditedCustomOperations({});
+      }
+    })
+    .catch(err => console.error('Save error:', err));
   };
 
   const operationOptions = [

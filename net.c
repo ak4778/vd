@@ -302,6 +302,171 @@ static void handle_nodes_set(struct mg_connection *c, struct mg_str body) {
   mg_http_reply(c, 200, s_json_header, "{\"status\":\"true\",\"message\":\"Success\"}");
 }
 
+// 批量更新节点 - 一次性处理所有修改，只读写一次CSV文件
+static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
+  struct update_entry {
+    char id[64];
+    char operation[64];
+    char custom_operation[256];
+  };
+
+  struct update_entry updates[256];
+  int update_count = 0;
+
+  // 遍历 JSON 数组，收集所有 updates
+  for (int i = 0; i < 256; i++) {
+    char path[64];
+    snprintf(path, sizeof(path), "$.updates[%d].id", i);
+    struct mg_str id_tok = mg_json_get_tok(body, path);
+    if (id_tok.len == 0) break;
+
+    my_json_unescape(body, path, updates[update_count].id, sizeof(updates[update_count].id));
+    if (updates[update_count].id[0] == '\0') break;
+
+    snprintf(path, sizeof(path), "$.updates[%d].operation", i);
+    my_json_unescape(body, path, updates[update_count].operation, sizeof(updates[update_count].operation));
+
+    snprintf(path, sizeof(path), "$.updates[%d].customOperation", i);
+    my_json_unescape(body, path, updates[update_count].custom_operation, sizeof(updates[update_count].custom_operation));
+
+    update_count++;
+  }
+
+  if (update_count == 0) {
+    mg_http_reply(c, 200, s_json_header, "{\"status\":\"false\",\"message\":\"No updates\"}");
+    return;
+  }
+
+  // 读取配置文件获取路径
+  char csv_path[256] = "leaf_nodes.csv";
+  char edited_path[256] = "leaf_nodes_edited.csv";
+
+  FILE *fp_cfg = fopen("data_config.json", "rb");
+  if (fp_cfg != NULL) {
+    fseek(fp_cfg, 0, SEEK_END);
+    long cfg_size = ftell(fp_cfg);
+    fseek(fp_cfg, 0, SEEK_SET);
+    char *cfg_buf = (char *) malloc((size_t) cfg_size + 1);
+    if (cfg_buf != NULL) {
+      fread(cfg_buf, 1, (size_t) cfg_size, fp_cfg);
+      cfg_buf[cfg_size] = '\0';
+      char *csv_path_ptr = mg_json_get_str(mg_str(cfg_buf), "$.csvFilePath");
+      if (csv_path_ptr != NULL) {
+        strncpy(csv_path, csv_path_ptr, sizeof(csv_path) - 1);
+        csv_path[sizeof(csv_path) - 1] = '\0';
+        free(csv_path_ptr);
+      }
+      char *edited_path_ptr = mg_json_get_str(mg_str(cfg_buf), "$.editedFilePath");
+      if (edited_path_ptr != NULL) {
+        strncpy(edited_path, edited_path_ptr, sizeof(edited_path) - 1);
+        edited_path[sizeof(edited_path) - 1] = '\0';
+        free(edited_path_ptr);
+      }
+      free(cfg_buf);
+    }
+    fclose(fp_cfg);
+  }
+
+  FILE *fp_in = fopen(csv_path, "r");
+  if (fp_in == NULL) {
+    mg_http_reply(c, 200, s_json_header, "{\"status\":\"false\",\"message\":\"Cannot read CSV\"}");
+    return;
+  }
+
+  FILE *fp_out = fopen(edited_path, "w");
+  if (fp_out == NULL) {
+    fclose(fp_in);
+    mg_http_reply(c, 200, s_json_header, "{\"status\":\"false\",\"message\":\"Cannot write CSV\"}");
+    return;
+  }
+
+  char line[4096];
+  int operation_idx = -1;
+  int custom_operation_idx = -1;
+  int header_count = 0;
+
+  // 读取表头
+  if (fgets(line, sizeof(line), fp_in) != NULL) {
+    fprintf(fp_out, "%s", line);
+
+    char *h = line;
+    if ((unsigned char) h[0] == 0xEF && (unsigned char) h[1] == 0xBB && (unsigned char) h[2] == 0xBF) {
+      h += 3;
+    }
+    while (*h != '\0' && *h != '\n' && header_count < 32) {
+      char *end = h;
+      while (*end != '\0' && *end != ',' && *end != '\n' && *end != '\r') end++;
+      int len = (int) (end - h);
+      if (len > 0) {
+        char header[64];
+        strncpy(header, h, len);
+        header[len] = '\0';
+        if (strcmp(header, "operation") == 0) operation_idx = header_count;
+        if (strcmp(header, "customOperation") == 0) custom_operation_idx = header_count;
+        header_count++;
+      }
+      while ((*end == ',' || *end == '\n' || *end == '\r') && *end != '\0') end++;
+      h = end;
+    }
+  }
+
+  // 遍历数据行，一次性处理所有更新
+  while (fgets(line, sizeof(line), fp_in) != NULL) {
+    char *p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '\0' || *p == '\n' || *p == '\r') {
+      fprintf(fp_out, "%s", line);
+      continue;
+    }
+
+    char row_id[64] = "";
+    get_csv_field(p, 0, row_id, sizeof(row_id));
+
+    // 查找是否有匹配的 update
+    int match_idx = -1;
+    for (int i = 0; i < update_count; i++) {
+      if (strcmp(row_id, updates[i].id) == 0) {
+        match_idx = i;
+        break;
+      }
+    }
+
+    if (match_idx >= 0) {
+      char new_line[4096] = "";
+      int first = 1;
+      for (int i = 0; i < header_count; i++) {
+        if (!first) strcat(new_line, ",");
+        first = 0;
+        if (i == operation_idx) {
+          strcat(new_line, updates[match_idx].operation);
+        } else if (i == custom_operation_idx) {
+          strcat(new_line, updates[match_idx].custom_operation);
+        } else {
+          char field_val[512] = "";
+          get_csv_field(p, i, field_val, sizeof(field_val));
+          strcat(new_line, field_val);
+        }
+      }
+      char *end = line;
+      while (*end != '\0' && *end != '\n' && *end != '\r') end++;
+      if (*end == '\n' || *end == '\r') {
+        strcat(new_line, end);
+      }
+      fprintf(fp_out, "%s", new_line);
+    } else {
+      fprintf(fp_out, "%s", line);
+    }
+  }
+
+  fclose(fp_in);
+  fclose(fp_out);
+
+  remove(csv_path);
+  rename(edited_path, csv_path);
+
+  mg_http_reply(c, 200, s_json_header, "{\"status\":\"true\",\"message\":\"Success\",\"count\":%d}", update_count);
+}
+
 static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm) {
   int page = 1;
   int page_size = 20;
@@ -723,6 +888,8 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       handle_nodes_get(c, hm);
     } else if (mg_match(hm->uri, mg_str("/api/nodes/set"), NULL)) {
       handle_nodes_set(c, hm->body);
+    } else if (mg_match(hm->uri, mg_str("/api/nodes/batchset"), NULL)) {
+      handle_nodes_batchset(c, hm->body);
     } else if (mg_match(hm->uri, mg_str("/api/#"), NULL) && u == NULL) {
       mg_http_reply(c, 403, "", "Not Authorised\n");
     } else if (mg_match(hm->uri, mg_str("/api/logout"), NULL)) {
