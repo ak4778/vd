@@ -16,6 +16,23 @@
       input[type="number"] {
         -moz-appearance: textfield;
       }
+      /* 强制显示滚动条，避免布局抖动 */
+      .scrollbar-force::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      .scrollbar-force::-webkit-scrollbar-thumb {
+        background-color: rgba(0, 0, 0, 0.2);
+        border-radius: 4px;
+      }
+      .scrollbar-force::-webkit-scrollbar-track {
+        background-color: transparent;
+      }
+      /* Firefox */
+      .scrollbar-force {
+        scrollbar-width: thin;
+        scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
+      }
     </style>
   </head>
   <body class="h-full"></body>

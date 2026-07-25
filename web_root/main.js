@@ -62,7 +62,6 @@ function Events({}) {
   const [showOnlineDropdown, setShowOnlineDropdown] = useState(false);
   const [showCameraDropdown, setShowCameraDropdown] = useState(false);
   const [showOperationDropdown, setShowOperationDropdown] = useState(false);
-  const [version, setVersion] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const columnWidthsRef = useRef({});
@@ -102,7 +101,6 @@ function Events({}) {
           totalItems: r.data && r.data.total ? r.data.total : 0
         };
         setData(newData);
-        setVersion(v => v + 1);
         setIsLoading(false);
       })
       .catch(err => {
@@ -155,7 +153,7 @@ function Events({}) {
       const deltaX = e.clientX - startX;
       const newWidth = Math.max(50, startWidth + deltaX);
       columnWidthsRef.current[resizeColumn] = newWidth;
-      setVersion(v => v + 1);
+      setData(prev => prev); // 触发重新渲染以更新列宽
     };
 
     const handleMouseUp = () => {
@@ -510,7 +508,7 @@ function Events({}) {
 <//>`;
 
 return html`
-<div key=${version} class="m-4 divide-y divide-gray-200 rounded bg-white flex flex-col h-[calc(100vh-120px)]">
+<div class="m-4 divide-y divide-gray-200 rounded bg-white flex flex-col h-[calc(100vh-120px)]">
   <div class="font-semibold flex items-center text-gray-600 px-3 justify-between whitespace-nowrap border-b border-gray-200 py-2 flex-shrink-0">
     <div class="font-semibold flex items-center text-gray-600">
       <div class="mr-4">设备通道(${totalItems})</div>
@@ -559,7 +557,7 @@ return html`
     </div>
     <${Pagination} currentPage=${page} setPageFn=${handlePageChange} totalItems=${totalItems} itemsPerPage=${itemsPerPage} />
   <//>
-  <div class="flex-1 overflow-auto">
+  <div class="flex-1 overflow-y-scroll overflow-x-auto scrollbar-force">
     <table class="border-separate border-spacing-0" style="table-layout: fixed; width: 100%;">
       <thead>
         <tr>
