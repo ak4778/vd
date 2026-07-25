@@ -63,6 +63,8 @@ function Events({}) {
   const [showCameraDropdown, setShowCameraDropdown] = useState(false);
   const [showOperationDropdown, setShowOperationDropdown] = useState(false);
   const [version, setVersion] = useState(0);
+  const [isLoading, setIsLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
   const columnWidthsRef = useRef({});
   const [isResizing, setIsResizing] = useState(false);
   const [resizeColumn, setResizeColumn] = useState(null);
@@ -74,6 +76,8 @@ function Events({}) {
   const totalItems = data.totalItems;
 
   const loadData = (pg, onlineFilter, cameraFilter, opFilter) => {
+    setIsLoading(true);
+    setErrorMsg('');
     let url = `api/nodes/get?page=${pg}&pageSize=${itemsPerPage}&t=${Date.now()}`;
     if (onlineFilter.length > 0) url += `&isOnline=${onlineFilter.join(',')}`;
     if (cameraFilter.length > 0) url += `&cameraType=${cameraFilter.join(',')}`;
@@ -99,10 +103,13 @@ function Events({}) {
         };
         setData(newData);
         setVersion(v => v + 1);
+        setIsLoading(false);
       })
       .catch(err => {
         console.error('API Error:', err);
+        setErrorMsg('数据加载失败，请稍后重试');
         setData({nodes: [], fields: [], totalItems: 0});
+        setIsLoading(false);
       });
   };
 
@@ -131,9 +138,14 @@ function Events({}) {
     localStorage.removeItem('page');
   };
 
+  // 用 JSON.stringify 作为依赖，确保筛选内容变化（不仅仅是数量）时也重新加载
+  const onlineKey = JSON.stringify(isOnlineFilter);
+  const cameraKey = JSON.stringify(cameraTypeFilter);
+  const operationKey = JSON.stringify(operationFilter);
+
   useEffect(() => {
     loadData(page, isOnlineFilter, cameraTypeFilter, operationFilter);
-  }, [page, isOnlineFilter.length, cameraTypeFilter.length, operationFilter.length]);
+  }, [page, onlineKey, cameraKey, operationKey]);
 
 
 
@@ -536,8 +548,8 @@ return html`
       `}
       <button 
         onclick=${saveAllOperations}
-        disabled=${Object.keys(editedOperations).length === 0}
-        class="px-3 py-1 bg-green-600 text-white text-sm rounded hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed">保存全部修改</button>
+        disabled=${Object.keys(editedOperations).length === 0 && Object.keys(editedCustomOperations).length === 0}
+            class="px-3 py-1 bg-green-600 text-white text-sm rounded hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed">保存全部修改</button>
     </div>
     <${Pagination} currentPage=${page} setPageFn=${handlePageChange} totalItems=${totalItems} itemsPerPage=${itemsPerPage} />
   <//>
@@ -552,7 +564,18 @@ return html`
         </tr>
       </thead>
       <tbody>
-        ${nodes.length === 0 ? html`<tr><td colspan=${fields.length + 1} class="text-center py-8 text-gray-500">暂无数据，请选择过滤条件</td></tr>` : nodes.map(n => h(Node, {node: n, isSelected: selectedNodes.includes(n.id)}))}
+        ${isLoading ? html`<tr><td colspan=${fields.length + 1} class="text-center py-8 text-blue-500">
+          <div class="inline-flex items-center gap-2">
+            <svg class="animate-spin h-5 w-5" viewBox="0 0 24 24" fill="none">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+            </svg>
+            <span>加载中...</span>
+          </div>
+        </td></tr>` :
+        errorMsg ? html`<tr><td colspan=${fields.length + 1} class="text-center py-8 text-red-500">${errorMsg}</td></tr>` :
+        nodes.length === 0 ? html`<tr><td colspan=${fields.length + 1} class="text-center py-8 text-gray-500">暂无数据，请选择过滤条件</td></tr>` :
+        nodes.map(n => h(Node, {node: n, isSelected: selectedNodes.includes(n.id)}))}
       </tbody>
     </table>
   <//>

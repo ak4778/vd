@@ -20,6 +20,33 @@ static const char *s_json_header =
     "Content-Type: application/json\r\n"
     "Cache-Control: no-cache\r\n";
 
+// 配置文件缓存 - 避免每次请求都读盘
+static char *g_cfg_buf = NULL;
+
+// 获取配置文件内容（带缓存）。返回的是缓存指针，调用者不要 free。
+static char *get_config_buf(void) {
+  if (g_cfg_buf != NULL) return g_cfg_buf;
+
+  FILE *fp = fopen("data_config.json", "rb");
+  if (fp == NULL) return NULL;
+
+  fseek(fp, 0, SEEK_END);
+  long size = ftell(fp);
+  fseek(fp, 0, SEEK_SET);
+
+  g_cfg_buf = (char *) malloc((size_t) size + 1);
+  if (g_cfg_buf == NULL) {
+    fclose(fp);
+    return NULL;
+  }
+
+  fread(g_cfg_buf, 1, (size_t) size, fp);
+  fclose(fp);
+  g_cfg_buf[size] = '\0';
+
+  return g_cfg_buf;
+}
+
 static char *url_decode(const char *str) {
   if (str == NULL) return NULL;
   int len = strlen(str);
@@ -173,135 +200,6 @@ int ui_event_next(int no, struct ui_event *e) {
   return no + 1;
 }
 
-static void handle_nodes_set(struct mg_connection *c, struct mg_str body) {
-  char id[64] = "";
-  char operation[64] = "";
-  char custom_operation[256] = "";
-  char csv_path[256] = "leaf_nodes.csv";
-  char edited_path[256] = "leaf_nodes_edited.csv";
-
-  my_json_unescape(body, "$.id", id, sizeof(id));
-  my_json_unescape(body, "$.operation", operation, sizeof(operation));
-  my_json_unescape(body, "$.customOperation", custom_operation, sizeof(custom_operation));
-
-  if (id[0] == '\0') {
-    mg_http_reply(c, 200, s_json_header, "{\"status\":\"false\",\"message\":\"ID is required\"}");
-    return;
-  }
-
-  FILE *fp_cfg = fopen("data_config.json", "rb");
-  if (fp_cfg != NULL) {
-    fseek(fp_cfg, 0, SEEK_END);
-    long cfg_size = ftell(fp_cfg);
-    fseek(fp_cfg, 0, SEEK_SET);
-    char *cfg_buf = (char *) malloc((size_t) cfg_size + 1);
-    if (cfg_buf != NULL) {
-      fread(cfg_buf, 1, (size_t) cfg_size, fp_cfg);
-      cfg_buf[cfg_size] = '\0';
-      char *csv_path_ptr = mg_json_get_str(mg_str(cfg_buf), "$.csvFilePath");
-      if (csv_path_ptr != NULL) {
-        strncpy(csv_path, csv_path_ptr, sizeof(csv_path) - 1);
-        csv_path[sizeof(csv_path) - 1] = '\0';
-      }
-      char *edited_path_ptr = mg_json_get_str(mg_str(cfg_buf), "$.editedFilePath");
-      if (edited_path_ptr != NULL) {
-        strncpy(edited_path, edited_path_ptr, sizeof(edited_path) - 1);
-        edited_path[sizeof(edited_path) - 1] = '\0';
-      }
-      free(cfg_buf);
-    }
-    fclose(fp_cfg);
-  }
-
-  FILE *fp_in = fopen(csv_path, "r");
-  if (fp_in == NULL) {
-    mg_http_reply(c, 200, s_json_header, "{\"status\":\"false\",\"message\":\"Cannot read CSV\"}");
-    return;
-  }
-
-  FILE *fp_out = fopen(edited_path, "w");
-  if (fp_out == NULL) {
-    fclose(fp_in);
-    mg_http_reply(c, 200, s_json_header, "{\"status\":\"false\",\"message\":\"Cannot write CSV\"}");
-    return;
-  }
-
-  char line[4096];
-  int operation_idx = -1;
-  int custom_operation_idx = -1;
-  int header_count = 0;
-
-  if (fgets(line, sizeof(line), fp_in) != NULL) {
-    fprintf(fp_out, "%s", line);
-
-    char *h = line;
-    if ((unsigned char) h[0] == 0xEF && (unsigned char) h[1] == 0xBB && (unsigned char) h[2] == 0xBF) {
-      h += 3;
-    }
-    while (*h != '\0' && *h != '\n' && header_count < 32) {
-      char *end = h;
-      while (*end != '\0' && *end != ',' && *end != '\n' && *end != '\r') end++;
-      int len = (int) (end - h);
-      if (len > 0) {
-        char header[64];
-        strncpy(header, h, len);
-        header[len] = '\0';
-        if (strcmp(header, "operation") == 0) operation_idx = header_count;
-        if (strcmp(header, "customOperation") == 0) custom_operation_idx = header_count;
-        header_count++;
-      }
-      while ((*end == ',' || *end == '\n' || *end == '\r') && *end != '\0') end++;
-      h = end;
-    }
-  }
-
-  while (fgets(line, sizeof(line), fp_in) != NULL) {
-    char *p = line;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p == '\0' || *p == '\n' || *p == '\r') {
-      fprintf(fp_out, "%s", line);
-      continue;
-    }
-
-    char row_id[64] = "";
-    get_csv_field(p, 0, row_id, sizeof(row_id));
-
-    if (strcmp(row_id, id) == 0) {
-      char new_line[4096] = "";
-      int first = 1;
-      for (int i = 0; i < header_count; i++) {
-        if (!first) strcat(new_line, ",");
-        first = 0;
-        if (i == operation_idx) {
-          strcat(new_line, operation);
-        } else if (i == custom_operation_idx) {
-          strcat(new_line, custom_operation);
-        } else {
-          char field_val[512] = "";
-          get_csv_field(p, i, field_val, sizeof(field_val));
-          strcat(new_line, field_val);
-        }
-      }
-      char *end = line;
-      while (*end != '\0' && *end != '\n' && *end != '\r') end++;
-      if (*end == '\n' || *end == '\r') {
-        strcat(new_line, end);
-      }
-      fprintf(fp_out, "%s", new_line);
-    } else {
-      fprintf(fp_out, "%s", line);
-    }
-  }
-
-  fclose(fp_in);
-  fclose(fp_out);
-
-  remove(csv_path);
-  rename(edited_path, csv_path);
-
-  mg_http_reply(c, 200, s_json_header, "{\"status\":\"true\",\"message\":\"Success\"}");
-}
-
 // 批量更新节点 - 一次性处理所有修改，只读写一次CSV文件
 static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
   struct update_entry {
@@ -337,34 +235,24 @@ static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
     return;
   }
 
-  // 读取配置文件获取路径
+  // 使用缓存的配置文件获取路径
   char csv_path[256] = "leaf_nodes.csv";
   char edited_path[256] = "leaf_nodes_edited.csv";
 
-  FILE *fp_cfg = fopen("data_config.json", "rb");
-  if (fp_cfg != NULL) {
-    fseek(fp_cfg, 0, SEEK_END);
-    long cfg_size = ftell(fp_cfg);
-    fseek(fp_cfg, 0, SEEK_SET);
-    char *cfg_buf = (char *) malloc((size_t) cfg_size + 1);
-    if (cfg_buf != NULL) {
-      fread(cfg_buf, 1, (size_t) cfg_size, fp_cfg);
-      cfg_buf[cfg_size] = '\0';
-      char *csv_path_ptr = mg_json_get_str(mg_str(cfg_buf), "$.csvFilePath");
-      if (csv_path_ptr != NULL) {
-        strncpy(csv_path, csv_path_ptr, sizeof(csv_path) - 1);
-        csv_path[sizeof(csv_path) - 1] = '\0';
-        free(csv_path_ptr);
-      }
-      char *edited_path_ptr = mg_json_get_str(mg_str(cfg_buf), "$.editedFilePath");
-      if (edited_path_ptr != NULL) {
-        strncpy(edited_path, edited_path_ptr, sizeof(edited_path) - 1);
-        edited_path[sizeof(edited_path) - 1] = '\0';
-        free(edited_path_ptr);
-      }
-      free(cfg_buf);
+  char *cfg_buf = get_config_buf();
+  if (cfg_buf != NULL) {
+    char *csv_path_ptr = mg_json_get_str(mg_str(cfg_buf), "$.csvFilePath");
+    if (csv_path_ptr != NULL) {
+      strncpy(csv_path, csv_path_ptr, sizeof(csv_path) - 1);
+      csv_path[sizeof(csv_path) - 1] = '\0';
+      free(csv_path_ptr);
     }
-    fclose(fp_cfg);
+    char *edited_path_ptr = mg_json_get_str(mg_str(cfg_buf), "$.editedFilePath");
+    if (edited_path_ptr != NULL) {
+      strncpy(edited_path, edited_path_ptr, sizeof(edited_path) - 1);
+      edited_path[sizeof(edited_path) - 1] = '\0';
+      free(edited_path_ptr);
+    }
   }
 
   FILE *fp_in = fopen(csv_path, "r");
@@ -488,36 +376,24 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
   if (page_size < 1) page_size = 20;
   if (page_size > 100) page_size = 100;
 
-  FILE *fp_cfg = fopen("data_config.json", "rb");
-  if (fp_cfg == NULL) {
+  // 使用缓存的配置文件（不要 free cfg_buf）
+  char *cfg_buf = get_config_buf();
+  if (cfg_buf == NULL) {
     mg_http_reply(c, 200, s_json_header, "{\"error\":\"Cannot read data_config.json\"}");
     return;
   }
-
-  fseek(fp_cfg, 0, SEEK_END);
-  long cfg_size = ftell(fp_cfg);
-  fseek(fp_cfg, 0, SEEK_SET);
-  char *cfg_buf = (char *) malloc((size_t) cfg_size + 1);
-  if (cfg_buf == NULL) {
-    fclose(fp_cfg);
-    mg_http_reply(c, 200, s_json_header, "{\"error\":\"Memory allocation failed\"}");
-    return;
-  }
-  fread(cfg_buf, 1, (size_t) cfg_size, fp_cfg);
-  fclose(fp_cfg);
-  cfg_buf[cfg_size] = '\0';
 
   char *csv_path_ptr = mg_json_get_str(mg_str(cfg_buf), "$.csvFilePath");
   char csv_path[256] = "leaf_nodes.csv";
   if (csv_path_ptr != NULL) {
     strncpy(csv_path, csv_path_ptr, sizeof(csv_path) - 1);
     csv_path[sizeof(csv_path) - 1] = '\0';
+    free(csv_path_ptr); // 修复内存泄漏
   }
 
   FILE *fp_data = fopen(csv_path, "r");
   if (fp_data == NULL) {
     mg_http_reply(c, 200, s_json_header, "{\"error\":\"Cannot read CSV\"}");
-    free(cfg_buf);
     return;
   }
 
@@ -529,7 +405,6 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
     } else {
       mg_http_reply(c, 200, s_json_header, "{\"config\":{\"fields\":[]},\"data\":{\"total\":0,\"nodes\":[]}}");
     }
-    free(cfg_buf);
     return;
   }
 
@@ -613,8 +488,15 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
     }
   }
 
+  // 单次扫描：计数匹配行并记录当前页的起始偏移量
+  int skip_count = (page - 1) * page_size;
+  long page_start_offset = -1;
   row_count = 0;
-  while (fgets(line, sizeof(line), fp_data) != NULL) {
+
+  while (1) {
+    long line_offset = ftell(fp_data);
+    if (fgets(line, sizeof(line), fp_data) == NULL) break;
+
     char *p = line;
     while (*p == ' ' || *p == '\t') p++;
     if (*p == '\0' || *p == '\n' || *p == '\r') continue;
@@ -640,17 +522,20 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
       }
     }
 
+    // 记录当前页第一行的文件偏移量
+    if (row_count == skip_count) {
+      page_start_offset = line_offset;
+    }
     row_count++;
   }
 
-  fseek(fp_data, 0, SEEK_SET);
-
-  long total_size = cfg_size + (long) page_size * 1024 + 2048;
+  // 分配响应缓冲区
+  size_t cfg_len = strlen(cfg_buf);
+  long total_size = (long) cfg_len + (long) page_size * 1024 + 2048;
   char *response = (char *) malloc((size_t) total_size);
   if (response == NULL) {
     fclose(fp_data);
     mg_http_reply(c, 200, s_json_header, "{\"error\":\"Memory allocation failed\"}");
-    free(cfg_buf);
     return;
   }
 
@@ -664,74 +549,70 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
     pos += snprintf(response + pos, total_size - pos, "[]");
   }
   pos += snprintf(response + pos, total_size - pos, "},");
-  free(cfg_buf);
   pos += snprintf(response + pos, total_size - pos, "\"data\":{\"total\":%d,\"nodes\":[", row_count);
 
+  // 定位到当前页的起始位置，只读取当前页的数据
   int first = 1;
   int count = 0;
-  int skip_count = (page - 1) * page_size;
-  int current_row = 0;
+  if (page_start_offset >= 0) {
+    fseek(fp_data, page_start_offset, SEEK_SET);
 
-  fgets(line, sizeof(line), fp_data);
+    while (fgets(line, sizeof(line), fp_data) != NULL && count < page_size) {
+      char *line_start = line;
+      while (*line_start == ' ' || *line_start == '\t') line_start++;
+      if (*line_start == '\0' || *line_start == '\n' || *line_start == '\r') continue;
 
-  while (fgets(line, sizeof(line), fp_data) != NULL && count < page_size) {
-    char *line_start = line;
-    while (*line_start == ' ' || *line_start == '\t') line_start++;
-    if (*line_start == '\0' || *line_start == '\n' || *line_start == '\r') continue;
-
-    if (online_filter[0] != '\0' && online_idx >= 0) {
-      char val[32];
-      if (get_csv_field(line_start, online_idx, val, sizeof(val)) != 0 || !is_value_in_list(val, online_filter)) continue;
-    }
-
-    if (camera_filter[0] != '\0' && camera_idx >= 0) {
-      char val[32];
-      if (get_csv_field(line_start, camera_idx, val, sizeof(val)) != 0 || !is_value_in_list(val, camera_filter)) continue;
-    }
-
-    if (operation_filter[0] != '\0') {
-      if (operation_idx >= 0) {
-        char val[64];
-        if (get_csv_field(line_start, operation_idx, val, sizeof(val)) != 0) continue;
-        if (is_value_in_list("0", operation_filter) && val[0] == '\0') {
-        } else if (!is_value_in_list(val, operation_filter)) {
-          continue;
-        }
+      if (online_filter[0] != '\0' && online_idx >= 0) {
+        char val[32];
+        if (get_csv_field(line_start, online_idx, val, sizeof(val)) != 0 || !is_value_in_list(val, online_filter)) continue;
       }
-    }
 
-    current_row++;
-    if (current_row <= skip_count) continue;
+      if (camera_filter[0] != '\0' && camera_idx >= 0) {
+        char val[32];
+        if (get_csv_field(line_start, camera_idx, val, sizeof(val)) != 0 || !is_value_in_list(val, camera_filter)) continue;
+      }
 
-    char *p = line;
-    while (*p != '\0' && *p != '\n' && *p != '\r') p++;
-    *p = '\0';
-
-    if (!first) pos += snprintf(response + pos, total_size - pos, ",");
-    first = 0;
-    count++;
-
-    pos += snprintf(response + pos, total_size - pos, "{");
-    for (int i = 0; i < field_key_count; i++) {
-      if (i > 0) pos += snprintf(response + pos, total_size - pos, ",");
-      pos += snprintf(response + pos, total_size - pos, "\"%s\":\"", field_keys[i]);
-
-      if (field_indices[i] >= 0) {
-        char field_val[512] = "";
-        get_csv_field(line_start, field_indices[i], field_val, sizeof(field_val));
-
-        const char *output_val = field_val;
-
-        for (int j = 0; output_val[j] != '\0'; j++) {
-          if (output_val[j] == '"' || output_val[j] == '\\') {
-            pos += snprintf(response + pos, total_size - pos, "\\");
+      if (operation_filter[0] != '\0') {
+        if (operation_idx >= 0) {
+          char val[64];
+          if (get_csv_field(line_start, operation_idx, val, sizeof(val)) != 0) continue;
+          if (is_value_in_list("0", operation_filter) && val[0] == '\0') {
+          } else if (!is_value_in_list(val, operation_filter)) {
+            continue;
           }
-          pos += snprintf(response + pos, total_size - pos, "%c", output_val[j]);
         }
       }
-      pos += snprintf(response + pos, total_size - pos, "\"");
+
+      char *p = line;
+      while (*p != '\0' && *p != '\n' && *p != '\r') p++;
+      *p = '\0';
+
+      if (!first) pos += snprintf(response + pos, total_size - pos, ",");
+      first = 0;
+      count++;
+
+      pos += snprintf(response + pos, total_size - pos, "{");
+      for (int i = 0; i < field_key_count; i++) {
+        if (i > 0) pos += snprintf(response + pos, total_size - pos, ",");
+        pos += snprintf(response + pos, total_size - pos, "\"%s\":\"", field_keys[i]);
+
+        if (field_indices[i] >= 0) {
+          char field_val[512] = "";
+          get_csv_field(line_start, field_indices[i], field_val, sizeof(field_val));
+
+          const char *output_val = field_val;
+
+          for (int j = 0; output_val[j] != '\0'; j++) {
+            if (output_val[j] == '"' || output_val[j] == '\\') {
+              pos += snprintf(response + pos, total_size - pos, "\\");
+            }
+            pos += snprintf(response + pos, total_size - pos, "%c", output_val[j]);
+          }
+        }
+        pos += snprintf(response + pos, total_size - pos, "\"");
+      }
+      pos += snprintf(response + pos, total_size - pos, "}");
     }
-    pos += snprintf(response + pos, total_size - pos, "}");
   }
 
   fclose(fp_data);
@@ -886,8 +767,6 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       handle_login(c, u);
     } else if (mg_match(hm->uri, mg_str("/api/nodes/get"), NULL)) {
       handle_nodes_get(c, hm);
-    } else if (mg_match(hm->uri, mg_str("/api/nodes/set"), NULL)) {
-      handle_nodes_set(c, hm->body);
     } else if (mg_match(hm->uri, mg_str("/api/nodes/batchset"), NULL)) {
       handle_nodes_batchset(c, hm->body);
     } else if (mg_match(hm->uri, mg_str("/api/#"), NULL) && u == NULL) {
