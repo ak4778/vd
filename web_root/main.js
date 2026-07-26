@@ -615,13 +615,13 @@ const App = function({}) {
   const [showSidebar, setShowSidebar] = useState(true);
   const [dbMode, setDbMode] = useState('');
 
-  const logout = () => fetch('api/logout').then(r => setUser(''));
+  const logout = () => fetch('api/logout', { credentials: 'include' }).then(r => setUser(''));
   const login = r => !r.ok ? setLoading(false) && setUser(null) : r.json()
       .then(r => setUser(r.user))
       .finally(r => setLoading(false));
 
   useEffect(() => {
-    fetch('api/login').then(login);
+    fetch('api/login', { credentials: 'include' }).then(login);
     fetch('api/mode/get')
       .then(r => r.json())
       .then(r => setDbMode(r.mode))

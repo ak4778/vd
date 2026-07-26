@@ -113,7 +113,7 @@ export function Login({loginFn, logoIcon, title, tipText}) {
   const onsubmit = function(ev) {
     const authhdr = 'Basic ' + btoa(user + ':' + pass);
     const headers = {Authorization: authhdr};
-    return fetch('api/login', {headers}).then(loginFn).finally(r => setPass(''));
+    return fetch('api/login', {headers, credentials: 'include'}).then(loginFn).finally(r => setPass(''));
   };
   return html`
 <div class="h-full flex items-center justify-center bg-slate-200">
@@ -136,7 +136,7 @@ export function Login({loginFn, logoIcon, title, tipText}) {
       <input type="password" autocomplete="current-password" required
         class="font-normal bg-white rounded border border-gray-300 w-full flex-1 py-0.5 px-2 text-gray-900 placeholder:text-gray-400 focus:outline-none sm:text-sm sm:leading-6 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500"
         oninput=${ev => setPass(ev.target.value)}
-        value=${pass} onchange=${onsubmit} />
+        value=${pass} />
     <//>
     <div class="mt-7">
       <${Button} title="Sign In" icon=${Icons.logout} onclick=${onsubmit} cls="flex w-full justify-center" />
