@@ -6,9 +6,11 @@ import { Icons, Login, Button, Notification, Pagination } from './components.js'
 
 const Logo = props => html`<svg class=${props.class} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12.87 12.85"><defs><style>.ll-cls-1{fill:none;stroke:#000;stroke-miterlimit:10;stroke-width:0.5px;}</style></defs><g id="Layer_2" data-name="Layer 2"><g id="Layer_1-2" data-name="Layer 1"><path class="ll-cls-1" d="M12.62,1.82V8.91A1.58,1.58,0,0,1,11,10.48H4a1.44,1.44,0,0,1-1-.37A.69.69,0,0,1,2.84,10l-.1-.12a.81.81,0,0,1-.15-.48V5.57a.87.87,0,0,1,.86-.86H4.73V7.28a.86.86,0,0,0,.86.85H9.42a.85.85,0,0,0,.85-.85V3.45A.86.86,0,0,0,10.13,3,.76.76,0,0,0,10,2.84a.29.29,0,0,0-.12-.1,1.49,1.49,0,0,0-1-.37H2.39V1.82A1.57,1.57,0,0,1,4,.25H11A1.57,1.57,0,0,1,12.62,1.82Z"/><path class="ll-cls-1" d="M10.48,10.48V11A1.58,1.58,0,0,1,8.9,12.6H1.82A1.57,1.57,0,0,1,.25,11V3.94A1.57,1.57,0,0,1,1.82,2.37H8.9a1.49,1.49,0,0,1,1,.37l.12.1a.76.76,0,0,1,.11.14.86.86,0,0,1,.14.47V7.28a.85.85,0,0,1-.85.85H8.13V5.57a.86.86,0,0,0-.85-.86H3.45a.87.87,0,0,0-.86.86V9.4a.81.81,0,0,0,.15.48l.1.12a.69.69,0,0,0,.13.11,1.44,1.44,0,0,0,1,.37Z"/></g></g></svg>`;
 
-function Header({logout, user, setShowSidebar, showSidebar}) {
+function Header({logout, user, setShowSidebar, showSidebar, dbMode}) {
+  const modeColor = dbMode === 'SQLite' ? 'text-green-600' : 'text-blue-600';
+  const modeBadge = dbMode === 'SQLite' ? 'bg-green-100' : 'bg-blue-100';
   return html`
-<div class="bg-white sticky top-0 z-[48] xw-full border-b py-2 ${showSidebar && 'pl-72'} transition-all duration-300 transform">
+<div class="bg-white sticky top-0 z-[48] xw-full border-b py-2 ${showSidebar && 'pl-40'} transition-all duration-300 transform">
   <div class="px-2 w-full py-0 my-0 flex items-center">
     <button type="button" onclick=${ev => setShowSidebar(v => !v)} class="text-slate-400">
       <${Icons.bars3} class="h-6" />
@@ -17,6 +19,10 @@ function Header({logout, user, setShowSidebar, showSidebar}) {
       <div class="relative flex flex-1"><//>
       <div class="flex items-center gap-x-4 lg:gap-x-6">
         <span class="text-sm text-slate-400">logged in as: ${user}<//>
+        <div class="hidden lg:block lg:h-4 lg:w-px lg:bg-gray-200" aria-hidden="true"><//>
+        <span class="text-sm ${modeColor}">
+          <span class="px-2 py-0.5 rounded text-xs font-medium ${modeBadge}">${dbMode}模式</span>
+        <//>
         <div class="hidden lg:block lg:h-4 lg:w-px lg:bg-gray-200" aria-hidden="true"><//>
         <${Button} title="Logout" icon=${Icons.logout} onclick=${logout} />
       <//>
@@ -36,12 +42,12 @@ function Sidebar({url, show}) {
   return html`
 <div class="bg-violet-100 hs-overlay hs-overlay-open:translate-x-0
             -translate-x-full transition-all duration-300 transform
-            fixed top-0 left-0 bottom-0 z-[60] w-72 bg-white border-r
+            fixed top-0 left-0 bottom-0 z-[60] w-40 bg-white border-r
             border-gray-200 overflow-y-auto scrollbar-y
             ${show && 'translate-x-0'} right-auto bottom-0">
   <div class="flex flex-col m-4 gap-y-6">
     <div class="flex h-10 shrink-0 items-center gap-x-4 font-bold text-xl text-slate-500">
-      <${Logo} class="h-full"/> Your Brand
+      <${Logo} class="h-full"/> GDDL 
     <//>
     <div class="flex flex-1 flex-col">
       <${NavLink} title="视频设备" icon=${Icons.camera} href="/events" url=${url} />
@@ -82,7 +88,7 @@ function Events({}) {
     if (cameraFilter.length > 0) url += `&cameraType=${cameraFilter.join(',')}`;
     const mappedOpFilter = opFilter ? opFilter.map(v => v === '' ? '0' : v) : [];
     url += `&operation=${encodeURIComponent(mappedOpFilter.join(','))}`;
-    fetch(url, { method: 'GET', cache: 'no-cache' })
+    fetch(url, { method: 'GET', cache: 'no-cache', credentials: 'include' })
       .then(r => r.json())
       .then(r => {
         const newFields = r.config && r.config.fields ? r.config.fields : [];
@@ -184,6 +190,7 @@ function Events({}) {
     setPage(newPage);
     localStorage.setItem('page', newPage.toString());
     setSelectedNodes([]);
+    setBatchValue('');
     loadData(newPage, isOnlineFilter, cameraTypeFilter, operationFilter);
   };
 
@@ -322,6 +329,7 @@ function Events({}) {
       ...prev,
       [nodeId]: value
     }));
+    setHasPendingChanges(true);
   };
 
   const handleCustomOperationChange = (nodeId, value) => {
@@ -329,6 +337,7 @@ function Events({}) {
       ...prev,
       [nodeId]: value
     }));
+    setHasPendingChanges(true);
   };
 
   const toggleSelectNode = (nodeId) => {
@@ -383,17 +392,20 @@ function Events({}) {
     // 一次性发送所有修改
     const updates = allChanges.map(nodeId => {
       const node = data.nodes.find(n => n.id === nodeId);
+      const op = editedOperations[nodeId];
+      const customOp = editedCustomOperations[nodeId];
       return {
         id: nodeId,
-        operation: editedOperations[nodeId] || (node ? node.operation : ''),
-        customOperation: editedCustomOperations[nodeId] || (node ? node.customOperation : '')
+        operation: op !== undefined ? op : (node ? node.operation : ''),
+        customOperation: customOp !== undefined ? customOp : (node ? node.customOperation : '')
       };
     });
 
     fetch(`api/nodes/batchset`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ updates })
+      body: JSON.stringify({ updates }),
+      credentials: 'include'
     })
     .then(r => r.json())
     .then(r => {
@@ -403,10 +415,12 @@ function Events({}) {
           ...prev,
           nodes: prev.nodes.map(node => {
             if (allChanges.includes(node.id)) {
+              const op = editedOperations[node.id];
+              const customOp = editedCustomOperations[node.id];
               return {
                 ...node,
-                operation: editedOperations[node.id] || node.operation,
-                customOperation: editedCustomOperations[node.id] || node.customOperation
+                operation: op !== undefined ? op : node.operation,
+                customOperation: customOp !== undefined ? customOp : node.customOperation
               };
             }
             return node;
@@ -532,7 +546,6 @@ return html`
               <option value="1">重点区域</option>
               <option value="2">高风险作业</option>
               <option value="3">应急值守</option>
-              <option value="4">自定义</option>
             </select>
           `}
           ${batchField === 'customOperation' && html`
@@ -591,13 +604,20 @@ const App = function({}) {
   const [url, setUrl] = useState('/');
   const [user, setUser] = useState('');
   const [showSidebar, setShowSidebar] = useState(true);
+  const [dbMode, setDbMode] = useState('');
 
   const logout = () => fetch('api/logout').then(r => setUser(''));
   const login = r => !r.ok ? setLoading(false) && setUser(null) : r.json()
       .then(r => setUser(r.user))
       .finally(r => setLoading(false));
 
-  useEffect(() => fetch('api/login').then(login), []);
+  useEffect(() => {
+    fetch('api/login').then(login);
+    fetch('api/mode/get')
+      .then(r => r.json())
+      .then(r => setDbMode(r.mode))
+      .catch(e => setDbMode('Unknown'));
+  }, []);
 
   if (loading) return '';  // Show blank page on initial load
   if (!user) return html`<${Login} loginFn=${login} logoIcon=${Logo}
@@ -607,8 +627,8 @@ const App = function({}) {
   return html`
 <div class="min-h-screen bg-slate-100 flex flex-col">
   <${Sidebar} url=${url} show=${showSidebar} />
-  <${Header} logout=${logout} user=${user} showSidebar=${showSidebar} setShowSidebar=${setShowSidebar} />
-  <div class="flex-1 ${showSidebar && 'pl-72'} transition-all duration-300 transform">
+  <${Header} logout=${logout} user=${user} showSidebar=${showSidebar} setShowSidebar=${setShowSidebar} dbMode=${dbMode} />
+  <div class="flex-1 ${showSidebar && 'pl-40'} transition-all duration-300 transform">
     <${Events} />
   <//>
 <//>`;

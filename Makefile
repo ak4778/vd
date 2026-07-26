@@ -1,8 +1,16 @@
 PROG ?= ./vvvv       # Program we are building
 DELETE = rm -rf         # Command to remove files
 OUT ?= -o $(PROG)       # Compiler argument for output file
-SOURCES = main.c mongoose.c net.c   # Source code files
+SOURCES = main.c mongoose.c net.c data_source.c   # Source code files
 CFLAGS = -W -Wall -Wextra -g3 -ggdb -O0 -fno-omit-frame-pointer -I.                # Build options
+
+# Database mode: USE_SQLITE or CSV (default)
+# To use SQLite: make USE_SQLITE=1
+# To use CSV (default): make
+ifeq ($(USE_SQLITE),1)
+  CFLAGS += -DUSE_SQLITE
+  SOURCES += sqlite3.c
+endif
 
 ifeq ($(OS),Windows_NT)         # Windows settings. Assume MinGW compiler. To use VC: make CC=cl CFLAGS=/MD OUT=/Feprog.exe
   PROG = vvvv.exe            # Use .exe suffix for the binary

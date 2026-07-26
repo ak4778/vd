@@ -2,6 +2,13 @@
 // All rights reserved
 
 #include "net.h"
+#include "data_source.h"
+
+#ifdef USE_SQLITE
+#define DB_MODE "SQLite"
+#else
+#define DB_MODE "CSV"
+#endif
 
 struct user {
   const char *name, *pass, *access_token;
@@ -45,54 +52,6 @@ static char *get_config_buf(void) {
   g_cfg_buf[size] = '\0';
 
   return g_cfg_buf;
-}
-
-static char *url_decode(const char *str) {
-  if (str == NULL) return NULL;
-  int len = strlen(str);
-  char *result = (char *) malloc(len + 1);
-  if (result == NULL) return NULL;
-  int i = 0, j = 0;
-  while (i < len) {
-    if (str[i] == '%' && i + 2 < len) {
-      char hex[3] = {str[i+1], str[i+2], '\0'};
-      result[j++] = (char) strtol(hex, NULL, 16);
-      i += 3;
-    } else if (str[i] == '+') {
-      result[j++] = ' ';
-      i++;
-    } else {
-      result[j++] = str[i++];
-    }
-  }
-  result[j] = '\0';
-  return result;
-}
-
-static int is_value_in_list(const char *value, const char *list) {
-  if (value == NULL || list == NULL || *list == '\0') return 0;
-  char *copy = strdup(list);
-  if (copy == NULL) return 0;
-  char *token = strtok(copy, ",");
-  while (token != NULL) {
-    char *decoded_token = url_decode(token);
-    if (decoded_token != NULL) {
-      if (strcmp(decoded_token, value) == 0) {
-        free(decoded_token);
-        free(copy);
-        return 1;
-      }
-      free(decoded_token);
-    } else {
-      if (strcmp(token, value) == 0) {
-        free(copy);
-        return 1;
-      }
-    }
-    token = strtok(NULL, ",");
-  }
-  free(copy);
-  return 0;
 }
 
 static void unicode_to_utf8(unsigned int codepoint, char *out, int *out_len) {
@@ -156,34 +115,6 @@ static int my_json_unescape(struct mg_str json, const char *path, char *to, size
   return 0;
 }
 
-static int get_csv_field(char *line, int index, char *buf, int buf_len) {
-  char *p = line;
-  for (int i = 0; i < index; i++) {
-    if (*p == '"') {
-      p++;
-      while (*p != '\0' && *p != '"') p++;
-      if (*p == '"') p++;
-    } else {
-      while (*p != '\0' && *p != ',') p++;
-    }
-    if (*p == ',') p++;
-    if (*p == '\0') return -1;
-  }
-  int len = 0;
-  if (*p == '"') {
-    p++;
-    while (*p != '\0' && *p != '"' && len < buf_len - 1) {
-      buf[len++] = *p++;
-    }
-  } else {
-    while (*p != '\0' && *p != ',' && len < buf_len - 1) {
-      buf[len++] = *p++;
-    }
-  }
-  buf[len] = '\0';
-  return 0;
-}
-
 int ui_event_next(int no, struct ui_event *e) {
   if (no < 0 || no >= MAX_EVENTS_NO) return 0;
 
@@ -200,15 +131,9 @@ int ui_event_next(int no, struct ui_event *e) {
   return no + 1;
 }
 
-// 批量更新节点 - 一次性处理所有修改，只读写一次CSV文件
+// 批量更新节点 - 使用数据库抽象层
 static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
-  struct update_entry {
-    char id[64];
-    char operation[64];
-    char custom_operation[256];
-  };
-
-  struct update_entry updates[256];
+  struct ds_node updates[256];
   int update_count = 0;
 
   // 遍历 JSON 数组，收集所有 updates
@@ -225,7 +150,13 @@ static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
     my_json_unescape(body, path, updates[update_count].operation, sizeof(updates[update_count].operation));
 
     snprintf(path, sizeof(path), "$.updates[%d].customOperation", i);
-    my_json_unescape(body, path, updates[update_count].custom_operation, sizeof(updates[update_count].custom_operation));
+    my_json_unescape(body, path, updates[update_count].customOperation, sizeof(updates[update_count].customOperation));
+
+    // 其他字段保持为空，数据库层会处理
+    updates[update_count].name[0] = '\0';
+    updates[update_count].channelCode[0] = '\0';
+    updates[update_count].isOnline[0] = '\0';
+    updates[update_count].cameraType[0] = '\0';
 
     update_count++;
   }
@@ -235,124 +166,12 @@ static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
     return;
   }
 
-  // 使用缓存的配置文件获取路径
-  char csv_path[256] = "leaf_nodes.csv";
-  char edited_path[256] = "leaf_nodes_edited.csv";
-
-  char *cfg_buf = get_config_buf();
-  if (cfg_buf != NULL) {
-    char *csv_path_ptr = mg_json_get_str(mg_str(cfg_buf), "$.csvFilePath");
-    if (csv_path_ptr != NULL) {
-      strncpy(csv_path, csv_path_ptr, sizeof(csv_path) - 1);
-      csv_path[sizeof(csv_path) - 1] = '\0';
-      free(csv_path_ptr);
-    }
-    char *edited_path_ptr = mg_json_get_str(mg_str(cfg_buf), "$.editedFilePath");
-    if (edited_path_ptr != NULL) {
-      strncpy(edited_path, edited_path_ptr, sizeof(edited_path) - 1);
-      edited_path[sizeof(edited_path) - 1] = '\0';
-      free(edited_path_ptr);
-    }
+  // 使用数据库抽象层更新
+  if (ds_update_nodes(updates, update_count) == 0) {
+    mg_http_reply(c, 200, s_json_header, "{\"status\":\"true\",\"message\":\"Success\",\"count\":%d}", update_count);
+  } else {
+    mg_http_reply(c, 200, s_json_header, "{\"status\":\"false\",\"message\":\"Update failed\"}");
   }
-
-  FILE *fp_in = fopen(csv_path, "r");
-  if (fp_in == NULL) {
-    mg_http_reply(c, 200, s_json_header, "{\"status\":\"false\",\"message\":\"Cannot read CSV\"}");
-    return;
-  }
-
-  FILE *fp_out = fopen(edited_path, "w");
-  if (fp_out == NULL) {
-    fclose(fp_in);
-    mg_http_reply(c, 200, s_json_header, "{\"status\":\"false\",\"message\":\"Cannot write CSV\"}");
-    return;
-  }
-
-  char line[4096];
-  int operation_idx = -1;
-  int custom_operation_idx = -1;
-  int header_count = 0;
-
-  // 读取表头
-  if (fgets(line, sizeof(line), fp_in) != NULL) {
-    fprintf(fp_out, "%s", line);
-
-    char *h = line;
-    if ((unsigned char) h[0] == 0xEF && (unsigned char) h[1] == 0xBB && (unsigned char) h[2] == 0xBF) {
-      h += 3;
-    }
-    while (*h != '\0' && *h != '\n' && header_count < 32) {
-      char *end = h;
-      while (*end != '\0' && *end != ',' && *end != '\n' && *end != '\r') end++;
-      int len = (int) (end - h);
-      if (len > 0) {
-        char header[64];
-        strncpy(header, h, len);
-        header[len] = '\0';
-        if (strcmp(header, "operation") == 0) operation_idx = header_count;
-        if (strcmp(header, "customOperation") == 0) custom_operation_idx = header_count;
-        header_count++;
-      }
-      while ((*end == ',' || *end == '\n' || *end == '\r') && *end != '\0') end++;
-      h = end;
-    }
-  }
-
-  // 遍历数据行，一次性处理所有更新
-  while (fgets(line, sizeof(line), fp_in) != NULL) {
-    char *p = line;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p == '\0' || *p == '\n' || *p == '\r') {
-      fprintf(fp_out, "%s", line);
-      continue;
-    }
-
-    char row_id[64] = "";
-    get_csv_field(p, 0, row_id, sizeof(row_id));
-
-    // 查找是否有匹配的 update
-    int match_idx = -1;
-    for (int i = 0; i < update_count; i++) {
-      if (strcmp(row_id, updates[i].id) == 0) {
-        match_idx = i;
-        break;
-      }
-    }
-
-    if (match_idx >= 0) {
-      char new_line[4096] = "";
-      int first = 1;
-      for (int i = 0; i < header_count; i++) {
-        if (!first) strcat(new_line, ",");
-        first = 0;
-        if (i == operation_idx) {
-          strcat(new_line, updates[match_idx].operation);
-        } else if (i == custom_operation_idx) {
-          strcat(new_line, updates[match_idx].custom_operation);
-        } else {
-          char field_val[512] = "";
-          get_csv_field(p, i, field_val, sizeof(field_val));
-          strcat(new_line, field_val);
-        }
-      }
-      char *end = line;
-      while (*end != '\0' && *end != '\n' && *end != '\r') end++;
-      if (*end == '\n' || *end == '\r') {
-        strcat(new_line, end);
-      }
-      fprintf(fp_out, "%s", new_line);
-    } else {
-      fprintf(fp_out, "%s", line);
-    }
-  }
-
-  fclose(fp_in);
-  fclose(fp_out);
-
-  remove(csv_path);
-  rename(edited_path, csv_path);
-
-  mg_http_reply(c, 200, s_json_header, "{\"status\":\"true\",\"message\":\"Success\",\"count\":%d}", update_count);
 }
 
 static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm) {
@@ -383,22 +202,8 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
     return;
   }
 
-  char *csv_path_ptr = mg_json_get_str(mg_str(cfg_buf), "$.csvFilePath");
-  char csv_path[256] = "leaf_nodes.csv";
-  if (csv_path_ptr != NULL) {
-    strncpy(csv_path, csv_path_ptr, sizeof(csv_path) - 1);
-    csv_path[sizeof(csv_path) - 1] = '\0';
-    free(csv_path_ptr); // 修复内存泄漏
-  }
-
-  FILE *fp_data = fopen(csv_path, "r");
-  if (fp_data == NULL) {
-    mg_http_reply(c, 200, s_json_header, "{\"error\":\"Cannot read CSV\"}");
-    return;
-  }
-
+  // 如果过滤器不完整，返回空数据和配置
   if (online_filter[0] == '\0' || camera_filter[0] == '\0' || operation_filter[0] == '\0') {
-    fclose(fp_data);
     struct mg_str fields_tok = mg_json_get_tok(mg_str(cfg_buf), "$.fields");
     if (fields_tok.len > 0) {
       mg_http_reply(c, 200, s_json_header, "{\"config\":{\"fields\":%.*s},\"data\":{\"total\":0,\"nodes\":[]}}", (int) fields_tok.len, fields_tok.buf);
@@ -408,18 +213,9 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
     return;
   }
 
-  char headers[32][64] = {""};
-  int header_count = 0;
-  int row_count = 0;
-  int online_idx = -1;
-  int camera_idx = -1;
-  int operation_idx = -1;
-  char line[4096];
-  
   // 解析 fields 配置，只返回配置中定义的字段
   char field_keys[32][64] = {""};
   int field_key_count = 0;
-  int field_indices[32];
   struct mg_str cfg_fields_tok = mg_json_get_tok(mg_str(cfg_buf), "$.fields");
   if (cfg_fields_tok.len > 0) {
     char *fields_str = (char *) malloc((size_t) cfg_fields_tok.len + 1);
@@ -450,83 +246,19 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
     }
   }
 
-  if (fgets(line, sizeof(line), fp_data) == NULL) {
-    fclose(fp_data);
-    mg_http_reply(c, 200, s_json_header, "{\"error\":\"Empty CSV\"}");
-    free(cfg_buf);
+  // 使用数据源抽象层查询数据
+  struct ds_query query = {
+    .isOnline = online_filter[0] != '\0' ? online_filter : NULL,
+    .cameraType = camera_filter[0] != '\0' ? camera_filter : NULL,
+    .operation = operation_filter[0] != '\0' ? operation_filter : NULL,
+    .page = page,
+    .pageSize = page_size
+  };
+
+  struct ds_result result = {0};
+  if (ds_get_nodes(&query, &result) != 0) {
+    mg_http_reply(c, 200, s_json_header, "{\"error\":\"Database query failed\"}");
     return;
-  }
-
-  char *h = line;
-  if ((unsigned char) h[0] == 0xEF && (unsigned char) h[1] == 0xBB && (unsigned char) h[2] == 0xBF) {
-    h += 3;
-  }
-  while (*h != '\0' && *h != '\n' && header_count < 32) {
-    char *end = h;
-    while (*end != '\0' && *end != ',' && *end != '\n' && *end != '\r') end++;
-    int len = (int) (end - h);
-    if (len > 0 && (size_t) len < sizeof(headers[0])) {
-      strncpy(headers[header_count], h, len);
-      headers[header_count][len] = '\0';
-      if (strcmp(headers[header_count], "isOnline") == 0) online_idx = header_count;
-      if (strcmp(headers[header_count], "cameraType") == 0) camera_idx = header_count;
-      if (strcmp(headers[header_count], "operation") == 0) operation_idx = header_count;
-      header_count++;
-    }
-    while ((*end == ',' || *end == '\n' || *end == '\r') && *end != '\0') end++;
-    h = end;
-  }
-  
-  // 建立字段 key 到 CSV 列索引的映射
-  for (int i = 0; i < field_key_count; i++) {
-    field_indices[i] = -1;
-    for (int j = 0; j < header_count; j++) {
-      if (strcmp(field_keys[i], headers[j]) == 0) {
-        field_indices[i] = j;
-        break;
-      }
-    }
-  }
-
-  // 单次扫描：计数匹配行并记录当前页的起始偏移量
-  int skip_count = (page - 1) * page_size;
-  long page_start_offset = -1;
-  row_count = 0;
-
-  while (1) {
-    long line_offset = ftell(fp_data);
-    if (fgets(line, sizeof(line), fp_data) == NULL) break;
-
-    char *p = line;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p == '\0' || *p == '\n' || *p == '\r') continue;
-
-    if (online_filter[0] != '\0' && online_idx >= 0) {
-      char val[32];
-      if (get_csv_field(p, online_idx, val, sizeof(val)) != 0 || !is_value_in_list(val, online_filter)) continue;
-    }
-
-    if (camera_filter[0] != '\0' && camera_idx >= 0) {
-      char val[32];
-      if (get_csv_field(p, camera_idx, val, sizeof(val)) != 0 || !is_value_in_list(val, camera_filter)) continue;
-    }
-
-    if (operation_filter[0] != '\0') {
-      if (operation_idx >= 0) {
-        char val[64];
-        if (get_csv_field(p, operation_idx, val, sizeof(val)) != 0) continue;
-        if (is_value_in_list("0", operation_filter) && val[0] == '\0') {
-        } else if (!is_value_in_list(val, operation_filter)) {
-          continue;
-        }
-      }
-    }
-
-    // 记录当前页第一行的文件偏移量
-    if (row_count == skip_count) {
-      page_start_offset = line_offset;
-    }
-    row_count++;
   }
 
   // 分配响应缓冲区
@@ -534,7 +266,7 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
   long total_size = (long) cfg_len + (long) page_size * 1024 + 2048;
   char *response = (char *) malloc((size_t) total_size);
   if (response == NULL) {
-    fclose(fp_data);
+    if (result.nodes != NULL) free(result.nodes);
     mg_http_reply(c, 200, s_json_header, "{\"error\":\"Memory allocation failed\"}");
     return;
   }
@@ -549,77 +281,58 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
     pos += snprintf(response + pos, total_size - pos, "[]");
   }
   pos += snprintf(response + pos, total_size - pos, "},");
-  pos += snprintf(response + pos, total_size - pos, "\"data\":{\"total\":%d,\"nodes\":[", row_count);
+  pos += snprintf(response + pos, total_size - pos, "\"data\":{\"total\":%d,\"nodes\":[", result.total);
 
-  // 定位到当前页的起始位置，只读取当前页的数据
   int first = 1;
-  int count = 0;
-  if (page_start_offset >= 0) {
-    fseek(fp_data, page_start_offset, SEEK_SET);
+  for (int i = 0; i < result.count; i++) {
+    struct ds_node *node = &result.nodes[i];
 
-    while (fgets(line, sizeof(line), fp_data) != NULL && count < page_size) {
-      char *line_start = line;
-      while (*line_start == ' ' || *line_start == '\t') line_start++;
-      if (*line_start == '\0' || *line_start == '\n' || *line_start == '\r') continue;
+    if (!first) pos += snprintf(response + pos, total_size - pos, ",");
+    first = 0;
 
-      if (online_filter[0] != '\0' && online_idx >= 0) {
-        char val[32];
-        if (get_csv_field(line_start, online_idx, val, sizeof(val)) != 0 || !is_value_in_list(val, online_filter)) continue;
-      }
+    pos += snprintf(response + pos, total_size - pos, "{");
+    for (int j = 0; j < field_key_count; j++) {
+      if (j > 0) pos += snprintf(response + pos, total_size - pos, ",");
+      pos += snprintf(response + pos, total_size - pos, "\"%s\":\"", field_keys[j]);
 
-      if (camera_filter[0] != '\0' && camera_idx >= 0) {
-        char val[32];
-        if (get_csv_field(line_start, camera_idx, val, sizeof(val)) != 0 || !is_value_in_list(val, camera_filter)) continue;
-      }
+      const char *field_val = "";
+      if (strcmp(field_keys[j], "id") == 0) field_val = node->id;
+      else if (strcmp(field_keys[j], "name") == 0) field_val = node->name;
+      else if (strcmp(field_keys[j], "channelCode") == 0) field_val = node->channelCode;
+      else if (strcmp(field_keys[j], "isOnline") == 0) field_val = node->isOnline;
+      else if (strcmp(field_keys[j], "cameraType") == 0) field_val = node->cameraType;
+      else if (strcmp(field_keys[j], "operation") == 0) field_val = node->operation;
+      else if (strcmp(field_keys[j], "customOperation") == 0) field_val = node->customOperation;
 
-      if (operation_filter[0] != '\0') {
-        if (operation_idx >= 0) {
-          char val[64];
-          if (get_csv_field(line_start, operation_idx, val, sizeof(val)) != 0) continue;
-          if (is_value_in_list("0", operation_filter) && val[0] == '\0') {
-          } else if (!is_value_in_list(val, operation_filter)) {
-            continue;
-          }
+      for (int k = 0; field_val[k] != '\0'; k++) {
+        if (field_val[k] == '"' || field_val[k] == '\\') {
+          pos += snprintf(response + pos, total_size - pos, "\\%c", field_val[k]);
+        } else if (field_val[k] == '\n') {
+          pos += snprintf(response + pos, total_size - pos, "\\n");
+        } else if (field_val[k] == '\r') {
+          pos += snprintf(response + pos, total_size - pos, "\\r");
+        } else if (field_val[k] == '\t') {
+          pos += snprintf(response + pos, total_size - pos, "\\t");
+        } else if (field_val[k] == '\b') {
+          pos += snprintf(response + pos, total_size - pos, "\\b");
+        } else if (field_val[k] == '\f') {
+          pos += snprintf(response + pos, total_size - pos, "\\f");
+        } else if ((unsigned char)field_val[k] < 0x20) {
+          pos += snprintf(response + pos, total_size - pos, "\\u%04x", (unsigned char)field_val[k]);
+        } else {
+          pos += snprintf(response + pos, total_size - pos, "%c", field_val[k]);
         }
       }
-
-      char *p = line;
-      while (*p != '\0' && *p != '\n' && *p != '\r') p++;
-      *p = '\0';
-
-      if (!first) pos += snprintf(response + pos, total_size - pos, ",");
-      first = 0;
-      count++;
-
-      pos += snprintf(response + pos, total_size - pos, "{");
-      for (int i = 0; i < field_key_count; i++) {
-        if (i > 0) pos += snprintf(response + pos, total_size - pos, ",");
-        pos += snprintf(response + pos, total_size - pos, "\"%s\":\"", field_keys[i]);
-
-        if (field_indices[i] >= 0) {
-          char field_val[512] = "";
-          get_csv_field(line_start, field_indices[i], field_val, sizeof(field_val));
-
-          const char *output_val = field_val;
-
-          for (int j = 0; output_val[j] != '\0'; j++) {
-            if (output_val[j] == '"' || output_val[j] == '\\') {
-              pos += snprintf(response + pos, total_size - pos, "\\");
-            }
-            pos += snprintf(response + pos, total_size - pos, "%c", output_val[j]);
-          }
-        }
-        pos += snprintf(response + pos, total_size - pos, "\"");
-      }
-      pos += snprintf(response + pos, total_size - pos, "}");
+      pos += snprintf(response + pos, total_size - pos, "\"");
     }
+    pos += snprintf(response + pos, total_size - pos, "}");
   }
-
-  fclose(fp_data);
 
   pos += snprintf(response + pos, total_size - pos, "]}}");
 
   mg_http_reply(c, 200, s_json_header, "%s", response);
+
+  if (result.nodes != NULL) free(result.nodes);
   free(response);
 }
 
@@ -765,6 +478,8 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
 
     if (mg_match(hm->uri, mg_str("/api/login"), NULL)) {
       handle_login(c, u);
+    } else if (mg_match(hm->uri, mg_str("/api/mode/get"), NULL)) {
+      mg_http_reply(c, 200, s_json_header, "{\"mode\":\"%s\"}", DB_MODE);
     } else if (mg_match(hm->uri, mg_str("/api/nodes/get"), NULL)) {
       handle_nodes_get(c, hm);
     } else if (mg_match(hm->uri, mg_str("/api/nodes/batchset"), NULL)) {
@@ -797,6 +512,7 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
 
 void web_init(struct mg_mgr *mgr) {
   s_settings.device_name = strdup("My Device");
+  MG_INFO(("Web server starting in %s mode", DB_MODE));
   mg_http_listen(mgr, HTTP_URL, fn, NULL);
   mg_http_listen(mgr, HTTPS_URL, fn, NULL);
 }
