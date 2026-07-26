@@ -10,6 +10,7 @@
 
 #ifdef USE_SQLITE
 static sqlite3 *s_db = NULL;
+static int s_db_file_exists = 0;
 
 static int exec_sql(const char *sql) {
   char *errmsg;
@@ -23,6 +24,11 @@ static int exec_sql(const char *sql) {
 }
 
 int ds_init(const char *path) {
+  // Check if database file exists before opening
+  FILE *fp = fopen(path, "r");
+  int file_exists = (fp != NULL);
+  if (file_exists) fclose(fp);
+  
   int rc = sqlite3_open(path, &s_db);
   if (rc != SQLITE_OK) {
     fprintf(stderr, "Cannot open database: %s\n", sqlite3_errmsg(s_db));
@@ -47,6 +53,9 @@ int ds_init(const char *path) {
     s_db = NULL;
     return -1;
   }
+  
+  // Store file existence status
+  s_db_file_exists = file_exists;
 
   return 0;
 }
@@ -56,6 +65,29 @@ void ds_cleanup(void) {
     sqlite3_close(s_db);
     s_db = NULL;
   }
+}
+
+int ds_is_available(void) {
+  if (s_db == NULL) return 0;
+  
+  // SQLite creates the file automatically when opened, so we check if it existed before
+  if (!s_db_file_exists) return 0;
+  
+  // Check if database has any data (count > 0)
+  sqlite3_stmt *stmt;
+  int rc = sqlite3_prepare_v2(s_db, "SELECT COUNT(*) FROM nodes", -1, &stmt, NULL);
+  if (rc != SQLITE_OK) return 0;
+  
+  rc = sqlite3_step(stmt);
+  if (rc != SQLITE_ROW) {
+    sqlite3_finalize(stmt);
+    return 0;
+  }
+  
+  int count = sqlite3_column_int(stmt, 0);
+  sqlite3_finalize(stmt);
+  
+  return count > 0;
 }
 
 int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
@@ -288,6 +320,14 @@ static int is_value_in_list(const char *value, const char *list) {
 int ds_init(const char *path) {
   if (path == NULL) return -1;
   g_csv_path = strdup(path);
+  
+  // Check if CSV file exists
+  FILE *fp = fopen(g_csv_path, "rb");
+  if (fp == NULL) {
+    fprintf(stderr, "Warning: CSV file %s not found\n", g_csv_path);
+  } else {
+    fclose(fp);
+  }
   return 0;
 }
 
@@ -298,10 +338,18 @@ void ds_cleanup(void) {
   }
 }
 
+int ds_is_available(void) {
+  if (g_csv_path == NULL) return 0;
+  FILE *fp = fopen(g_csv_path, "rb");
+  if (fp == NULL) return 0;
+  fclose(fp);
+  return 1;
+}
+
 int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
   if (g_csv_path == NULL || query == NULL || result == NULL) return -1;
 
-  FILE *fp = fopen(g_csv_path, "r");
+  FILE *fp = fopen(g_csv_path, "rb");
   if (fp == NULL) return -1;
 
   char line[4096];
@@ -455,7 +503,7 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
 int ds_update_nodes(struct ds_node *nodes, int count) {
   if (g_csv_path == NULL || nodes == NULL || count <= 0) return -1;
 
-  FILE *fp_in = fopen(g_csv_path, "r");
+  FILE *fp_in = fopen(g_csv_path, "rb");
   if (fp_in == NULL) return -1;
 
   char edited_path[256];

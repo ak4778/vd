@@ -36,6 +36,9 @@ void ds_cleanup(void);
 int ds_get_nodes(struct ds_query *query, struct ds_result *result);
 int ds_update_nodes(struct ds_node *nodes, int count);
 
+// Check if data source is available (file exists for CSV, database open for SQLite)
+int ds_is_available(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -6,8 +6,10 @@
 
 #ifdef USE_SQLITE
 #define DS_MODE "SQLite"
+#define DS_MODE_TYPE 1
 #else
 #define DS_MODE "CSV"
+#define DS_MODE_TYPE 0
 #endif
 
 struct user {
@@ -202,8 +204,10 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
     return;
   }
 
-  // 如果过滤器不完整，返回空数据和配置
-  if (online_filter[0] == '\0' || camera_filter[0] == '\0' || operation_filter[0] == '\0') {
+  // 如果没有任何过滤器，返回空数据和配置（前端需要先设置过滤器）
+  // 但如果有部分过滤器，仍然查询数据
+  int has_filter = online_filter[0] != '\0' || camera_filter[0] != '\0' || operation_filter[0] != '\0';
+  if (!has_filter) {
     struct mg_str fields_tok = mg_json_get_tok(mg_str(cfg_buf), "$.fields");
     if (fields_tok.len > 0) {
       mg_http_reply(c, 200, s_json_header, "{\"config\":{\"fields\":%.*s},\"data\":{\"total\":0,\"nodes\":[]}}", (int) fields_tok.len, fields_tok.buf);
@@ -479,7 +483,7 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
     if (mg_match(hm->uri, mg_str("/api/login"), NULL)) {
       handle_login(c, u);
     } else if (mg_match(hm->uri, mg_str("/api/mode/get"), NULL)) {
-      mg_http_reply(c, 200, s_json_header, "{\"mode\":\"%s\"}", DS_MODE);
+      mg_http_reply(c, 200, s_json_header, "{\"mode\":\"%s\",\"available\":%d}", DS_MODE, ds_is_available());
     } else if (mg_match(hm->uri, mg_str("/api/nodes/get"), NULL)) {
       handle_nodes_get(c, hm);
     } else if (mg_match(hm->uri, mg_str("/api/nodes/batchset"), NULL)) {
