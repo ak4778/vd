@@ -410,13 +410,17 @@ function Events({}) {
     .then(r => r.json())
     .then(r => {
       if (r.status === 'true') {
+        // 保存编辑的值到临时变量，防止在回调执行前被清空
+        const savedOps = { ...editedOperations };
+        const savedCustomOps = { ...editedCustomOperations };
+        
         // 直接更新本地状态，不需要重新请求
         setData(prev => ({
           ...prev,
           nodes: prev.nodes.map(node => {
             if (allChanges.includes(node.id)) {
-              const op = editedOperations[node.id];
-              const customOp = editedCustomOperations[node.id];
+              const op = savedOps[node.id];
+              const customOp = savedCustomOps[node.id];
               return {
                 ...node,
                 operation: op !== undefined ? op : node.operation,
