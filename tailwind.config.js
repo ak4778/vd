@@ -1,17 +1,10 @@
-module.exports = {
-  content: ['./web_root/*.{html,js}'],
-  xplugins: [ 'tailwindcss', 'xautoprefixer' ],
-  corePlugins: {outline: false},
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    "./web_root/**/*.{html,js}",
+  ],
   theme: {
     extend: {},
-    fontFamily: {
-      sans:
-      [
-        "Inter var, Arial, Helvetica, sans-serif", {
-          fontFeatureSettings: '"cv11", "ss01"',
-          fontVariationSettings: '"opsz" 32',
-        }
-      ]
-    }
-  }
+  },
+  plugins: [],
 }

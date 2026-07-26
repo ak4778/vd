@@ -1,0 +1,32 @@
+# Build artifacts
+*.exe
+*.o
+*.obj
+*.dSYM
+
+# Node.js dependencies
+node_modules/
+
+# Database files
+*.db
+
+# Data files (generated at runtime)
+*.csv
+*.json
+
+# Build output
+web_root/dist/
+
+# Backup files
+*.bak
+*.tmp
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db

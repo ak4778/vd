@@ -1,0 +1,27 @@
+{
+  "name": "device-dashboard",
+  "version": "1.0.0",
+  "description": "",
+  "main": "tailwind.config.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build:css": "npx tailwindcss build web_root/tailwind.css -o web_root/dist/tailwind.css"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ak4778/vd.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/ak4778/vd/issues"
+  },
+  "homepage": "https://github.com/ak4778/vd#readme",
+  "dependencies": {
+    "autoprefixer": "^10.5.4",
+    "postcss": "^8.5.23",
+    "tailwindcss": "^3.4.14"
+  }
+}
