@@ -567,6 +567,11 @@ return html`
         onclick=${saveAllOperations}
         disabled=${Object.keys(editedOperations).length === 0 && Object.keys(editedCustomOperations).length === 0 && !hasPendingChanges}
             class="px-3 py-1 bg-green-600 text-white text-sm rounded hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed">保存全部修改</button>
+      ${(Object.keys(editedOperations).length > 0 || Object.keys(editedCustomOperations).length > 0) && html`
+        <span class="ml-2 px-2 py-1 bg-yellow-100 text-yellow-800 text-sm rounded font-medium">
+          已编辑 ${[...new Set([...Object.keys(editedOperations), ...Object.keys(editedCustomOperations)])].length} 行未保存
+        </span>
+      `}
     </div>
     <${Pagination} currentPage=${page} setPageFn=${handlePageChange} totalItems=${totalItems} itemsPerPage=${itemsPerPage} />
   <//>
