@@ -5,9 +5,9 @@
 #include "data_source.h"
 
 #ifdef USE_SQLITE
-#define DB_MODE "SQLite"
+#define DS_MODE "SQLite"
 #else
-#define DB_MODE "CSV"
+#define DS_MODE "CSV"
 #endif
 
 struct user {
@@ -479,7 +479,7 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
     if (mg_match(hm->uri, mg_str("/api/login"), NULL)) {
       handle_login(c, u);
     } else if (mg_match(hm->uri, mg_str("/api/mode/get"), NULL)) {
-      mg_http_reply(c, 200, s_json_header, "{\"mode\":\"%s\"}", DB_MODE);
+      mg_http_reply(c, 200, s_json_header, "{\"mode\":\"%s\"}", DS_MODE);
     } else if (mg_match(hm->uri, mg_str("/api/nodes/get"), NULL)) {
       handle_nodes_get(c, hm);
     } else if (mg_match(hm->uri, mg_str("/api/nodes/batchset"), NULL)) {
@@ -512,7 +512,7 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
 
 void web_init(struct mg_mgr *mgr) {
   s_settings.device_name = strdup("My Device");
-  MG_INFO(("Web server starting in %s mode", DB_MODE));
+  MG_INFO(("Web server starting in %s mode", DS_MODE));
   mg_http_listen(mgr, HTTP_URL, fn, NULL);
   mg_http_listen(mgr, HTTPS_URL, fn, NULL);
 }
