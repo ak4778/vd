@@ -59,7 +59,7 @@ function Sidebar({url, show}) {
             ${show && 'translate-x-0'} right-auto bottom-0">
   <div class="flex flex-col m-4 gap-y-6">
     <div class="flex h-10 shrink-0 items-center gap-x-4 font-bold text-xl text-slate-500">
-      <${Logo} class="h-full"/> GDDL 
+      <${Logo} class="h-full"/> GD 
     <//>
     <div class="flex flex-1 flex-col">
       <${NavLink} title="视频设备" icon=${Icons.camera} href="/events" url=${url} />
