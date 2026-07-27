@@ -97,64 +97,76 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
   char where[512] = " WHERE ";
   int first = 1;
 
-  if (query->isOnline != NULL && query->isOnline[0] != '\0') {
+  if (query->isOnline != NULL) {
     if (!first) strcat(where, " AND ");
-    strcat(where, "isOnline IN (");
-    char *token = strdup(query->isOnline);
-    char *t = token;
-    int tok_first = 1;
-    while ((t = strtok(t, ",")) != NULL) {
-      if (!tok_first) strcat(where, ",");
-      strcat(where, "'");
-      strcat(where, t);
-      strcat(where, "'");
-      tok_first = 0;
-      t = NULL;
-    }
-    free(token);
-    strcat(where, ")");
-    first = 0;
-  }
-
-  if (query->cameraType != NULL && query->cameraType[0] != '\0') {
-    if (!first) strcat(where, " AND ");
-    strcat(where, "cameraType IN (");
-    char *token = strdup(query->cameraType);
-    char *t = token;
-    int tok_first = 1;
-    while ((t = strtok(t, ",")) != NULL) {
-      if (!tok_first) strcat(where, ",");
-      strcat(where, "'");
-      strcat(where, t);
-      strcat(where, "'");
-      tok_first = 0;
-      t = NULL;
-    }
-    free(token);
-    strcat(where, ")");
-    first = 0;
-  }
-
-  if (query->operation != NULL && query->operation[0] != '\0') {
-    if (!first) strcat(where, " AND ");
-    char *token = strdup(query->operation);
-    char *t = token;
-    int tok_first = 1;
-    strcat(where, "(");
-    while ((t = strtok(t, ",")) != NULL) {
-      if (!tok_first) strcat(where, " OR ");
-      if (strcmp(t, "0") == 0) {
-        strcat(where, "operation IS NULL OR operation = ''");
-      } else {
-        strcat(where, "operation = '");
+    if (query->isOnline[0] == '\0') {
+      strcat(where, "0");
+    } else {
+      strcat(where, "isOnline IN (");
+      char *token = strdup(query->isOnline);
+      char *t = token;
+      int tok_first = 1;
+      while ((t = strtok(t, ",")) != NULL) {
+        if (!tok_first) strcat(where, ",");
+        strcat(where, "'");
         strcat(where, t);
         strcat(where, "'");
+        tok_first = 0;
+        t = NULL;
       }
-      tok_first = 0;
-      t = NULL;
+      free(token);
+      strcat(where, ")");
     }
-    free(token);
-    strcat(where, ")");
+    first = 0;
+  }
+
+  if (query->cameraType != NULL) {
+    if (!first) strcat(where, " AND ");
+    if (query->cameraType[0] == '\0') {
+      strcat(where, "0");
+    } else {
+      strcat(where, "cameraType IN (");
+      char *token = strdup(query->cameraType);
+      char *t = token;
+      int tok_first = 1;
+      while ((t = strtok(t, ",")) != NULL) {
+        if (!tok_first) strcat(where, ",");
+        strcat(where, "'");
+        strcat(where, t);
+        strcat(where, "'");
+        tok_first = 0;
+        t = NULL;
+      }
+      free(token);
+      strcat(where, ")");
+    }
+    first = 0;
+  }
+
+  if (query->operation != NULL) {
+    if (!first) strcat(where, " AND ");
+    if (query->operation[0] == '\0') {
+      strcat(where, "0");
+    } else {
+      char *token = strdup(query->operation);
+      char *t = token;
+      int tok_first = 1;
+      strcat(where, "(");
+      while ((t = strtok(t, ",")) != NULL) {
+        if (!tok_first) strcat(where, " OR ");
+        if (strcmp(t, "0") == 0) {
+          strcat(where, "operation IS NULL OR operation = ''");
+        } else {
+          strcat(where, "operation = '");
+          strcat(where, t);
+          strcat(where, "'");
+        }
+        tok_first = 0;
+        t = NULL;
+      }
+      free(token);
+      strcat(where, ")");
+    }
     first = 0;
   }
 
@@ -411,19 +423,22 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
     while (*p == ' ' || *p == '\t') p++;
     if (*p == '\0') continue;
 
-    if (query->isOnline != NULL && query->isOnline[0] != '\0' && isOnline_idx >= 0) {
+    if (query->isOnline != NULL && isOnline_idx >= 0) {
+      if (query->isOnline[0] == '\0') continue;
       char val[32];
       if (get_csv_field(p, isOnline_idx, val, sizeof(val)) != 0 || 
           !is_value_in_list(val, query->isOnline)) continue;
     }
 
-    if (query->cameraType != NULL && query->cameraType[0] != '\0' && cameraType_idx >= 0) {
+    if (query->cameraType != NULL && cameraType_idx >= 0) {
+      if (query->cameraType[0] == '\0') continue;
       char val[32];
       if (get_csv_field(p, cameraType_idx, val, sizeof(val)) != 0 || 
           !is_value_in_list(val, query->cameraType)) continue;
     }
 
-    if (query->operation != NULL && query->operation[0] != '\0' && operation_idx >= 0) {
+    if (query->operation != NULL && operation_idx >= 0) {
+      if (query->operation[0] == '\0') continue;
       char val[64];
       if (get_csv_field(p, operation_idx, val, sizeof(val)) != 0) continue;
       if (is_value_in_list("0", query->operation) && val[0] == '\0') {
@@ -460,19 +475,22 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
       while (*line_start == ' ' || *line_start == '\t') line_start++;
       if (*line_start == '\0') continue;
 
-      if (query->isOnline != NULL && query->isOnline[0] != '\0' && isOnline_idx >= 0) {
+      if (query->isOnline != NULL && isOnline_idx >= 0) {
+        if (query->isOnline[0] == '\0') continue;
         char val[32];
         if (get_csv_field(line_start, isOnline_idx, val, sizeof(val)) != 0 || 
             !is_value_in_list(val, query->isOnline)) continue;
       }
 
-      if (query->cameraType != NULL && query->cameraType[0] != '\0' && cameraType_idx >= 0) {
+      if (query->cameraType != NULL && cameraType_idx >= 0) {
+        if (query->cameraType[0] == '\0') continue;
         char val[32];
         if (get_csv_field(line_start, cameraType_idx, val, sizeof(val)) != 0 || 
             !is_value_in_list(val, query->cameraType)) continue;
       }
 
-      if (query->operation != NULL && query->operation[0] != '\0' && operation_idx >= 0) {
+      if (query->operation != NULL && operation_idx >= 0) {
+        if (query->operation[0] == '\0') continue;
         char val[64];
         if (get_csv_field(line_start, operation_idx, val, sizeof(val)) != 0) continue;
         if (is_value_in_list("0", query->operation) && val[0] == '\0') {

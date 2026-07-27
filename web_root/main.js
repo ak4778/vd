@@ -84,8 +84,8 @@ function Events({}) {
     setIsLoading(true);
     setErrorMsg('');
     let url = `api/nodes/get?page=${pg}&pageSize=${itemsPerPage}&t=${Date.now()}`;
-    if (onlineFilter.length > 0) url += `&isOnline=${onlineFilter.join(',')}`;
-    if (cameraFilter.length > 0) url += `&cameraType=${cameraFilter.join(',')}`;
+    url += `&isOnline=${onlineFilter.join(',')}`;
+    url += `&cameraType=${cameraFilter.join(',')}`;
     const mappedOpFilter = opFilter ? opFilter.map(v => v === '' ? '0' : v) : [];
     url += `&operation=${encodeURIComponent(mappedOpFilter.join(','))}`;
     fetch(url, { method: 'GET', cache: 'no-cache', credentials: 'include' })

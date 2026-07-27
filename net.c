@@ -204,18 +204,7 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
     return;
   }
 
-  // 如果没有任何过滤器，返回空数据和配置（前端需要先设置过滤器）
-  // 但如果有部分过滤器，仍然查询数据
-  int has_filter = online_filter[0] != '\0' || camera_filter[0] != '\0' || operation_filter[0] != '\0';
-  if (!has_filter) {
-    struct mg_str fields_tok = mg_json_get_tok(mg_str(cfg_buf), "$.fields");
-    if (fields_tok.len > 0) {
-      mg_http_reply(c, 200, s_json_header, "{\"config\":{\"fields\":%.*s},\"data\":{\"total\":0,\"nodes\":[]}}", (int) fields_tok.len, fields_tok.buf);
-    } else {
-      mg_http_reply(c, 200, s_json_header, "{\"config\":{\"fields\":[]},\"data\":{\"total\":0,\"nodes\":[]}}");
-    }
-    return;
-  }
+
 
   // 解析 fields 配置，只返回配置中定义的字段
   char field_keys[32][64] = {""};
@@ -252,9 +241,9 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
 
   // 使用数据源抽象层查询数据
   struct ds_query query = {
-    .isOnline = online_filter[0] != '\0' ? online_filter : NULL,
-    .cameraType = camera_filter[0] != '\0' ? camera_filter : NULL,
-    .operation = operation_filter[0] != '\0' ? operation_filter : NULL,
+    .isOnline = online_filter,
+    .cameraType = camera_filter,
+    .operation = operation_filter,
     .page = page,
     .pageSize = page_size
   };
