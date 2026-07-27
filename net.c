@@ -59,6 +59,38 @@ static char *get_config_buf(void) {
   return g_cfg_buf;
 }
 
+static int get_max_page_size(void) {
+  char *cfg_buf = get_config_buf();
+  if (cfg_buf == NULL) return 100;
+
+  const char *key = "\"maxPageSize\"";
+  char *pos = strstr(cfg_buf, key);
+  if (pos == NULL) return 100;
+
+  pos += strlen(key);
+  while (*pos == ' ' || *pos == ':') pos++;
+
+  if (!isdigit((unsigned char)*pos)) return 100;
+
+  return atoi(pos);
+}
+
+static int get_default_page_size(void) {
+  char *cfg_buf = get_config_buf();
+  if (cfg_buf == NULL) return 50;
+
+  const char *key = "\"defaultPageSize\"";
+  char *pos = strstr(cfg_buf, key);
+  if (pos == NULL) return 50;
+
+  pos += strlen(key);
+  while (*pos == ' ' || *pos == ':') pos++;
+
+  if (!isdigit((unsigned char)*pos)) return 50;
+
+  return atoi(pos);
+}
+
 static void unicode_to_utf8(unsigned int codepoint, char *out, int *out_len) {
   if (codepoint < 0x80) {
     out[0] = (char) codepoint;
@@ -194,7 +226,7 @@ static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
 
 static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm) {
   int page = 1;
-  int page_size = 20;
+  int page_size = get_default_page_size();
   char page_buf[16] = "";
   char size_buf[16] = "";
   char online_filter[16] = "";
@@ -209,9 +241,14 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
 
   if (page_buf[0] != '\0') page = atoi(page_buf);
   if (size_buf[0] != '\0') page_size = atoi(size_buf);
-  if (page < 1) page = 1;
-  if (page_size < 1) page_size = 20;
-  if (page_size > 100) page_size = 100;
+
+  if (page < 1 || page_size < 1) {
+    mg_http_reply(c, 400, s_json_header, "{\"error\":\"Invalid parameters: page and pageSize must be positive integers\"}");
+    return;
+  }
+
+  int max_page_size = get_max_page_size();
+  if (page_size > max_page_size) page_size = max_page_size;
 
   // 使用缓存的配置文件（不要 free cfg_buf）
   char *cfg_buf = get_config_buf();
@@ -295,7 +332,8 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
   }
 
   int pos = 0;
-  pos += snprintf(response + pos, total_size - pos, "{\"config\":{\"fields\":");
+  pos += snprintf(response + pos, total_size - pos, "{\"config\":{\"defaultPageSize\":%d,\"maxPageSize\":%d,\"fields\":", 
+                  get_default_page_size(), get_max_page_size());
   struct mg_str fields_tok = mg_json_get_tok(mg_str(cfg_buf), "$.fields");
   if (fields_tok.len > 0) {
     memcpy(response + pos, fields_tok.buf, (size_t) fields_tok.len);

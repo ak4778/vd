@@ -1,6 +1,8 @@
 {
     "csvFilePath": "leaf_nodes.csv",
     "sqliteFilePath": "device_dashboard.db",
+    "defaultPageSize": 50,
+    "maxPageSize": 200,
     "fields": [
         {"key": "id", "label": "通道ID", "editable": false, "type": "string", "width": 60},
         {"key": "name", "label": "通道名称", "editable": false, "type": "string", "width": 120},

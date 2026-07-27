@@ -82,12 +82,13 @@ function Events({}) {
   const [showOperationDropdown, setShowOperationDropdown] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [itemsPerPage, setItemsPerPage] = useState(50);
+  const [maxPageSize, setMaxPageSize] = useState(200);
   const columnWidthsRef = useRef({});
   const [isResizing, setIsResizing] = useState(false);
   const [resizeColumn, setResizeColumn] = useState(null);
   const [startX, setStartX] = useState(0);
   const [startWidth, setStartWidth] = useState(0);
-  const itemsPerPage = 50;
   const nodes = data.nodes;
   const fields = data.fields;
   const totalItems = data.totalItems;
@@ -106,6 +107,12 @@ function Events({}) {
         return r.json();
       })
       .then(r => {
+        if (r.config && r.config.defaultPageSize) {
+          setItemsPerPage(r.config.defaultPageSize);
+        }
+        if (r.config && r.config.maxPageSize) {
+          setMaxPageSize(r.config.maxPageSize);
+        }
         const newFields = r.config && r.config.fields ? r.config.fields : [];
         newFields.forEach(f => {
           if (f.width && columnWidthsRef.current[f.key] === undefined) {
