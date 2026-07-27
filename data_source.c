@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <sys/stat.h>
 
 #ifdef USE_SQLITE
 #include "sqlite3.h"
@@ -53,8 +54,15 @@ int ds_init(const char *path) {
     s_db = NULL;
     return -1;
   }
+
+  const char *create_index_online = "CREATE INDEX IF NOT EXISTS idx_nodes_online ON nodes(isOnline);";
+  const char *create_index_camera = "CREATE INDEX IF NOT EXISTS idx_nodes_camera ON nodes(cameraType);";
+  const char *create_index_operation = "CREATE INDEX IF NOT EXISTS idx_nodes_operation ON nodes(operation);";
+
+  exec_sql(create_index_online);
+  exec_sql(create_index_camera);
+  exec_sql(create_index_operation);
   
-  // Store file existence status
   s_db_file_exists = file_exists;
 
   return 0;
@@ -282,6 +290,126 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
 #else
 
 static char *g_csv_path = NULL;
+static int get_csv_field(char *line, int index, char *buf, int buf_len);
+
+#define MAX_CACHE_SIZE 50000
+#define CACHE_FIELD_SIZE 512
+
+typedef struct {
+  char id[CACHE_FIELD_SIZE];
+  char name[CACHE_FIELD_SIZE];
+  char channelCode[CACHE_FIELD_SIZE];
+  char isOnline[CACHE_FIELD_SIZE];
+  char cameraType[CACHE_FIELD_SIZE];
+  char operation[CACHE_FIELD_SIZE];
+  char customOperation[CACHE_FIELD_SIZE];
+} csv_node_t;
+
+static csv_node_t *g_cache = NULL;
+static int g_cache_count = 0;
+static time_t g_cache_mtime = 0;
+
+static int load_csv_cache(void) {
+  if (g_csv_path == NULL) return -1;
+
+  FILE *fp = fopen(g_csv_path, "rb");
+  if (fp == NULL) return -1;
+
+  struct stat st;
+  if (stat(g_csv_path, &st) == 0 && st.st_mtime == g_cache_mtime && g_cache != NULL) {
+    fclose(fp);
+    return 0;
+  }
+
+  if (g_cache != NULL) {
+    free(g_cache);
+    g_cache = NULL;
+  }
+
+  g_cache = malloc(MAX_CACHE_SIZE * sizeof(csv_node_t));
+  if (g_cache == NULL) {
+    fclose(fp);
+    return -1;
+  }
+
+  char line[4096];
+  int header_count = 0;
+  int id_idx = -1, name_idx = -1, channelCode_idx = -1;
+  int isOnline_idx = -1, cameraType_idx = -1, operation_idx = -1, customOperation_idx = -1;
+
+  if (fgets(line, sizeof(line), fp) == NULL) {
+    fclose(fp);
+    return -1;
+  }
+
+  size_t header_len = strlen(line);
+  while (header_len > 0 && (line[header_len-1] == '\n' || line[header_len-1] == '\r')) {
+    line[--header_len] = '\0';
+  }
+
+  char *h = line;
+  if ((unsigned char) h[0] == 0xEF && (unsigned char) h[1] == 0xBB && (unsigned char) h[2] == 0xBF) {
+    h += 3;
+  }
+
+  while (*h != '\0' && *h != '\n' && header_count < 32) {
+    char *end = h;
+    while (*end != '\0' && *end != ',' && *end != '\n' && *end != '\r') end++;
+    int len = (int) (end - h);
+    if (len > 0) {
+      char header[64];
+      strncpy(header, h, len);
+      header[len] = '\0';
+      if (strcmp(header, "id") == 0) id_idx = header_count;
+      else if (strcmp(header, "name") == 0) name_idx = header_count;
+      else if (strcmp(header, "channelCode") == 0) channelCode_idx = header_count;
+      else if (strcmp(header, "isOnline") == 0) isOnline_idx = header_count;
+      else if (strcmp(header, "cameraType") == 0) cameraType_idx = header_count;
+      else if (strcmp(header, "operation") == 0) operation_idx = header_count;
+      else if (strcmp(header, "customOperation") == 0) customOperation_idx = header_count;
+      header_count++;
+    }
+    while ((*end == ',' || *end == '\n' || *end == '\r') && *end != '\0') end++;
+    h = end;
+  }
+
+  g_cache_count = 0;
+  while (fgets(line, sizeof(line), fp) != NULL && g_cache_count < MAX_CACHE_SIZE) {
+    size_t len = strlen(line);
+    while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
+      line[--len] = '\0';
+    }
+
+    char *p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '\0') continue;
+
+    csv_node_t *node = &g_cache[g_cache_count];
+    node->id[0] = '\0';
+    node->name[0] = '\0';
+    node->channelCode[0] = '\0';
+    node->isOnline[0] = '\0';
+    node->cameraType[0] = '\0';
+    node->operation[0] = '\0';
+    node->customOperation[0] = '\0';
+
+    if (id_idx >= 0) get_csv_field(line, id_idx, node->id, sizeof(node->id));
+    if (name_idx >= 0) get_csv_field(line, name_idx, node->name, sizeof(node->name));
+    if (channelCode_idx >= 0) get_csv_field(line, channelCode_idx, node->channelCode, sizeof(node->channelCode));
+    if (isOnline_idx >= 0) get_csv_field(line, isOnline_idx, node->isOnline, sizeof(node->isOnline));
+    if (cameraType_idx >= 0) get_csv_field(line, cameraType_idx, node->cameraType, sizeof(node->cameraType));
+    if (operation_idx >= 0) get_csv_field(line, operation_idx, node->operation, sizeof(node->operation));
+    if (customOperation_idx >= 0) get_csv_field(line, customOperation_idx, node->customOperation, sizeof(node->customOperation));
+
+    if (node->id[0] != '\0') g_cache_count++;
+  }
+
+  fclose(fp);
+  stat(g_csv_path, &st);
+  g_cache_mtime = st.st_mtime;
+
+  return 0;
+}
 
 static int get_csv_field(char *line, int index, char *buf, int buf_len) {
   char *p = line;
@@ -361,160 +489,79 @@ int ds_is_available(void) {
 int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
   if (g_csv_path == NULL || query == NULL || result == NULL) return -1;
 
-  FILE *fp = fopen(g_csv_path, "rb");
-  if (fp == NULL) return -1;
-
-  char line[4096];
-  char headers[32][64] = {""};
-  int header_count = 0;
-  int id_idx = -1, name_idx = -1, channelCode_idx = -1;
-  int isOnline_idx = -1, cameraType_idx = -1, operation_idx = -1, customOperation_idx = -1;
-
-  if (fgets(line, sizeof(line), fp) == NULL) {
-    fclose(fp);
-    return -1;
-  }
-
-  char *h = line;
-  if ((unsigned char) h[0] == 0xEF && (unsigned char) h[1] == 0xBB && (unsigned char) h[2] == 0xBF) {
-    h += 3;
-  }
-  while (*h != '\0' && *h != '\n' && header_count < 32) {
-    char *end = h;
-    while (*end != '\0' && *end != ',' && *end != '\n' && *end != '\r') end++;
-    int len = (int) (end - h);
-    if (len > 0 && (size_t) len < sizeof(headers[0])) {
-      strncpy(headers[header_count], h, len);
-      headers[header_count][len] = '\0';
-      if (strcmp(headers[header_count], "id") == 0) id_idx = header_count;
-      if (strcmp(headers[header_count], "name") == 0) name_idx = header_count;
-      if (strcmp(headers[header_count], "channelCode") == 0) channelCode_idx = header_count;
-      if (strcmp(headers[header_count], "isOnline") == 0) isOnline_idx = header_count;
-      if (strcmp(headers[header_count], "cameraType") == 0) cameraType_idx = header_count;
-      if (strcmp(headers[header_count], "operation") == 0) operation_idx = header_count;
-      if (strcmp(headers[header_count], "customOperation") == 0) customOperation_idx = header_count;
-      header_count++;
-    }
-    while ((*end == ',' || *end == '\n' || *end == '\r') && *end != '\0') end++;
-    h = end;
-  }
-
-  if (id_idx < 0 || name_idx < 0 || channelCode_idx < 0 || 
-      isOnline_idx < 0 || cameraType_idx < 0) {
-    fclose(fp);
-    return -1;
-  }
+  if (load_csv_cache() != 0) return -1;
 
   int skip_count = (query->page - 1) * query->pageSize;
-  long page_start_offset = -1;
   int total_count = 0;
+  int page_start_idx = -1;
 
-  while (1) {
-    long line_offset = ftell(fp);
-    if (fgets(line, sizeof(line), fp) == NULL) break;
+  for (int i = 0; i < g_cache_count; i++) {
+    csv_node_t *node = &g_cache[i];
 
-    // Remove trailing newline characters
-    size_t len = strlen(line);
-    while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
-      line[--len] = '\0';
-    }
-
-    char *p = line;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p == '\0') continue;
-
-    if (query->isOnline != NULL && isOnline_idx >= 0) {
+    if (query->isOnline != NULL) {
       if (query->isOnline[0] == '\0') continue;
-      char val[32];
-      if (get_csv_field(p, isOnline_idx, val, sizeof(val)) != 0 || 
-          !is_value_in_list(val, query->isOnline)) continue;
+      if (!is_value_in_list(node->isOnline, query->isOnline)) continue;
     }
 
-    if (query->cameraType != NULL && cameraType_idx >= 0) {
+    if (query->cameraType != NULL) {
       if (query->cameraType[0] == '\0') continue;
-      char val[32];
-      if (get_csv_field(p, cameraType_idx, val, sizeof(val)) != 0 || 
-          !is_value_in_list(val, query->cameraType)) continue;
+      if (!is_value_in_list(node->cameraType, query->cameraType)) continue;
     }
 
-    if (query->operation != NULL && operation_idx >= 0) {
+    if (query->operation != NULL) {
       if (query->operation[0] == '\0') continue;
-      char val[64];
-      if (get_csv_field(p, operation_idx, val, sizeof(val)) != 0) continue;
-      if (is_value_in_list("0", query->operation) && val[0] == '\0') {
-      } else if (!is_value_in_list(val, query->operation)) {
+      if (is_value_in_list("0", query->operation) && node->operation[0] == '\0') {
+      } else if (!is_value_in_list(node->operation, query->operation)) {
         continue;
       }
     }
 
     if (total_count == skip_count) {
-      page_start_offset = line_offset;
+      page_start_idx = i;
     }
     total_count++;
   }
 
   result->total = total_count;
   result->nodes = (struct ds_node *) malloc(sizeof(struct ds_node) * query->pageSize);
-  if (result->nodes == NULL) {
-    fclose(fp);
-    return -1;
-  }
+  if (result->nodes == NULL) return -1;
 
   result->count = 0;
-  if (page_start_offset >= 0) {
-    fseek(fp, page_start_offset, SEEK_SET);
+  if (page_start_idx >= 0) {
+    for (int i = page_start_idx; i < g_cache_count && result->count < query->pageSize; i++) {
+      csv_node_t *node = &g_cache[i];
 
-    while (fgets(line, sizeof(line), fp) != NULL && result->count < query->pageSize) {
-      // Remove trailing newline characters
-      size_t len = strlen(line);
-      while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
-        line[--len] = '\0';
-      }
-
-      char *line_start = line;
-      while (*line_start == ' ' || *line_start == '\t') line_start++;
-      if (*line_start == '\0') continue;
-
-      if (query->isOnline != NULL && isOnline_idx >= 0) {
+      if (query->isOnline != NULL) {
         if (query->isOnline[0] == '\0') continue;
-        char val[32];
-        if (get_csv_field(line_start, isOnline_idx, val, sizeof(val)) != 0 || 
-            !is_value_in_list(val, query->isOnline)) continue;
+        if (!is_value_in_list(node->isOnline, query->isOnline)) continue;
       }
 
-      if (query->cameraType != NULL && cameraType_idx >= 0) {
+      if (query->cameraType != NULL) {
         if (query->cameraType[0] == '\0') continue;
-        char val[32];
-        if (get_csv_field(line_start, cameraType_idx, val, sizeof(val)) != 0 || 
-            !is_value_in_list(val, query->cameraType)) continue;
+        if (!is_value_in_list(node->cameraType, query->cameraType)) continue;
       }
 
-      if (query->operation != NULL && operation_idx >= 0) {
+      if (query->operation != NULL) {
         if (query->operation[0] == '\0') continue;
-        char val[64];
-        if (get_csv_field(line_start, operation_idx, val, sizeof(val)) != 0) continue;
-        if (is_value_in_list("0", query->operation) && val[0] == '\0') {
-        } else if (!is_value_in_list(val, query->operation)) {
+        if (is_value_in_list("0", query->operation) && node->operation[0] == '\0') {
+        } else if (!is_value_in_list(node->operation, query->operation)) {
           continue;
         }
       }
 
-      struct ds_node *node = &result->nodes[result->count];
-      get_csv_field(line_start, id_idx, node->id, sizeof(node->id));
-      get_csv_field(line_start, name_idx, node->name, sizeof(node->name));
-      get_csv_field(line_start, channelCode_idx, node->channelCode, sizeof(node->channelCode));
-      get_csv_field(line_start, isOnline_idx, node->isOnline, sizeof(node->isOnline));
-      get_csv_field(line_start, cameraType_idx, node->cameraType, sizeof(node->cameraType));
-      if (operation_idx >= 0) get_csv_field(line_start, operation_idx, node->operation, sizeof(node->operation));
-      else node->operation[0] = '\0';
-      if (customOperation_idx >= 0) get_csv_field(line_start, customOperation_idx, node->customOperation, sizeof(node->customOperation));
-      else node->customOperation[0] = '\0';
+      struct ds_node *result_node = &result->nodes[result->count];
+      strncpy(result_node->id, node->id, sizeof(result_node->id) - 1);
+      strncpy(result_node->name, node->name, sizeof(result_node->name) - 1);
+      strncpy(result_node->channelCode, node->channelCode, sizeof(result_node->channelCode) - 1);
+      strncpy(result_node->isOnline, node->isOnline, sizeof(result_node->isOnline) - 1);
+      strncpy(result_node->cameraType, node->cameraType, sizeof(result_node->cameraType) - 1);
+      strncpy(result_node->operation, node->operation, sizeof(result_node->operation) - 1);
+      strncpy(result_node->customOperation, node->customOperation, sizeof(result_node->customOperation) - 1);
 
       result->count++;
     }
   }
 
-  fclose(fp);
   return 0;
 }
 
@@ -623,6 +670,13 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
 
   remove(g_csv_path);
   rename(edited_path, g_csv_path);
+
+  if (g_cache != NULL) {
+    free(g_cache);
+    g_cache = NULL;
+  }
+  g_cache_count = 0;
+  g_cache_mtime = 0;
 
   return 0;
 }

@@ -4,6 +4,18 @@
 import { h, render, useState, useEffect, useRef, html } from  './bundle.js';
 import { Icons, Login, Button, Notification, Pagination } from './components.js';
 
+const API_TIMEOUT = 30000;
+
+function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT);
+
+  return fetch(url, {
+    ...options,
+    signal: controller.signal
+  }).finally(() => clearTimeout(timeoutId));
+}
+
 const Logo = props => html`<svg class=${props.class} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12.87 12.85"><defs><style>.ll-cls-1{fill:none;stroke:#000;stroke-miterlimit:10;stroke-width:0.5px;}</style></defs><g id="Layer_2" data-name="Layer 2"><g id="Layer_1-2" data-name="Layer 1"><path class="ll-cls-1" d="M12.62,1.82V8.91A1.58,1.58,0,0,1,11,10.48H4a1.44,1.44,0,0,1-1-.37A.69.69,0,0,1,2.84,10l-.1-.12a.81.81,0,0,1-.15-.48V5.57a.87.87,0,0,1,.86-.86H4.73V7.28a.86.86,0,0,0,.86.85H9.42a.85.85,0,0,0,.85-.85V3.45A.86.86,0,0,0,10.13,3,.76.76,0,0,0,10,2.84a.29.29,0,0,0-.12-.1,1.49,1.49,0,0,0-1-.37H2.39V1.82A1.57,1.57,0,0,1,4,.25H11A1.57,1.57,0,0,1,12.62,1.82Z"/><path class="ll-cls-1" d="M10.48,10.48V11A1.58,1.58,0,0,1,8.9,12.6H1.82A1.57,1.57,0,0,1,.25,11V3.94A1.57,1.57,0,0,1,1.82,2.37H8.9a1.49,1.49,0,0,1,1,.37l.12.1a.76.76,0,0,1,.11.14.86.86,0,0,1,.14.47V7.28a.85.85,0,0,1-.85.85H8.13V5.57a.86.86,0,0,0-.85-.86H3.45a.87.87,0,0,0-.86.86V9.4a.81.81,0,0,0,.15.48l.1.12a.69.69,0,0,0,.13.11,1.44,1.44,0,0,0,1,.37Z"/></g></g></svg>`;
 
 function Header({logout, user, setShowSidebar, showSidebar, dbMode, dbAvailable}) {
@@ -88,8 +100,11 @@ function Events({}) {
     url += `&cameraType=${cameraFilter.join(',')}`;
     const mappedOpFilter = opFilter ? opFilter.map(v => v === '' ? '0' : v) : [];
     url += `&operation=${encodeURIComponent(mappedOpFilter.join(','))}`;
-    fetch(url, { method: 'GET', cache: 'no-cache', credentials: 'include' })
-      .then(r => r.json())
+    fetchWithTimeout(url, { method: 'GET', cache: 'no-cache', credentials: 'include' })
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP error! status: ${r.status}`);
+        return r.json();
+      })
       .then(r => {
         const newFields = r.config && r.config.fields ? r.config.fields : [];
         newFields.forEach(f => {
@@ -111,7 +126,11 @@ function Events({}) {
       })
       .catch(err => {
         console.error('API Error:', err);
-        setErrorMsg('数据加载失败，请稍后重试');
+        if (err.name === 'AbortError') {
+          setErrorMsg('请求超时，请检查网络连接');
+        } else {
+          setErrorMsg('数据加载失败，请稍后重试');
+        }
         setData({nodes: [], fields: [], totalItems: 0});
         setIsLoading(false);
       });
@@ -401,13 +420,16 @@ function Events({}) {
       };
     });
 
-    fetch(`api/nodes/batchset`, {
+    fetchWithTimeout(`api/nodes/batchset`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ updates }),
       credentials: 'include'
     })
-    .then(r => r.json())
+    .then(r => {
+      if (!r.ok) throw new Error(`HTTP error! status: ${r.status}`);
+      return r.json();
+    })
     .then(r => {
       if (r.status === 'true') {
         // 保存编辑的值到临时变量，防止在回调执行前被清空
@@ -616,14 +638,14 @@ const App = function({}) {
   const [dbMode, setDbMode] = useState('');
   const [dbAvailable, setDbAvailable] = useState(true);
 
-  const logout = () => fetch('api/logout', { credentials: 'include' }).then(r => setUser(''));
+  const logout = () => fetchWithTimeout('api/logout', { credentials: 'include' }).then(r => setUser('')).catch(() => setUser(''));
   const login = r => !r.ok ? setLoading(false) && setUser(null) : r.json()
       .then(r => setUser(r.user))
       .finally(r => setLoading(false));
 
   useEffect(() => {
-    fetch('api/login', { credentials: 'include' }).then(login);
-    fetch('api/mode/get')
+    fetchWithTimeout('api/login', { credentials: 'include' }).then(login).catch(() => { setLoading(false); setUser(null); });
+    fetchWithTimeout('api/mode/get')
       .then(r => r.json())
       .then(r => {
         setDbMode(r.mode);
@@ -649,5 +671,33 @@ const App = function({}) {
   <//>
 <//>`;
 };
+
+window.onerror = (message, source, lineno, colno, error) => {
+  console.error('Global Error:', message, source, lineno, colno, error);
+  if (error && error.name === 'AbortError') return;
+  try {
+    const notification = document.createElement('div');
+    notification.className = 'fixed top-4 right-4 bg-red-500 text-white px-4 py-3 rounded-lg shadow-lg z-[100]';
+    notification.textContent = '系统发生错误，请刷新页面';
+    document.body.appendChild(notification);
+    setTimeout(() => notification.remove(), 5000);
+  } catch (e) {
+    console.error('Failed to show error notification:', e);
+  }
+};
+
+window.addEventListener('unhandledrejection', (event) => {
+  console.error('Unhandled Rejection:', event.reason);
+  event.preventDefault();
+  try {
+    const notification = document.createElement('div');
+    notification.className = 'fixed top-4 right-4 bg-red-500 text-white px-4 py-3 rounded-lg shadow-lg z-[100]';
+    notification.textContent = '请求失败，请检查网络连接';
+    document.body.appendChild(notification);
+    setTimeout(() => notification.remove(), 5000);
+  } catch (e) {
+    console.error('Failed to show error notification:', e);
+  }
+});
 
 window.onload = () => render(h(App), document.body);

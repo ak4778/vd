@@ -3,6 +3,9 @@
 
 #include "net.h"
 #include "data_source.h"
+#include <windows.h>
+
+#define mg_msleep(ms) Sleep(ms)
 
 #ifdef USE_SQLITE
 #define DS_MODE "SQLite"
@@ -168,11 +171,22 @@ static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
     return;
   }
 
-  // 使用数据库抽象层更新
-  if (ds_update_nodes(updates, update_count) == 0) {
+  int retries = 0;
+  int max_retries = 3;
+  int update_result = -1;
+
+  while (retries < max_retries && update_result != 0) {
+    update_result = ds_update_nodes(updates, update_count);
+    if (update_result != 0) {
+      retries++;
+      mg_msleep(100);
+    }
+  }
+
+  if (update_result == 0) {
     mg_http_reply(c, 200, s_json_header, "{\"status\":\"true\",\"message\":\"Success\",\"count\":%d}", update_count);
   } else {
-    mg_http_reply(c, 200, s_json_header, "{\"status\":\"false\",\"message\":\"Update failed\"}");
+    mg_http_reply(c, 503, s_json_header, "{\"status\":\"false\",\"message\":\"Update failed after %d retries\"}", max_retries);
   }
 }
 
@@ -249,8 +263,20 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
   };
 
   struct ds_result result = {0};
-  if (ds_get_nodes(&query, &result) != 0) {
-    mg_http_reply(c, 200, s_json_header, "{\"error\":\"Database query failed\"}");
+  int retries = 0;
+  int max_retries = 3;
+  int query_result = -1;
+
+  while (retries < max_retries && query_result != 0) {
+    query_result = ds_get_nodes(&query, &result);
+    if (query_result != 0) {
+      retries++;
+      mg_msleep(100);
+    }
+  }
+
+  if (query_result != 0) {
+    mg_http_reply(c, 503, s_json_header, "{\"error\":\"Database query failed after %d retries\"}", max_retries);
     return;
   }
 
