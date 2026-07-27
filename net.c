@@ -172,14 +172,16 @@ static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
   }
 
   int retries = 0;
-  int max_retries = 3;
+  int max_retries = 2;
   int update_result = -1;
+  int retry_delay = 30;
 
   while (retries < max_retries && update_result != 0) {
     update_result = ds_update_nodes(updates, update_count);
     if (update_result != 0) {
       retries++;
-      mg_msleep(100);
+      mg_msleep(retry_delay);
+      retry_delay *= 2;
     }
   }
 
@@ -264,14 +266,16 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
 
   struct ds_result result = {0};
   int retries = 0;
-  int max_retries = 3;
+  int max_retries = 2;
   int query_result = -1;
+  int retry_delay = 30;
 
   while (retries < max_retries && query_result != 0) {
     query_result = ds_get_nodes(&query, &result);
     if (query_result != 0) {
       retries++;
-      mg_msleep(100);
+      mg_msleep(retry_delay);
+      retry_delay *= 2;
     }
   }
 
