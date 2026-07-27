@@ -217,7 +217,6 @@ function Events({}) {
     localStorage.setItem('page', newPage.toString());
     setSelectedNodes([]);
     setBatchValue('');
-    loadData(newPage, isOnlineFilter, cameraTypeFilter, operationFilter);
   };
 
   useEffect(() => {
