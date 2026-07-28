@@ -14,6 +14,9 @@ struct ds_node {
   char cameraType[16];
   char operation[64];
   char customOperation[256];
+  char P1[128];
+  char P3[128];
+  char P4[128];
 };
 
 struct ds_query {

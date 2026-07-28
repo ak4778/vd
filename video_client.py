@@ -319,7 +319,10 @@ class EVOClient:
             self.logger.error(error_msg)
             return None
     
-    def traverse_tree(self, node_id: str, level: int = 0, retry_count: int = 0) -> None:
+    def traverse_tree(self, node_id: str, level: int = 0, retry_count: int = 0, parent_names: List[str] = None) -> None:
+        if parent_names is None:
+            parent_names = []
+        
         self.logger.info("  " * level + f"--- 调用 get_tree_data(id={node_id}) ---")
         response = self.get_tree_data(node_id)
         
@@ -341,12 +344,12 @@ class EVOClient:
                 self.logger.info("  " * level + "Token可能过期，尝试刷新Token...")
                 if self.refresh_token_func():
                     self.logger.info("  " * level + "Token刷新成功，重新尝试请求...")
-                    self.traverse_tree(node_id, level, retry_count + 1)
+                    self.traverse_tree(node_id, level, retry_count + 1, parent_names)
                 else:
                     self.logger.info("  " * level + "Token刷新失败，尝试获取新Token...")
                     if self.get_token():
                         self.logger.info("  " * level + "获取新Token成功，重新尝试请求...")
-                        self.traverse_tree(node_id, level, retry_count + 1)
+                        self.traverse_tree(node_id, level, retry_count + 1, parent_names)
             
             return
         
@@ -364,11 +367,15 @@ class EVOClient:
                 if is_parent or has_more_node:
                     self.logger.info("  " * level + f"节点ID: {item_id}, 名称: {item_name} (非叶子节点，继续遍历)")
                     if item_id.startswith("L03"):
-                        self.traverse_tree(item_id, level + 1)
+                        new_parent_names = parent_names + [item_name]
+                        self.traverse_tree(item_id, level + 1, 0, new_parent_names)
                 else:
                     if 'channelCode' in item:
-                        self.logger.info("  " * level + f"最终叶子节点: {json.dumps(item, ensure_ascii=False)}")
-                        self.final_leaf_nodes.append(item)
+                        leaf_node = dict(item)
+                        for i, name in enumerate(parent_names, 1):
+                            leaf_node[f'P{i}'] = name
+                        self.logger.info("  " * level + f"最终叶子节点(含父路径): {json.dumps(leaf_node, ensure_ascii=False)}")
+                        self.final_leaf_nodes.append(leaf_node)
     
     def collect_channel_devices(self) -> int:
         self.final_leaf_nodes = []
@@ -393,71 +400,98 @@ class EVOClient:
             return 0
         
         target_names = ["新能源场站", "火电厂站", "水电厂站"]
-        ids = [
-            item.get('id') for item in value_list
+        top_level_nodes = [
+            item for item in value_list
             if item.get('id') and item.get('name') and len(item.get('id')) == 6 and item.get('name') in target_names
         ]
         
-        self.logger.info(f"筛选后的ID列表: {ids}")
+        self.logger.info(f"筛选后的顶层节点: {[(item['id'], item['name']) for item in top_level_nodes]}")
         
         all_leaf_nodes = []
         
-        for new_id in ids:
-            if new_id.startswith("L03"):
-                self.logger.info(f"\n--- 递归调用 get_tree_data(id={new_id}) ---")
-                sub_response = self.get_tree_data(new_id)
-                if sub_response is None:
+        for top_node in top_level_nodes:
+            top_id = top_node['id']
+            top_name = top_node['name']
+            p1_names = [top_name]
+            
+            self.logger.info(f"\n--- 处理顶层节点: {top_id} ({top_name}) ---")
+            
+            if not top_id.startswith("L03"):
+                continue
+            
+            sub_response = self.get_tree_data(top_id)
+            if sub_response is None:
+                continue
+            
+            sub_tree_data = self._parse_json_response(sub_response)
+            if sub_tree_data is None:
+                continue
+            
+            self.logger.info(f"子节点响应: {json.dumps(sub_tree_data, ensure_ascii=False)[:500]}...")
+            
+            if not sub_tree_data.get('success'):
+                self._check_response_success(sub_tree_data, f"获取子节点树数据(id={top_id})")
+                continue
+            
+            sub_value_list = self._get_data_value(sub_tree_data, f"id={top_id}")
+            if sub_value_list is None:
+                continue
+            
+            sub_nodes = [
+                item for item in sub_value_list
+                if item.get('id') and item.get('name') and len(item.get('id')) == 9 and "工程期" not in item.get('name', '')
+            ]
+            self.logger.info(f"第二层节点: {[(item['id'], item['name']) for item in sub_nodes]}")
+            
+            for sub_node in sub_nodes:
+                sub_id = sub_node['id']
+                sub_name = sub_node['name']
+                p2_names = p1_names + [sub_name]
+                
+                self.logger.info(f"\n--- 处理第二层节点: {sub_id} ({sub_name}) ---")
+                
+                leaf_response = self.get_tree_data(sub_id)
+                if leaf_response is None:
                     continue
                 
-                sub_tree_data = self._parse_json_response(sub_response)
-                if sub_tree_data is None:
+                leaf_tree_data = self._parse_json_response(leaf_response)
+                if leaf_tree_data is None:
                     continue
                 
-                self.logger.info(f"子节点响应: {json.dumps(sub_tree_data, ensure_ascii=False)[:500]}...")
+                self.logger.info(f"叶子节点响应: {json.dumps(leaf_tree_data, ensure_ascii=False)[:500]}...")
                 
-                if sub_tree_data.get('success'):
-                    sub_value_list = self._get_data_value(sub_tree_data, f"id={new_id}")
-                    if sub_value_list is None:
+                if not leaf_tree_data.get('success'):
+                    self._check_response_success(leaf_tree_data, f"获取叶子节点树数据(id={sub_id})")
+                    continue
+                
+                leaf_value_list = self._get_data_value(leaf_tree_data, f"id={sub_id}")
+                if leaf_value_list is None:
+                    continue
+                
+                for item in leaf_value_list:
+                    item_id = item.get('id')
+                    item_name = item.get('name')
+                    
+                    if not item_id or not item_name:
                         continue
                     
-                    sub_ids = [
-                        item.get('id') for item in sub_value_list
-                        if item.get('id') and item.get('name') and len(item.get('id')) == 9 and "工程期" not in item.get('name', '')
-                    ]
-                    self.logger.info(f"子节点ID列表: {sub_ids}")
+                    if "工作记录仪" in item_name:
+                        self.logger.info(f"跳过工作记录仪: {item_id}, {item_name}")
+                        continue
                     
-                    for leaf_id in sub_ids:
-                        self.logger.info(f"\n--- 继续调用 get_tree_data(id={leaf_id}) ---")
-                        leaf_response = self.get_tree_data(leaf_id)
-                        if leaf_response is None:
-                            continue
-                        
-                        leaf_tree_data = self._parse_json_response(leaf_response)
-                        if leaf_tree_data is None:
-                            continue
-                        
-                        self.logger.info(f"叶子节点响应: {json.dumps(leaf_tree_data, ensure_ascii=False)[:500]}...")
-                        
-                        if leaf_tree_data.get('success'):
-                            leaf_value_list = self._get_data_value(leaf_tree_data, f"id={leaf_id}")
-                            if leaf_value_list is None:
-                                continue
-                            
-                            for item in leaf_value_list:
-                                item_id = item.get('id')
-                                item_name = item.get('name')
-                                if item_id and item_name and (len(item_id) != 12 or "工作记录仪" not in item_name):
-                                    all_leaf_nodes.append({"id": item_id, "name": item_name})
-                                    self.logger.info(f"叶子节点ID: {item_id}, 名称: {item_name}")
-                        else:
-                            self._check_response_success(leaf_tree_data, f"获取叶子节点树数据(id={leaf_id})")
-                else:
-                    self._check_response_success(sub_tree_data, f"获取子节点树数据(id={new_id})")
+                    if len(item_id) == 12:
+                        p3_names = p2_names + [item_name]
+                        all_leaf_nodes.append({
+                            "id": item_id, 
+                            "name": item_name,
+                            "parent_names": p3_names
+                        })
+                        self.logger.info(f"P3层节点: {item_id}, 名称: {item_name}, 父路径(P1,P2,P3): {' > '.join(p3_names)}")
         
         self.logger.info(f"\n共收集到 {len(all_leaf_nodes)} 个中间叶子节点")
         
         for node in all_leaf_nodes:
-            self.traverse_tree(node['id'])
+            self.traverse_tree(node['id'], parent_names=node['parent_names'])
         
         return len(all_leaf_nodes)
     
@@ -478,10 +512,55 @@ class EVOClient:
             self.logger.error(error_msg)
             return False
     
+    def find_fields_with_commas(self) -> Dict[str, List[Dict[str, Any]]]:
+        if not self.final_leaf_nodes:
+            self.logger.warning("无数据可检查")
+            return {}
+        
+        fields_with_commas: Dict[str, List[Dict[str, Any]]] = {}
+        
+        for node in self.final_leaf_nodes:
+            node_id = node.get('id', '未知')
+            for key, value in node.items():
+                if value is None:
+                    continue
+                str_val = str(value)
+                if ',' in str_val:
+                    if key not in fields_with_commas:
+                        fields_with_commas[key] = []
+                    if len(fields_with_commas[key]) < 10:
+                        fields_with_commas[key].append({
+                            'id': node_id,
+                            'value': str_val
+                        })
+        
+        self.logger.info("\n" + "="*60)
+        self.logger.info("检测包含CSV分隔符(,)的字段")
+        self.logger.info("="*60)
+        
+        if not fields_with_commas:
+            self.logger.info("未发现包含逗号的字段值")
+        else:
+            total_affected = 0
+            for field_name, examples in fields_with_commas.items():
+                count = sum(1 for n in self.final_leaf_nodes
+                          if n.get(field_name) is not None and ',' in str(n.get(field_name)))
+                total_affected += count
+                self.logger.info(f"\n字段: '{field_name}' - 共 {count} 条记录包含逗号")
+                self.logger.info(f"  示例（前{len(examples)}条）:")
+                for ex in examples:
+                    self.logger.info(f"    ID: {ex['id']}, 值: {repr(ex['value'])}")
+            
+            self.logger.info(f"\n总计: {len(fields_with_commas)} 个字段存在逗号问题，共影响 {total_affected} 条记录")
+        
+        return fields_with_commas
+
     def export_to_csv(self, filename: str = "leaf_nodes.csv") -> bool:
         if not self.final_leaf_nodes:
             self.logger.warning("无数据可保存")
             return False
+        
+        self.find_fields_with_commas()
         
         all_keys = set()
         for node in self.final_leaf_nodes:

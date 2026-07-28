@@ -293,13 +293,24 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
   }
 
   // 使用数据源抽象层查询数据
-  struct ds_query query = {
-    .isOnline = online_filter,
-    .cameraType = camera_filter,
-    .operation = operation_filter,
-    .page = page,
-    .pageSize = page_size
-  };
+  struct ds_query query;
+  memset(&query, 0, sizeof(query));
+  query.page = page;
+  query.pageSize = page_size;
+  
+  int has_online = (online_filter[0] != '\0' || strstr(hm->query.buf, "isOnline=") != NULL);
+  int has_camera = (camera_filter[0] != '\0' || strstr(hm->query.buf, "cameraType=") != NULL);
+  int has_operation = (operation_filter[0] != '\0' || strstr(hm->query.buf, "operation=") != NULL);
+  
+  if (has_online) {
+    query.isOnline = online_filter;
+  }
+  if (has_camera) {
+    query.cameraType = camera_filter;
+  }
+  if (has_operation) {
+    query.operation = operation_filter;
+  }
 
   struct ds_result result = {0};
   int retries = 0;
@@ -364,6 +375,9 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
       else if (strcmp(field_keys[j], "cameraType") == 0) field_val = node->cameraType;
       else if (strcmp(field_keys[j], "operation") == 0) field_val = node->operation;
       else if (strcmp(field_keys[j], "customOperation") == 0) field_val = node->customOperation;
+      else if (strcmp(field_keys[j], "P1") == 0) field_val = node->P1;
+      else if (strcmp(field_keys[j], "P3") == 0) field_val = node->P3;
+      else if (strcmp(field_keys[j], "P4") == 0) field_val = node->P4;
 
       for (int k = 0; field_val[k] != '\0'; k++) {
         if (field_val[k] == '"' || field_val[k] == '\\') {

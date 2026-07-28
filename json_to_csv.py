@@ -4,6 +4,7 @@
 import json
 import sys
 import os
+import csv
 
 def json_to_csv(json_file, csv_file):
     """
@@ -36,8 +37,9 @@ def json_to_csv(json_file, csv_file):
         
         # 写入CSV文件
         with open(csv_file, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
             # 写入表头
-            f.write(','.join(field_order) + '\n')
+            writer.writerow(field_order)
             
             # 写入数据行
             for i, node in enumerate(nodes):
@@ -51,7 +53,7 @@ def json_to_csv(json_file, csv_file):
                     elif isinstance(value, (int, float)):
                         value = str(value)
                     row.append(str(value))
-                f.write(','.join(row) + '\n')
+                writer.writerow(row)
                 
                 # 进度提示
                 if (i + 1) % 5000 == 0:
