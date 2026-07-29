@@ -4,7 +4,18 @@
 #include "net.h"
 #include "data_source.h"
 
+#if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
 #define mg_msleep(ms) Sleep(ms)
+#else
+#include <time.h>
+#define mg_msleep(ms) do { \
+    struct timespec ts; \
+    ts.tv_sec = (ms) / 1000; \
+    ts.tv_nsec = ((ms) % 1000) * 1000000L; \
+    nanosleep(&ts, NULL); \
+} while(0)
+#endif
 
 #if !defined(CSV_MODE)
 #define DS_MODE "SQLite"

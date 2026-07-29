@@ -18,6 +18,8 @@ ifeq ($(OS),Windows_NT)         # Windows settings. Assume MinGW compiler. To us
   CC = gcc                      # Use MinGW gcc compiler
   CFLAGS += -lws2_32            # Link against Winsock library
   DELETE = cmd /C del /Q /F /S  # Command prompt command to delete files
+else
+  CFLAGS += -lpthread -ldl      # Link against pthread and dl for SQLite on Linux
 endif
 
 all: $(PROG)

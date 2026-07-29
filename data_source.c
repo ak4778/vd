@@ -25,6 +25,7 @@ static int exec_sql(const char *sql) {
 
 #endif
 
+#if defined(CSV_MODE)
 static void csv_escape_field(const char *src, char *dst, int dst_len) {
   if (src == NULL || dst == NULL || dst_len <= 0) return;
   int needs_quote = 0;
@@ -52,6 +53,7 @@ static void csv_escape_field(const char *src, char *dst, int dst_len) {
   if (pos < dst_len - 1) dst[pos++] = '"';
   dst[pos] = '\0';
 }
+#endif
 
 #if !defined(CSV_MODE)
 static int file_exists(const char *path) {
