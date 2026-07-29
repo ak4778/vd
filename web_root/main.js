@@ -589,7 +589,7 @@ return html`
           value=${searchKeyword}
           oninput=${(e) => setSearchKeyword(e.target.value)}
           placeholder="搜索通道名称或公司名称..."
-          class="w-96 px-3 py-1.5 pl-11 ${searchKeyword ? 'pr-10' : 'pr-3'} border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          class="w-96 px-3 py-1.5 pl-10 ${searchKeyword ? 'pr-10' : 'pr-3'} border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
         />
         <svg class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="11" cy="11" r="8"/>
