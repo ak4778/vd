@@ -23,6 +23,7 @@ struct ds_query {
   const char *isOnline;
   const char *cameraType;
   const char *operation;
+  const char *keyword;
   int page;
   int pageSize;
 };

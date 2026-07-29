@@ -3,7 +3,6 @@
 
 #include "net.h"
 #include "data_source.h"
-#include <windows.h>
 
 #define mg_msleep(ms) Sleep(ms)
 
@@ -232,12 +231,14 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
   char online_filter[16] = "";
   char camera_filter[16] = "";
   char operation_filter[64] = "";
+  char keyword_buf[256] = "";
 
   mg_http_get_var(&hm->query, "page", page_buf, sizeof(page_buf));
   mg_http_get_var(&hm->query, "pageSize", size_buf, sizeof(size_buf));
   mg_http_get_var(&hm->query, "isOnline", online_filter, sizeof(online_filter));
   mg_http_get_var(&hm->query, "cameraType", camera_filter, sizeof(camera_filter));
   mg_http_get_var(&hm->query, "operation", operation_filter, sizeof(operation_filter));
+  mg_http_get_var(&hm->query, "keyword", keyword_buf, sizeof(keyword_buf));
 
   if (page_buf[0] != '\0') page = atoi(page_buf);
   if (size_buf[0] != '\0') page_size = atoi(size_buf);
@@ -310,6 +311,10 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
   }
   if (has_operation) {
     query.operation = operation_filter;
+  }
+
+  if (keyword_buf[0] != '\0') {
+    query.keyword = keyword_buf;
   }
 
   struct ds_result result = {0};
@@ -555,6 +560,13 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       handle_login(c, u);
     } else if (mg_match(hm->uri, mg_str("/api/mode/get"), NULL)) {
       mg_http_reply(c, 200, s_json_header, "{\"mode\":\"%s\",\"available\":%d}", DS_MODE, ds_is_available());
+    } else if (mg_match(hm->uri, mg_str("/api/config/get"), NULL)) {
+      char *cfg_buf = get_config_buf();
+      if (cfg_buf != NULL) {
+        mg_http_reply(c, 200, s_json_header, "%s", cfg_buf);
+      } else {
+        mg_http_reply(c, 500, s_json_header, "{\"error\":\"Cannot read config\"}");
+      }
     } else if (mg_match(hm->uri, mg_str("/api/nodes/get"), NULL)) {
       handle_nodes_get(c, hm);
     } else if (mg_match(hm->uri, mg_str("/api/nodes/batchset"), NULL)) {

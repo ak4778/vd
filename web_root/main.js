@@ -77,6 +77,9 @@ function Events({}) {
   const [isOnlineFilter, setIsOnlineFilter] = useState(['0', '1']);
   const [cameraTypeFilter, setCameraTypeFilter] = useState(['1', '2', '3']);
   const [operationFilter, setOperationFilter] = useState(['', '1', '2', '3', '4']);
+  const [searchKeyword, setSearchKeyword] = useState('');
+  const [debouncedKeyword, setDebouncedKeyword] = useState('');
+  const keywordTimerRef = useRef(null);
   const [showOnlineDropdown, setShowOnlineDropdown] = useState(false);
   const [showCameraDropdown, setShowCameraDropdown] = useState(false);
   const [showOperationDropdown, setShowOperationDropdown] = useState(false);
@@ -93,7 +96,7 @@ function Events({}) {
   const fields = data.fields;
   const totalItems = data.totalItems;
 
-  const loadData = (pg, onlineFilter, cameraFilter, opFilter) => {
+  const loadData = (pg, onlineFilter, cameraFilter, opFilter, keyword) => {
     setIsLoading(true);
     setErrorMsg('');
     let url = `api/nodes/get?page=${pg}&pageSize=${itemsPerPage}&t=${Date.now()}`;
@@ -101,6 +104,9 @@ function Events({}) {
     url += `&cameraType=${cameraFilter.join(',')}`;
     const mappedOpFilter = opFilter ? opFilter.map(v => v === '' ? '0' : v) : [];
     url += `&operation=${encodeURIComponent(mappedOpFilter.join(','))}`;
+    if (keyword) {
+      url += `&keyword=${encodeURIComponent(keyword)}`;
+    }
     fetchWithTimeout(url, { method: 'GET', cache: 'no-cache', credentials: 'include' })
       .then(r => {
         if (!r.ok) throw new Error(`HTTP error! status: ${r.status}`);
@@ -173,9 +179,33 @@ function Events({}) {
   const cameraKey = JSON.stringify(cameraTypeFilter);
   const operationKey = JSON.stringify(operationFilter);
 
+  // Debounce search keyword (300ms)
   useEffect(() => {
-    loadData(page, isOnlineFilter, cameraTypeFilter, operationFilter);
-  }, [page, onlineKey, cameraKey, operationKey]);
+    if (keywordTimerRef.current) {
+      clearTimeout(keywordTimerRef.current);
+    }
+    keywordTimerRef.current = setTimeout(() => {
+      setDebouncedKeyword(searchKeyword);
+    }, 300);
+    return () => {
+      if (keywordTimerRef.current) {
+        clearTimeout(keywordTimerRef.current);
+      }
+    };
+  }, [searchKeyword]);
+
+  // When debounced keyword changes, jump to page 1
+  useEffect(() => {
+    setPage(1);
+    localStorage.removeItem('page');
+  }, [debouncedKeyword]);
+
+  // Use debouncedKeyword as dependency
+  const keywordKey = debouncedKeyword;
+
+  useEffect(() => {
+    loadData(page, isOnlineFilter, cameraTypeFilter, operationFilter, debouncedKeyword);
+  }, [page, onlineKey, cameraKey, operationKey, keywordKey]);
 
 
 
@@ -553,6 +583,30 @@ return html`
   <div class="font-semibold flex items-center text-gray-600 px-3 justify-between whitespace-nowrap border-b border-gray-200 py-2 flex-shrink-0">
     <div class="font-semibold flex items-center text-gray-600">
       <div class="mr-4">设备通道(${totalItems})</div>
+      <div class="relative mr-4 flex items-center">
+        <input
+          type="text"
+          value=${searchKeyword}
+          oninput=${(e) => setSearchKeyword(e.target.value)}
+          placeholder="搜索通道名称或公司名称..."
+          class="w-96 px-3 py-1.5 pl-11 ${searchKeyword ? 'pr-10' : 'pr-3'} border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+        />
+        <svg class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/>
+          <path d="M21 21l-4.35-4.35"/>
+        </svg>
+        ${searchKeyword && html`
+          <button
+            type="button"
+            onclick=${() => setSearchKeyword('')}
+            class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded"
+          >
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M18 6L6 18M6 6l12 12"/>
+            </svg>
+          </button>
+        `}
+      </div>
       ${selectedNodes.length > 0 && html`
         <div class="flex items-center gap-2 mr-4">
           <span class="text-sm text-blue-600">已选择 ${selectedNodes.length} 行</span>

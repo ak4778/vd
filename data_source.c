@@ -3,8 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include <sys/stat.h>
-#include <windows.h>
 
 #if !defined(CSV_MODE)
 #include "sqlite3.h"
@@ -57,8 +55,12 @@ static void csv_escape_field(const char *src, char *dst, int dst_len) {
 
 #if !defined(CSV_MODE)
 static int file_exists(const char *path) {
-  struct stat st;
-  return (stat(path, &st) == 0);
+  FILE *f = fopen(path, "rb");
+  if (f) {
+    fclose(f);
+    return 1;
+  }
+  return 0;
 }
 
 int ds_init(const char *path) {
@@ -140,8 +142,8 @@ int ds_is_available(void) {
 int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
   if (s_db == NULL || query == NULL || result == NULL) return -1;
 
-  char sql[1024];
-  char where[512] = "";
+  char sql[2048];
+  char where[1024] = "";
   int first = 1;
 
   if (query->isOnline != NULL) {
@@ -214,6 +216,26 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
       free(token);
       strcat(where, ")");
     }
+    first = 0;
+  }
+
+  if (query->keyword != NULL && query->keyword[0] != '\0') {
+    if (!first) strcat(where, " AND ");
+    // 转义单引号
+    char escaped[256];
+    int ei = 0;
+    for (int ki = 0; query->keyword[ki] != '\0' && ei < (int)sizeof(escaped) - 2; ki++) {
+      if (query->keyword[ki] == '\'') {
+        escaped[ei++] = '\'';
+        escaped[ei++] = '\'';
+      } else {
+        escaped[ei++] = query->keyword[ki];
+      }
+    }
+    escaped[ei] = '\0';
+    
+    snprintf(where + strlen(where), sizeof(where) - strlen(where),
+             "(name LIKE '%%%s%%' OR P4 LIKE '%%%s%%')", escaped, escaped);
     first = 0;
   }
 
@@ -292,13 +314,17 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
 int ds_update_nodes(struct ds_node *nodes, int count) {
   if (s_db == NULL || nodes == NULL || count <= 0) return -1;
 
-  sqlite3_exec(s_db, "BEGIN TRANSACTION", NULL, NULL, NULL);
+  int rc = sqlite3_exec(s_db, "BEGIN TRANSACTION", NULL, NULL, NULL);
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "BEGIN TRANSACTION failed: %s\n", sqlite3_errmsg(s_db));
+    return -1;
+  }
 
   const char *sql = 
       "UPDATE nodes SET operation = ?, customOperation = ? WHERE id = ?";
 
   sqlite3_stmt *stmt;
-  int rc = sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL);
+  rc = sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL);
   if (rc != SQLITE_OK) {
     fprintf(stderr, "SQL prepare error: %s\n", sqlite3_errmsg(s_db));
     sqlite3_exec(s_db, "ROLLBACK", NULL, NULL, NULL);
@@ -307,9 +333,9 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
 
   for (int i = 0; i < count; i++) {
     struct ds_node *node = &nodes[i];
-    sqlite3_bind_text(stmt, 1, node->operation, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, node->customOperation, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 3, node->id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 1, node->operation, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, node->customOperation, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, node->id, -1, SQLITE_TRANSIENT);
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
@@ -319,6 +345,7 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
       return -1;
     }
     sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
   }
 
   sqlite3_finalize(stmt);
@@ -344,6 +371,7 @@ typedef struct {
   char cameraType[CACHE_FIELD_SIZE];
   char operation[CACHE_FIELD_SIZE];
   char customOperation[CACHE_FIELD_SIZE];
+  char P4[CACHE_FIELD_SIZE];
 } csv_node_t;
 
 static csv_node_t *g_cache = NULL;
@@ -377,6 +405,7 @@ static int load_csv_cache(void) {
   int header_count = 0;
   int id_idx = -1, name_idx = -1, channelCode_idx = -1;
   int isOnline_idx = -1, cameraType_idx = -1, operation_idx = -1, customOperation_idx = -1;
+  int P4_idx = -1;
 
   if (fgets(line, sizeof(line), fp) == NULL) {
     fclose(fp);
@@ -408,6 +437,7 @@ static int load_csv_cache(void) {
       else if (strcmp(header, "cameraType") == 0) cameraType_idx = header_count;
       else if (strcmp(header, "operation") == 0) operation_idx = header_count;
       else if (strcmp(header, "customOperation") == 0) customOperation_idx = header_count;
+      else if (strcmp(header, "P4") == 0) P4_idx = header_count;
       header_count++;
     }
     while ((*end == ',' || *end == '\n' || *end == '\r') && *end != '\0') end++;
@@ -433,6 +463,7 @@ static int load_csv_cache(void) {
     node->cameraType[0] = '\0';
     node->operation[0] = '\0';
     node->customOperation[0] = '\0';
+    node->P4[0] = '\0';
 
     if (id_idx >= 0) get_csv_field(line, id_idx, node->id, sizeof(node->id));
     if (name_idx >= 0) get_csv_field(line, name_idx, node->name, sizeof(node->name));
@@ -441,6 +472,7 @@ static int load_csv_cache(void) {
     if (cameraType_idx >= 0) get_csv_field(line, cameraType_idx, node->cameraType, sizeof(node->cameraType));
     if (operation_idx >= 0) get_csv_field(line, operation_idx, node->operation, sizeof(node->operation));
     if (customOperation_idx >= 0) get_csv_field(line, customOperation_idx, node->customOperation, sizeof(node->customOperation));
+    if (P4_idx >= 0) get_csv_field(line, P4_idx, node->P4, sizeof(node->P4));
 
     if (node->id[0] != '\0') g_cache_count++;
   }
@@ -548,6 +580,19 @@ int ds_is_available(void) {
   return 1;
 }
 
+static int contains_ignore_case(const char *haystack, const char *needle) {
+  if (!haystack || !needle || !*needle) return 1;
+  while (*haystack) {
+    const char *h = haystack, *n = needle;
+    while (*h && *n && (tolower((unsigned char)*h) == tolower((unsigned char)*n))) {
+      h++; n++;
+    }
+    if (!*n) return 1;
+    haystack++;
+  }
+  return 0;
+}
+
 int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
   if (g_csv_path == NULL || query == NULL || result == NULL) return -1;
 
@@ -556,6 +601,7 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
   int skip_count = (query->page - 1) * query->pageSize;
   int total_count = 0;
   int page_start_idx = -1;
+  int has_keyword = (query->keyword != NULL && query->keyword[0] != '\0');
 
   for (int i = 0; i < g_cache_count; i++) {
     csv_node_t *node = &g_cache[i];
@@ -576,6 +622,11 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
       } else if (!is_value_in_list(node->operation, query->operation)) {
         continue;
       }
+    }
+
+    if (has_keyword) {
+      if (!contains_ignore_case(node->name, query->keyword) &&
+          !contains_ignore_case(node->P4, query->keyword)) continue;
     }
 
     if (total_count == skip_count) {
@@ -611,6 +662,11 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
         }
       }
 
+      if (has_keyword) {
+        if (!contains_ignore_case(node->name, query->keyword) &&
+            !contains_ignore_case(node->P4, query->keyword)) continue;
+      }
+
       struct ds_node *result_node = &result->nodes[result->count];
       strncpy(result_node->id, node->id, sizeof(result_node->id) - 1);
       strncpy(result_node->name, node->name, sizeof(result_node->name) - 1);
@@ -619,6 +675,9 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
       strncpy(result_node->cameraType, node->cameraType, sizeof(result_node->cameraType) - 1);
       strncpy(result_node->operation, node->operation, sizeof(result_node->operation) - 1);
       strncpy(result_node->customOperation, node->customOperation, sizeof(result_node->customOperation) - 1);
+      strncpy(result_node->P1, "", sizeof(result_node->P1) - 1);
+      strncpy(result_node->P3, "", sizeof(result_node->P3) - 1);
+      strncpy(result_node->P4, node->P4, sizeof(result_node->P4) - 1);
 
       result->count++;
     }
