@@ -3,6 +3,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <sys/stat.h>
+#include <time.h>
+
+#if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
+#endif
 
 #if !defined(CSV_MODE)
 #include "sqlite3.h"
@@ -851,10 +857,15 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
   fclose(fp_in);
   fclose(fp_out);
 
+#if defined(_WIN32) || defined(_WIN64)
   if (!MoveFileEx(edited_path, g_csv_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
     remove(g_csv_path);
     rename(edited_path, g_csv_path);
   }
+#else
+  remove(g_csv_path);
+  rename(edited_path, g_csv_path);
+#endif
 
   if (g_cache != NULL) {
     free(g_cache);
