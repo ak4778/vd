@@ -562,13 +562,26 @@ class EVOClient:
         
         self.find_fields_with_commas()
         
+        # Collect all P fields and decide which to keep
+        all_p_fields = set()
+        for node in self.final_leaf_nodes:
+            for k in node.keys():
+                if k.startswith('P') and k[1:].isdigit():
+                    all_p_fields.add(k)
+        
+        keep_p = {'P1', 'P4'}
+        drop_p = all_p_fields - keep_p
+        
         all_keys = set()
         for node in self.final_leaf_nodes:
             all_keys.update(node.keys())
         
-        priority_fields = ['id', 'name', 'channelCode', 'pId', 'isParent', 'hasMoreNode']
+        priority_fields = ['id', 'name', 'channelCode', 'pId', 'isParent', 'hasMoreNode',
+                         'P1', 'P4']
         fieldnames = [k for k in priority_fields if k in all_keys]
-        fieldnames += sorted([k for k in all_keys if k not in priority_fields])
+        fieldnames += sorted([k for k in all_keys if k not in priority_fields and k not in drop_p])
+        
+        self.logger.info(f"CSV导出: 保留P字段={keep_p}, 丢弃P字段={drop_p if drop_p else '无'}")
         
         def flatten_value(val):
             if isinstance(val, (dict, list)):
@@ -580,7 +593,7 @@ class EVOClient:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 for node in self.final_leaf_nodes:
-                    flattened_node = {k: flatten_value(v) for k, v in node.items()}
+                    flattened_node = {k: flatten_value(v) for k, v in node.items() if k not in drop_p}
                     writer.writerow(flattened_node)
             self.logger.info(f"CSV文件已保存: {filename}")
             return True
