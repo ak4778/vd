@@ -7,7 +7,7 @@
 
 #define mg_msleep(ms) Sleep(ms)
 
-#ifdef USE_SQLITE
+#if !defined(CSV_MODE)
 #define DS_MODE "SQLite"
 #define DS_MODE_TYPE 1
 #else

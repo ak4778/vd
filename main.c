@@ -54,7 +54,7 @@ int main(void) {
 
   mg_log_set(MG_LL_DEBUG);  // Set debug log level
 
-#ifdef USE_SQLITE
+#if !defined(CSV_MODE)
   // Initialize SQLite database with path from config
   const char *sqlite_path = get_path_from_config("$.sqliteFilePath", "device_dashboard.db");
   if (ds_init(sqlite_path) != 0) {

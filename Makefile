@@ -4,11 +4,12 @@ OUT ?= -o $(PROG)       # Compiler argument for output file
 SOURCES = main.c mongoose.c net.c data_source.c   # Source code files
 CFLAGS = -W -Wall -Wextra -g3 -ggdb -O0 -fno-omit-frame-pointer -I.                # Build options
 
-# Database mode: USE_SQLITE or CSV (default)
-# To use SQLite: make USE_SQLITE=1
-# To use CSV (default): make
-ifeq ($(USE_SQLITE),1)
-  CFLAGS += -DUSE_SQLITE
+# Database mode: SQLite (default) or CSV
+# To use SQLite (default): make
+# To use CSV: make CSV_MODE=1
+ifeq ($(CSV_MODE),1)
+  CFLAGS += -DCSV_MODE
+else
   SOURCES += sqlite3.c
 endif
 

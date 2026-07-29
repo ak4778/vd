@@ -441,7 +441,21 @@ function Events({}) {
         setEditedOperations({});
         setEditedCustomOperations({});
         setHasPendingChanges(false);
-        loadData(page, isOnlineFilter, cameraTypeFilter, operationFilter);
+        // 直接更新本地状态，省去 GET 请求
+        setData(prev => {
+          const newNodes = prev.nodes.map(node => {
+            const change = updates.find(u => u.id === node.id);
+            if (change) {
+              return {
+                ...node,
+                operation: change.operation,
+                customOperation: change.customOperation
+              };
+            }
+            return node;
+          });
+          return { ...prev, nodes: newNodes };
+        });
       }
     })
     .catch(err => console.error('Save error:', err));

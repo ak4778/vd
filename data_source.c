@@ -6,11 +6,11 @@
 #include <sys/stat.h>
 #include <windows.h>
 
-#ifdef USE_SQLITE
+#if !defined(CSV_MODE)
 #include "sqlite3.h"
 #endif
 
-#ifdef USE_SQLITE
+#if !defined(CSV_MODE)
 static sqlite3 *s_db = NULL;
 static int s_db_file_exists = 0;
 
@@ -55,7 +55,7 @@ static void csv_escape_field(const char *src, char *dst, int dst_len) {
   dst[pos] = '\0';
 }
 
-#ifdef USE_SQLITE
+#if !defined(CSV_MODE)
 static int file_exists(const char *path) {
   struct stat st;
   return (stat(path, &st) == 0);
