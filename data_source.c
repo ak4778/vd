@@ -16,6 +16,12 @@
 #include "sqlite3.h"
 #endif
 
+#define MAX_SQL_LEN           2048
+#define MAX_WHERE_LEN         1024
+#define MAX_BIND_PARAMS        64
+#define MAX_TOKENS_PER_FILTER  16
+#define MAX_NODE_BUFFER_SIZE  1024
+
 // Cross-platform mutex
 #if defined(_WIN32) || defined(_WIN64)
 static CRITICAL_SECTION s_sqlite_mutex;
@@ -53,6 +59,148 @@ static int exec_sql(const char *sql) {
     return -1;
   }
   return 0;
+}
+
+static int count_commas(const char *str) {
+  if (str == NULL || *str == '\0') return 0;
+  int count = 1;
+  for (const char *p = str; *p != '\0'; p++) {
+    if (*p == ',') count++;
+  }
+  return count;
+}
+
+struct param_list {
+  char *values[MAX_BIND_PARAMS];
+  int lens[MAX_BIND_PARAMS];
+  int is_null[MAX_BIND_PARAMS];
+  int count;
+};
+
+static void plist_init(struct param_list *pl) {
+  memset(pl, 0, sizeof(*pl));
+}
+
+static int plist_add_text(struct param_list *pl, const char *text) {
+  if (pl->count >= MAX_BIND_PARAMS) return -1;
+  pl->values[pl->count] = text ? strdup(text) : NULL;
+  pl->lens[pl->count] = text ? (int) strlen(text) : 0;
+  pl->is_null[pl->count] = (text == NULL);
+  pl->count++;
+  return 0;
+}
+
+static void plist_bind(sqlite3_stmt *stmt, struct param_list *pl) {
+  for (int i = 0; i < pl->count; i++) {
+    int idx = i + 1;
+    if (pl->is_null[i]) {
+      sqlite3_bind_null(stmt, idx);
+    } else {
+      sqlite3_bind_text(stmt, idx, pl->values[i], pl->lens[i], SQLITE_TRANSIENT);
+    }
+  }
+}
+
+static void plist_free(struct param_list *pl) {
+  for (int i = 0; i < pl->count; i++) {
+    if (pl->values[i] != NULL) {
+      free(pl->values[i]);
+      pl->values[i] = NULL;
+    }
+  }
+  pl->count = 0;
+}
+
+static int add_filter_in(char *where, int where_len, int pos, const char *col,
+                        const char *values, int has_value, struct param_list *params) {
+  // has_value=0：参数未出现在 URL，跳过过滤
+  if (!has_value) return pos;
+  // has_value=1 且 values 为空字符串：用户取消了全部选择，返回 0 条（1=0 永假条件）
+  if (values == NULL || *values == '\0') {
+    pos += snprintf(where + pos, (size_t)(where_len - pos), "%s1=0",
+                    pos > 0 ? " AND " : "");
+    return pos;
+  }
+
+  int n = count_commas(values);
+  if (n > MAX_TOKENS_PER_FILTER) n = MAX_TOKENS_PER_FILTER;
+
+  if (n == 1) {
+    pos += snprintf(where + pos, (size_t)(where_len - pos), "%s%s = ?",
+                    pos > 0 ? " AND " : "", col);
+    plist_add_text(params, values);
+  } else {
+    pos += snprintf(where + pos, (size_t)(where_len - pos), "%s%s IN (",
+                    pos > 0 ? " AND " : "", col);
+    char *copy = strdup(values);
+    char *saveptr = NULL;
+    char *t = strtok_r(copy, ",", &saveptr);
+    int idx = 0;
+    while (t != NULL && idx < n) {
+      if (idx > 0) pos += snprintf(where + pos, (size_t)(where_len - pos), ", ");
+      pos += snprintf(where + pos, (size_t)(where_len - pos), "?");
+      plist_add_text(params, t);
+      t = strtok_r(NULL, ",", &saveptr);
+      idx++;
+    }
+    free(copy);
+    pos += snprintf(where + pos, (size_t)(where_len - pos), ")");
+  }
+  return pos;
+}
+
+static int build_where_sql(struct ds_query *query, char *where, int where_len,
+                           struct param_list *params) {
+  int pos = 0;
+
+  pos = add_filter_in(where, where_len, pos, "isOnline", query->isOnline,
+                      query->has_isOnline, params);
+  pos = add_filter_in(where, where_len, pos, "cameraType", query->cameraType,
+                      query->has_cameraType, params);
+
+  // has_operation=0：参数未出现，跳过
+  if (query->has_operation) {
+    // has_operation=1 且值为空：用户取消了全部选择，返回 0 条
+    if (query->operation == NULL || query->operation[0] == '\0') {
+      pos += snprintf(where + pos, (size_t)(where_len - pos), "%s1=0",
+                      pos > 0 ? " AND " : "");
+    } else {
+      char *copy = strdup(query->operation);
+      char *saveptr = NULL;
+      char *t = strtok_r(copy, ",", &saveptr);
+
+      pos += snprintf(where + pos, (size_t)(where_len - pos), "%s(",
+                      pos > 0 ? " AND " : "");
+
+      int idx = 0;
+      while (t != NULL) {
+        if (idx > 0) pos += snprintf(where + pos, (size_t)(where_len - pos), " OR ");
+        if (strcmp(t, "0") == 0) {
+          pos += snprintf(where + pos, (size_t)(where_len - pos),
+                           "(operation IS NULL OR operation = '')");
+        } else {
+          pos += snprintf(where + pos, (size_t)(where_len - pos), "operation = ?");
+          plist_add_text(params, t);
+        }
+        t = strtok_r(NULL, ",", &saveptr);
+        idx++;
+      }
+      free(copy);
+      pos += snprintf(where + pos, (size_t)(where_len - pos), ")");
+    }
+  }
+
+  if (query->keyword != NULL && query->keyword[0] != '\0') {
+    char like_pattern[MAX_NODE_BUFFER_SIZE];
+    snprintf(like_pattern, sizeof(like_pattern), "%%%s%%", query->keyword);
+
+    pos += snprintf(where + pos, (size_t)(where_len - pos),
+                     "%s(name LIKE ? OR P4 LIKE ?)", pos > 0 ? " AND " : "");
+    plist_add_text(params, like_pattern);
+    plist_add_text(params, like_pattern);
+  }
+
+  return pos;
 }
 
 #endif
@@ -111,7 +259,11 @@ int ds_init(const char *path) {
     return -1;
   }
 
-  const char *create_table = 
+  sqlite3_busy_timeout(s_db, 5000);
+
+  exec_sql("PRAGMA journal_mode=WAL");
+
+  const char *create_table =
       "CREATE TABLE IF NOT EXISTS nodes ("
       "id TEXT PRIMARY KEY,"
       "name TEXT,"
@@ -124,7 +276,7 @@ int ds_init(const char *path) {
       "P3 TEXT,"
       "P4 TEXT"
       ");";
-  
+
   if (exec_sql(create_table) != 0) {
     sqlite3_close(s_db);
     s_db = NULL;
@@ -132,20 +284,13 @@ int ds_init(const char *path) {
     return -1;
   }
 
-  const char *create_index_online = "CREATE INDEX IF NOT EXISTS idx_nodes_online ON nodes(isOnline);";
-  const char *create_index_camera = "CREATE INDEX IF NOT EXISTS idx_nodes_camera ON nodes(cameraType);";
-  const char *create_index_operation = "CREATE INDEX IF NOT EXISTS idx_nodes_operation ON nodes(operation);";
-  const char *create_index_p1 = "CREATE INDEX IF NOT EXISTS idx_nodes_p1 ON nodes(P1);";
-  const char *create_index_p3 = "CREATE INDEX IF NOT EXISTS idx_nodes_p3 ON nodes(P3);";
-  const char *create_index_p4 = "CREATE INDEX IF NOT EXISTS idx_nodes_p4 ON nodes(P4);";
+  exec_sql("CREATE INDEX IF NOT EXISTS idx_nodes_online ON nodes(isOnline)");
+  exec_sql("CREATE INDEX IF NOT EXISTS idx_nodes_camera ON nodes(cameraType)");
+  exec_sql("CREATE INDEX IF NOT EXISTS idx_nodes_operation ON nodes(operation)");
+  exec_sql("CREATE INDEX IF NOT EXISTS idx_nodes_p1 ON nodes(P1)");
+  exec_sql("CREATE INDEX IF NOT EXISTS idx_nodes_p3 ON nodes(P3)");
+  exec_sql("CREATE INDEX IF NOT EXISTS idx_nodes_p4 ON nodes(P4)");
 
-  exec_sql(create_index_online);
-  exec_sql(create_index_camera);
-  exec_sql(create_index_operation);
-  exec_sql(create_index_p1);
-  exec_sql(create_index_p3);
-  exec_sql(create_index_p4);
-  
   s_db_file_exists = file_exists(path);
 
   mutex_unlock(&s_sqlite_mutex);
@@ -168,22 +313,21 @@ int ds_is_available(void) {
     mutex_unlock(&s_sqlite_mutex);
     return 0;
   }
-  
-  // Check if database has any data (count > 0)
+
   sqlite3_stmt *stmt;
   int rc = sqlite3_prepare_v2(s_db, "SELECT COUNT(*) FROM nodes", -1, &stmt, NULL);
   if (rc != SQLITE_OK) {
     mutex_unlock(&s_sqlite_mutex);
     return 0;
   }
-  
+
   rc = sqlite3_step(stmt);
   if (rc != SQLITE_ROW) {
     sqlite3_finalize(stmt);
     mutex_unlock(&s_sqlite_mutex);
     return 0;
   }
-  
+
   int count = sqlite3_column_int(stmt, 0);
   sqlite3_finalize(stmt);
   result = count > 0;
@@ -195,102 +339,15 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
   if (s_db == NULL || query == NULL || result == NULL) return -1;
   mutex_lock(&s_sqlite_mutex);
 
-  char sql[2048];
-  char where[1024] = "";
-  int first = 1;
+  char where[MAX_WHERE_LEN] = "";
+  struct param_list params;
+  plist_init(&params);
 
-  if (query->isOnline != NULL) {
-    if (!first) strcat(where, " AND ");
-    if (query->isOnline[0] == '\0') {
-      strcat(where, "0");
-    } else {
-      strcat(where, "isOnline IN (");
-      char *token = strdup(query->isOnline);
-      char *t = token;
-      int tok_first = 1;
-      while ((t = strtok(t, ",")) != NULL) {
-        if (!tok_first) strcat(where, ",");
-        strcat(where, "'");
-        strcat(where, t);
-        strcat(where, "'");
-        tok_first = 0;
-        t = NULL;
-      }
-      free(token);
-      strcat(where, ")");
-    }
-    first = 0;
-  }
+  build_where_sql(query, where, MAX_WHERE_LEN, &params);
 
-  if (query->cameraType != NULL) {
-    if (!first) strcat(where, " AND ");
-    if (query->cameraType[0] == '\0') {
-      strcat(where, "0");
-    } else {
-      strcat(where, "cameraType IN (");
-      char *token = strdup(query->cameraType);
-      char *t = token;
-      int tok_first = 1;
-      while ((t = strtok(t, ",")) != NULL) {
-        if (!tok_first) strcat(where, ",");
-        strcat(where, "'");
-        strcat(where, t);
-        strcat(where, "'");
-        tok_first = 0;
-        t = NULL;
-      }
-      free(token);
-      strcat(where, ")");
-    }
-    first = 0;
-  }
-
-  if (query->operation != NULL) {
-    if (!first) strcat(where, " AND ");
-    if (query->operation[0] == '\0') {
-      strcat(where, "0");
-    } else {
-      char *token = strdup(query->operation);
-      char *t = token;
-      int tok_first = 1;
-      strcat(where, "(");
-      while ((t = strtok(t, ",")) != NULL) {
-        if (!tok_first) strcat(where, " OR ");
-        if (strcmp(t, "0") == 0) {
-          strcat(where, "operation IS NULL OR operation = ''");
-        } else {
-          strcat(where, "operation = '");
-          strcat(where, t);
-          strcat(where, "'");
-        }
-        tok_first = 0;
-        t = NULL;
-      }
-      free(token);
-      strcat(where, ")");
-    }
-    first = 0;
-  }
-
-  if (query->keyword != NULL && query->keyword[0] != '\0') {
-    if (!first) strcat(where, " AND ");
-    // 转义单引号
-    char escaped[256];
-    int ei = 0;
-    for (int ki = 0; query->keyword[ki] != '\0' && ei < (int)sizeof(escaped) - 2; ki++) {
-      if (query->keyword[ki] == '\'') {
-        escaped[ei++] = '\'';
-        escaped[ei++] = '\'';
-      } else {
-        escaped[ei++] = query->keyword[ki];
-      }
-    }
-    escaped[ei] = '\0';
-    
-    snprintf(where + strlen(where), sizeof(where) - strlen(where),
-             "(name LIKE '%%%s%%' OR P4 LIKE '%%%s%%')", escaped, escaped);
-    first = 0;
-  }
+  char sql[MAX_SQL_LEN];
+  sqlite3_stmt *stmt;
+  int rc;
 
   if (where[0] == '\0') {
     snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM nodes");
@@ -298,17 +355,20 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
     snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM nodes WHERE %s", where);
   }
 
-  sqlite3_stmt *stmt;
-  int rc = sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL);
+  rc = sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL);
   if (rc != SQLITE_OK) {
-    fprintf(stderr, "SQL prepare error: %s\n", sqlite3_errmsg(s_db));
+    fprintf(stderr, "SQL prepare error: %s (sql: %s)\n", sqlite3_errmsg(s_db), sql);
+    plist_free(&params);
     mutex_unlock(&s_sqlite_mutex);
     return -1;
   }
 
+  plist_bind(stmt, &params);
   rc = sqlite3_step(stmt);
   if (rc != SQLITE_ROW) {
+    fprintf(stderr, "SQL step error: %s (sql: %s)\n", sqlite3_errmsg(s_db), sql);
     sqlite3_finalize(stmt);
+    plist_free(&params);
     mutex_unlock(&s_sqlite_mutex);
     return -1;
   }
@@ -316,22 +376,30 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
   sqlite3_finalize(stmt);
 
   int offset = (query->page - 1) * query->pageSize;
+  int bind_idx = params.count;
+
   if (where[0] == '\0') {
-    snprintf(sql, sizeof(sql), "SELECT * FROM nodes LIMIT %d OFFSET %d", query->pageSize, offset);
+    snprintf(sql, sizeof(sql), "SELECT * FROM nodes LIMIT ? OFFSET ?");
   } else {
-    snprintf(sql, sizeof(sql), "SELECT * FROM nodes WHERE %s LIMIT %d OFFSET %d", where, query->pageSize, offset);
+    snprintf(sql, sizeof(sql), "SELECT * FROM nodes WHERE %s LIMIT ? OFFSET ?", where);
   }
 
   rc = sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL);
   if (rc != SQLITE_OK) {
-    fprintf(stderr, "SQL prepare error: %s\n", sqlite3_errmsg(s_db));
+    fprintf(stderr, "SQL prepare error: %s (sql: %s)\n", sqlite3_errmsg(s_db), sql);
+    plist_free(&params);
     mutex_unlock(&s_sqlite_mutex);
     return -1;
   }
 
-  result->nodes = (struct ds_node *) malloc(sizeof(struct ds_node) * query->pageSize);
+  plist_bind(stmt, &params);
+  sqlite3_bind_int(stmt, bind_idx + 1, query->pageSize);
+  sqlite3_bind_int(stmt, bind_idx + 2, offset);
+
+  result->nodes = (struct ds_node *) malloc(sizeof(struct ds_node) * (size_t) query->pageSize);
   if (result->nodes == NULL) {
     sqlite3_finalize(stmt);
+    plist_free(&params);
     mutex_unlock(&s_sqlite_mutex);
     return -1;
   }
@@ -350,21 +418,22 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
     const char *p3 = (const char *) sqlite3_column_text(stmt, 8);
     const char *p4 = (const char *) sqlite3_column_text(stmt, 9);
 
-    strncpy(node->id, id ? id : "", sizeof(node->id) - 1);
-    strncpy(node->name, name ? name : "", sizeof(node->name) - 1);
-    strncpy(node->channelCode, channelCode ? channelCode : "", sizeof(node->channelCode) - 1);
-    strncpy(node->isOnline, isOnline ? isOnline : "", sizeof(node->isOnline) - 1);
-    strncpy(node->cameraType, cameraType ? cameraType : "", sizeof(node->cameraType) - 1);
-    strncpy(node->operation, operation ? operation : "", sizeof(node->operation) - 1);
-    strncpy(node->customOperation, customOperation ? customOperation : "", sizeof(node->customOperation) - 1);
-    strncpy(node->P1, p1 ? p1 : "", sizeof(node->P1) - 1);
-    strncpy(node->P3, p3 ? p3 : "", sizeof(node->P3) - 1);
-    strncpy(node->P4, p4 ? p4 : "", sizeof(node->P4) - 1);
+    snprintf(node->id, sizeof(node->id), "%s", id ? id : "");
+    snprintf(node->name, sizeof(node->name), "%s", name ? name : "");
+    snprintf(node->channelCode, sizeof(node->channelCode), "%s", channelCode ? channelCode : "");
+    snprintf(node->isOnline, sizeof(node->isOnline), "%s", isOnline ? isOnline : "");
+    snprintf(node->cameraType, sizeof(node->cameraType), "%s", cameraType ? cameraType : "");
+    snprintf(node->operation, sizeof(node->operation), "%s", operation ? operation : "");
+    snprintf(node->customOperation, sizeof(node->customOperation), "%s", customOperation ? customOperation : "");
+    snprintf(node->P1, sizeof(node->P1), "%s", p1 ? p1 : "");
+    snprintf(node->P3, sizeof(node->P3), "%s", p3 ? p3 : "");
+    snprintf(node->P4, sizeof(node->P4), "%s", p4 ? p4 : "");
 
     result->count++;
   }
 
   sqlite3_finalize(stmt);
+  plist_free(&params);
   mutex_unlock(&s_sqlite_mutex);
   return 0;
 }
@@ -380,8 +449,7 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
     return -1;
   }
 
-  const char *sql = 
-      "UPDATE nodes SET operation = ?, customOperation = ? WHERE id = ?";
+  const char *sql = "UPDATE nodes SET operation = ?, customOperation = ? WHERE id = ?";
 
   sqlite3_stmt *stmt;
   rc = sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL);
@@ -619,8 +687,7 @@ int ds_init(const char *path) {
 
   if (path == NULL) return -1;
   g_csv_path = strdup(path);
-  
-  // Check if CSV file exists
+
   FILE *fp = fopen(g_csv_path, "rb");
   if (fp == NULL) {
     fprintf(stderr, "Warning: CSV file %s not found\n", g_csv_path);
@@ -717,7 +784,7 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
   }
 
   result->total = total_count;
-  result->nodes = (struct ds_node *) malloc(sizeof(struct ds_node) * query->pageSize);
+  result->nodes = (struct ds_node *) malloc(sizeof(struct ds_node) * (size_t) query->pageSize);
   if (result->nodes == NULL) {
     mutex_unlock(&s_csv_mutex);
     return -1;
@@ -753,15 +820,23 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
 
       struct ds_node *result_node = &result->nodes[result->count];
       strncpy(result_node->id, node->id, sizeof(result_node->id) - 1);
+      result_node->id[sizeof(result_node->id) - 1] = '\0';
       strncpy(result_node->name, node->name, sizeof(result_node->name) - 1);
+      result_node->name[sizeof(result_node->name) - 1] = '\0';
       strncpy(result_node->channelCode, node->channelCode, sizeof(result_node->channelCode) - 1);
+      result_node->channelCode[sizeof(result_node->channelCode) - 1] = '\0';
       strncpy(result_node->isOnline, node->isOnline, sizeof(result_node->isOnline) - 1);
+      result_node->isOnline[sizeof(result_node->isOnline) - 1] = '\0';
       strncpy(result_node->cameraType, node->cameraType, sizeof(result_node->cameraType) - 1);
+      result_node->cameraType[sizeof(result_node->cameraType) - 1] = '\0';
       strncpy(result_node->operation, node->operation, sizeof(result_node->operation) - 1);
+      result_node->operation[sizeof(result_node->operation) - 1] = '\0';
       strncpy(result_node->customOperation, node->customOperation, sizeof(result_node->customOperation) - 1);
-      strncpy(result_node->P1, "", sizeof(result_node->P1) - 1);
-      strncpy(result_node->P3, "", sizeof(result_node->P3) - 1);
+      result_node->customOperation[sizeof(result_node->customOperation) - 1] = '\0';
+      result_node->P1[0] = '\0';
+      result_node->P3[0] = '\0';
       strncpy(result_node->P4, node->P4, sizeof(result_node->P4) - 1);
+      result_node->P4[sizeof(result_node->P4) - 1] = '\0';
 
       result->count++;
     }
@@ -807,6 +882,7 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
 
     char new_header[1024] = "";
     strncpy(new_header, line, sizeof(new_header) - 1);
+    new_header[sizeof(new_header) - 1] = '\0';
 
     char *h = line;
     if ((unsigned char) h[0] == 0xEF && (unsigned char) h[1] == 0xBB && (unsigned char) h[2] == 0xBF) {
@@ -837,29 +913,28 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
     if (!has_operation_col) {
       int cur_len = (int) strlen(new_header);
       if (cur_len > 0 && new_header[cur_len-1] != ',') {
-        strcat(new_header, ",");
+        strncat(new_header, ",", sizeof(new_header) - (size_t)cur_len - 1);
       }
-      strcat(new_header, "operation");
+      strncat(new_header, "operation", sizeof(new_header) - strlen(new_header) - 1);
       header_count++;
       operation_idx = header_count - 1;
     }
     if (!has_custom_col) {
       int cur_len = (int) strlen(new_header);
       if (cur_len > 0 && new_header[cur_len-1] != ',') {
-        strcat(new_header, ",");
+        strncat(new_header, ",", sizeof(new_header) - (size_t)cur_len - 1);
       }
-      strcat(new_header, "customOperation");
+      strncat(new_header, "customOperation", sizeof(new_header) - strlen(new_header) - 1);
       header_count++;
       custom_operation_idx = header_count - 1;
     }
     if (had_newline) {
-      strcat(new_header, "\n");
+      strncat(new_header, "\n", sizeof(new_header) - strlen(new_header) - 1);
     }
     fprintf(fp_out, "%s", new_header);
   }
 
   while (fgets(line, sizeof(line), fp_in) != NULL) {
-    // Remove trailing newline characters
     size_t len = strlen(line);
     while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
       line[--len] = '\0';
@@ -868,7 +943,6 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
     char *p = line;
     while (*p == ' ' || *p == '\t') p++;
     if (*p == '\0') {
-      // Skip empty lines entirely
       continue;
     }
 
@@ -887,7 +961,7 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
       char new_line[4096] = "";
       int first = 1;
       for (int i = 0; i < header_count; i++) {
-        if (!first) strcat(new_line, ",");
+        if (!first) strncat(new_line, ",", sizeof(new_line) - strlen(new_line) - 1);
         first = 0;
         char escaped[512] = "";
         if (i == operation_idx) {
@@ -903,7 +977,7 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
           }
           csv_escape_field(field_val, escaped, sizeof(escaped));
         }
-        strcat(new_line, escaped);
+        strncat(new_line, escaped, sizeof(new_line) - strlen(new_line) - 1);
       }
       fprintf(fp_out, "%s\n", new_line);
     } else {
@@ -911,7 +985,7 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
         char new_line[4096] = "";
         int first = 1;
         for (int i = 0; i < header_count; i++) {
-          if (!first) strcat(new_line, ",");
+          if (!first) strncat(new_line, ",", sizeof(new_line) - strlen(new_line) - 1);
           first = 0;
           char escaped[512] = "";
           if (i == operation_idx && !has_operation_col) {
@@ -927,7 +1001,7 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
             }
             csv_escape_field(field_val, escaped, sizeof(escaped));
           }
-          strcat(new_line, escaped);
+          strncat(new_line, escaped, sizeof(new_line) - strlen(new_line) - 1);
         }
         fprintf(fp_out, "%s\n", new_line);
       } else {

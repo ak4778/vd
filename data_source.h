@@ -26,6 +26,10 @@ struct ds_query {
   const char *keyword;
   int page;
   int pageSize;
+  // 标志位：参数是否出现在 URL 中（区分空值和未设置）
+  int has_isOnline;
+  int has_cameraType;
+  int has_operation;
 };
 
 struct ds_result {

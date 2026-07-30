@@ -12,6 +12,14 @@
 #include <pthread.h>
 #endif
 
+#define MAX_FILTER_LEN          64
+#define MAX_KEYWORD_LEN         256
+#define MAX_NODE_UPDATES        256
+#define MAX_FIELD_KEYS          32
+#define MAX_FIELD_KEY_LEN       64
+#define AVG_NODE_JSON_SIZE      2048
+#define RESPONSE_OVERHEAD       4096
+
 // Cross-platform thread
 #if defined(_WIN32) || defined(_WIN64)
 static void start_thread(void *(*f)(void *), void *p) {
@@ -28,18 +36,6 @@ static void start_thread(void *(*f)(void *), void *p) {
 }
 #endif
 
-// Retry helper - sleeps only in thread context
-static void retry_sleep(int ms) {
-#if defined(_WIN32) || defined(_WIN64)
-  Sleep(ms);
-#else
-  struct timespec ts;
-  ts.tv_sec = ms / 1000;
-  ts.tv_nsec = (ms % 1000) * 1000000L;
-  nanosleep(&ts, NULL);
-#endif
-}
-
 // Forward declarations
 static char *get_config_buf(void);
 static int get_max_page_size(void);
@@ -54,83 +50,92 @@ struct work_request {
   unsigned long conn_id;
   int op_type;
 
-  // Response data built by worker thread
   int http_status;
   char *response_body;
   size_t response_len;
 
-  // For nodes_get: deep-copied query parameters
-  char isOnline_buf[64];
-  char cameraType_buf[64];
-  char operation_buf[64];
-  char keyword_buf[256];
+  char isOnline_buf[MAX_FILTER_LEN];
+  char cameraType_buf[MAX_FILTER_LEN];
+  char operation_buf[MAX_FILTER_LEN];
+  char keyword_buf[MAX_KEYWORD_LEN];
   int page;
   int page_size;
+  // 标志位：参数是否出现在 URL 中（用于区分 isOnline= 和 缺失 isOnline）
+  int has_isOnline;
+  int has_cameraType;
+  int has_operation;
 
-  // For nodes_batchset: deep-copied update data
   struct ds_node *updates;
   int update_count;
 };
 
 static void free_work_request(struct work_request *wr);
-// Forward decl: completion-queue push (defined below). Called from worker threads.
 static void push_result(unsigned long conn_id, int http_status, char *body, size_t len);
 
-// Build the nodes_get response string (runs in worker thread context)
-static void build_nodes_get_response(struct work_request *wr) {
-  struct ds_query query;
-  memset(&query, 0, sizeof(query));
-  query.page = wr->page;
-  query.pageSize = wr->page_size;
+struct cfg_parsed {
+  int defaultPageSize;
+  int maxPageSize;
+  char field_keys[MAX_FIELD_KEYS][MAX_FIELD_KEY_LEN];
+  int field_key_count;
+  size_t fields_tok_len;
+  char *fields_json_copy;
+};
 
-  if (wr->isOnline_buf[0] != '\0') query.isOnline = wr->isOnline_buf;
-  if (wr->cameraType_buf[0] != '\0') query.cameraType = wr->cameraType_buf;
-  if (wr->operation_buf[0] != '\0') query.operation = wr->operation_buf;
-  if (wr->keyword_buf[0] != '\0') query.keyword = wr->keyword_buf;
+static struct cfg_parsed g_cfg_parsed;
+static int g_cfg_parsed_valid = 0;
 
-  struct ds_result result = {0};
-  int retries = 0;
-  int max_retries = 2;
-  int query_result = -1;
-  int retry_delay = 30;
+#if defined(_WIN32) || defined(_WIN64)
+static CRITICAL_SECTION g_cfg_mutex;
+static int g_cfg_mutex_inited = 0;
+static void cfg_mutex_init(void) {
+  if (!g_cfg_mutex_inited) {
+    InitializeCriticalSection(&g_cfg_mutex);
+    g_cfg_mutex_inited = 1;
+  }
+}
+static void cfg_lock(void) { EnterCriticalSection(&g_cfg_mutex); }
+static void cfg_unlock(void) { LeaveCriticalSection(&g_cfg_mutex); }
+#else
+static pthread_mutex_t g_cfg_mutex = PTHREAD_MUTEX_INITIALIZER;
+static void cfg_mutex_init(void) { (void) g_cfg_mutex; }
+static void cfg_lock(void) { pthread_mutex_lock(&g_cfg_mutex); }
+static void cfg_unlock(void) { pthread_mutex_unlock(&g_cfg_mutex); }
+#endif
 
-  while (retries < max_retries && query_result != 0) {
-    query_result = ds_get_nodes(&query, &result);
-    if (query_result != 0) {
-      retries++;
-      retry_sleep(retry_delay);
-      retry_delay *= 2;
-    }
+static void parse_config_fields(const char *cfg_buf) {
+  struct cfg_parsed *cp = &g_cfg_parsed;
+  memset(cp, 0, sizeof(*cp));
+
+  cp->defaultPageSize = 50;
+  cp->maxPageSize = 100;
+
+  const char *dps_key = "\"defaultPageSize\"";
+  char *pos = strstr(cfg_buf, dps_key);
+  if (pos) {
+    pos += strlen(dps_key);
+    while (*pos == ' ' || *pos == ':') pos++;
+    if (isdigit((unsigned char)*pos)) cp->defaultPageSize = atoi(pos);
   }
 
-  if (query_result != 0) {
-    wr->http_status = 503;
-    wr->response_body = strdup("{\"error\":\"Database query failed\"}");
-    wr->response_len = strlen(wr->response_body);
-    return;
+  const char *mps_key = "\"maxPageSize\"";
+  pos = strstr(cfg_buf, mps_key);
+  if (pos) {
+    pos += strlen(mps_key);
+    while (*pos == ' ' || *pos == ':') pos++;
+    if (isdigit((unsigned char)*pos)) cp->maxPageSize = atoi(pos);
   }
 
-  // Get config for response
-  char *cfg_buf = get_config_buf();
-  if (cfg_buf == NULL) {
-    if (result.nodes != NULL) free(result.nodes);
-    wr->http_status = 500;
-    wr->response_body = strdup("{\"error\":\"Cannot read config\"}");
-    wr->response_len = strlen(wr->response_body);
-    return;
-  }
+  struct mg_str cfg_fields_tok = mg_json_get_tok(mg_str((char *)cfg_buf), "$.fields");
+  cp->fields_tok_len = cfg_fields_tok.len;
 
-  // Parse field keys from config
-  char field_keys[32][64] = {""};
-  int field_key_count = 0;
-  struct mg_str cfg_fields_tok = mg_json_get_tok(mg_str(cfg_buf), "$.fields");
   if (cfg_fields_tok.len > 0) {
-    char *fields_str = (char *) malloc((size_t) cfg_fields_tok.len + 1);
-    if (fields_str != NULL) {
-      memcpy(fields_str, cfg_fields_tok.buf, (size_t) cfg_fields_tok.len);
-      fields_str[cfg_fields_tok.len] = '\0';
-      char *ptr = fields_str;
-      while (*ptr != '\0' && field_key_count < 32) {
+    cp->fields_json_copy = (char *) malloc((size_t) cfg_fields_tok.len + 1);
+    if (cp->fields_json_copy) {
+      memcpy(cp->fields_json_copy, cfg_fields_tok.buf, (size_t) cfg_fields_tok.len);
+      cp->fields_json_copy[cfg_fields_tok.len] = '\0';
+
+      char *ptr = cp->fields_json_copy;
+      while (*ptr != '\0' && cp->field_key_count < MAX_FIELD_KEYS) {
         char *key_ptr = strstr(ptr, "\"key\"");
         if (key_ptr == NULL) break;
         key_ptr += 5;
@@ -141,20 +146,98 @@ static void build_nodes_get_response(struct work_request *wr) {
         char *end_ptr = strchr(key_ptr, '"');
         if (end_ptr == NULL) break;
         int len = (int) (end_ptr - key_ptr);
-        if (len > 0 && len < 64) {
-          strncpy(field_keys[field_key_count], key_ptr, len);
-          field_keys[field_key_count][len] = '\0';
-          field_key_count++;
+        if (len > 0 && len < MAX_FIELD_KEY_LEN) {
+          memcpy(cp->field_keys[cp->field_key_count], key_ptr, (size_t) len);
+          cp->field_keys[cp->field_key_count][len] = '\0';
+          cp->field_key_count++;
         }
         ptr = end_ptr + 1;
       }
-      free(fields_str);
     }
   }
 
-  // Build response
+  g_cfg_parsed_valid = 1;
+}
+
+static int get_max_page_size(void) {
+  cfg_lock();
+  if (!g_cfg_parsed_valid) {
+    char *buf = get_config_buf();
+    if (buf) parse_config_fields(buf);
+  }
+  int val = g_cfg_parsed.maxPageSize;
+  cfg_unlock();
+  return val;
+}
+
+static int get_default_page_size(void) {
+  cfg_lock();
+  if (!g_cfg_parsed_valid) {
+    char *buf = get_config_buf();
+    if (buf) parse_config_fields(buf);
+  }
+  int val = g_cfg_parsed.defaultPageSize;
+  cfg_unlock();
+  return val;
+}
+
+static void build_nodes_get_response(struct work_request *wr) {
+  struct ds_query query;
+  memset(&query, 0, sizeof(query));
+  query.page = wr->page;
+  query.pageSize = wr->page_size;
+
+  // has_isOnline=1：参数出现在 URL 中（即使值为空也设置空字符串，让后端返回 0 条）
+  // has_isOnline=0：参数未出现，保持 NULL，跳过过滤
+  if (wr->has_isOnline) {
+    query.has_isOnline = 1;
+    query.isOnline = wr->isOnline_buf;
+  }
+  if (wr->has_cameraType) {
+    query.has_cameraType = 1;
+    query.cameraType = wr->cameraType_buf;
+  }
+  if (wr->has_operation) {
+    query.has_operation = 1;
+    query.operation = wr->operation_buf;
+  }
+  if (wr->keyword_buf[0] != '\0') query.keyword = wr->keyword_buf;
+
+  struct ds_result result = {0};
+  int query_result = ds_get_nodes(&query, &result);
+
+  if (query_result != 0) {
+    wr->http_status = 503;
+    wr->response_body = strdup("{\"error\":\"Database query failed\"}");
+    wr->response_len = strlen(wr->response_body);
+    return;
+  }
+
+  char *cfg_buf = get_config_buf();
+  if (cfg_buf == NULL) {
+    if (result.nodes != NULL) free(result.nodes);
+    wr->http_status = 500;
+    wr->response_body = strdup("{\"error\":\"Cannot read config\"}");
+    wr->response_len = strlen(wr->response_body);
+    return;
+  }
+
+  cfg_lock();
+  if (!g_cfg_parsed_valid) parse_config_fields(cfg_buf);
+
+  int field_key_count = g_cfg_parsed.field_key_count;
+  char (*field_keys)[MAX_FIELD_KEY_LEN] = g_cfg_parsed.field_keys;
+  size_t fields_tok_len = g_cfg_parsed.fields_tok_len;
+  char *fields_json_copy = g_cfg_parsed.fields_json_copy;
+
+  int cfg_dps = g_cfg_parsed.defaultPageSize;
+  int cfg_mps = g_cfg_parsed.maxPageSize;
+  cfg_unlock();
+
   size_t cfg_len = strlen(cfg_buf);
-  long total_size = (long) cfg_len + (long) wr->page_size * 1024 + 2048;
+  long total_size = (long) cfg_len + (long) wr->page_size * AVG_NODE_JSON_SIZE + RESPONSE_OVERHEAD;
+  if (total_size < 8192) total_size = 8192;
+
   char *response = (char *) malloc((size_t) total_size);
   if (response == NULL) {
     if (result.nodes != NULL) free(result.nodes);
@@ -165,26 +248,29 @@ static void build_nodes_get_response(struct work_request *wr) {
   }
 
   int pos = 0;
-  pos += snprintf(response + pos, total_size - pos, "{\"config\":{\"defaultPageSize\":%d,\"maxPageSize\":%d,\"fields\":",
-                  get_default_page_size(), get_max_page_size());
-  if (cfg_fields_tok.len > 0) {
-    memcpy(response + pos, cfg_fields_tok.buf, (size_t) cfg_fields_tok.len);
-    pos += (int) cfg_fields_tok.len;
+  pos += snprintf(response + pos, (size_t)(total_size - pos),
+                   "{\"config\":{\"defaultPageSize\":%d,\"maxPageSize\":%d,\"fields\":",
+                   cfg_dps, cfg_mps);
+
+  if (fields_tok_len > 0 && fields_json_copy) {
+    memcpy(response + pos, fields_json_copy, fields_tok_len);
+    pos += (int) fields_tok_len;
   } else {
-    pos += snprintf(response + pos, total_size - pos, "[]");
+    pos += snprintf(response + pos, (size_t)(total_size - pos), "[]");
   }
-  pos += snprintf(response + pos, total_size - pos, "},");
-  pos += snprintf(response + pos, total_size - pos, "\"data\":{\"total\":%d,\"nodes\":[", result.total);
+  pos += snprintf(response + pos, (size_t)(total_size - pos), "},");
+  pos += snprintf(response + pos, (size_t)(total_size - pos),
+                   "\"data\":{\"total\":%d,\"nodes\":[", result.total);
 
   int first = 1;
   for (int i = 0; i < result.count; i++) {
     struct ds_node *node = &result.nodes[i];
-    if (!first) pos += snprintf(response + pos, total_size - pos, ",");
+    if (!first) pos += snprintf(response + pos, (size_t)(total_size - pos), ",");
     first = 0;
-    pos += snprintf(response + pos, total_size - pos, "{");
+    pos += snprintf(response + pos, (size_t)(total_size - pos), "{");
     for (int j = 0; j < field_key_count; j++) {
-      if (j > 0) pos += snprintf(response + pos, total_size - pos, ",");
-      pos += snprintf(response + pos, total_size - pos, "\"%s\":\"", field_keys[j]);
+      if (j > 0) pos += snprintf(response + pos, (size_t)(total_size - pos), ",");
+      pos += snprintf(response + pos, (size_t)(total_size - pos), "\"%s\":\"", field_keys[j]);
 
       const char *field_val = "";
       if (strcmp(field_keys[j], "id") == 0) field_val = node->id;
@@ -199,29 +285,30 @@ static void build_nodes_get_response(struct work_request *wr) {
       else if (strcmp(field_keys[j], "P4") == 0) field_val = node->P4;
 
       for (int k = 0; field_val[k] != '\0'; k++) {
-        if (field_val[k] == '"' || field_val[k] == '\\') {
-          pos += snprintf(response + pos, total_size - pos, "\\%c", field_val[k]);
-        } else if (field_val[k] == '\n') {
-          pos += snprintf(response + pos, total_size - pos, "\\n");
-        } else if (field_val[k] == '\r') {
-          pos += snprintf(response + pos, total_size - pos, "\\r");
-        } else if (field_val[k] == '\t') {
-          pos += snprintf(response + pos, total_size - pos, "\\t");
-        } else if (field_val[k] == '\b') {
-          pos += snprintf(response + pos, total_size - pos, "\\b");
-        } else if (field_val[k] == '\f') {
-          pos += snprintf(response + pos, total_size - pos, "\\f");
-        } else if ((unsigned char)field_val[k] < 0x20) {
-          pos += snprintf(response + pos, total_size - pos, "\\u%04x", (unsigned char)field_val[k]);
+        char c = field_val[k];
+        if (c == '"' || c == '\\') {
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\%c", c);
+        } else if (c == '\n') {
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\n");
+        } else if (c == '\r') {
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\r");
+        } else if (c == '\t') {
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\t");
+        } else if (c == '\b') {
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\b");
+        } else if (c == '\f') {
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\f");
+        } else if ((unsigned char) c < 0x20) {
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\u%04x", (unsigned char) c);
         } else {
-          pos += snprintf(response + pos, total_size - pos, "%c", field_val[k]);
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "%c", c);
         }
       }
-      pos += snprintf(response + pos, total_size - pos, "\"");
+      pos += snprintf(response + pos, (size_t)(total_size - pos), "\"");
     }
-    pos += snprintf(response + pos, total_size - pos, "}");
+    pos += snprintf(response + pos, (size_t)(total_size - pos), "}");
   }
-  pos += snprintf(response + pos, total_size - pos, "]}}");
+  pos += snprintf(response + pos, (size_t)(total_size - pos), "]}}");
 
   if (result.nodes != NULL) free(result.nodes);
 
@@ -230,36 +317,19 @@ static void build_nodes_get_response(struct work_request *wr) {
   wr->response_len = (size_t) pos;
 }
 
-// Worker thread for nodes_get
 static void *nodes_get_thread(void *param) {
   struct work_request *wr = (struct work_request *) param;
   build_nodes_get_response(wr);
-  // Hand the response to the completion queue. The main-loop timer will
-  // dispatch it to the matching connection. Ownership of response_body
-  // transfers to the queue.
   push_result(wr->conn_id, wr->http_status, wr->response_body, wr->response_len);
   wr->response_body = NULL;
   free_work_request(wr);
   return NULL;
 }
 
-// Worker thread for nodes_batchset
 static void *nodes_batchset_thread(void *param) {
   struct work_request *wr = (struct work_request *) param;
 
-  int retries = 0;
-  int max_retries = 2;
-  int update_result = -1;
-  int retry_delay = 30;
-
-  while (retries < max_retries && update_result != 0) {
-    update_result = ds_update_nodes(wr->updates, wr->update_count);
-    if (update_result != 0) {
-      retries++;
-      retry_sleep(retry_delay);
-      retry_delay *= 2;
-    }
-  }
+  int update_result = ds_update_nodes(wr->updates, wr->update_count);
 
   if (update_result == 0) {
     wr->http_status = 200;
@@ -301,26 +371,19 @@ static const char *s_json_header =
     "Content-Type: application/json\r\n"
     "Cache-Control: no-cache\r\n";
 
-// Free work request resources in worker thread
 static void free_work_request(struct work_request *wr) {
-  if (wr->response_body != NULL) free(wr->response_body);
-  if (wr->updates != NULL) free(wr->updates);
+  if (wr == NULL) return;
+  if (wr->updates != NULL) {
+    free(wr->updates);
+    wr->updates = NULL;
+  }
   free(wr);
 }
 
-// ---------------------------------------------------------------------------
-// Async completion queue.
-//
-// Worker threads cannot call mg_http_reply() (the connection is owned by the
-// main event loop). Instead they push a finished response onto this queue,
-// and a repeating mg_timer on the main loop drains it and sends each reply to
-// the matching connection by id. This replaces mg_wakeup() whose socketpair
-// is unreliable on Windows.
-// ---------------------------------------------------------------------------
 struct async_result {
   unsigned long conn_id;
   int http_status;
-  char *body;   // owned by the queue once pushed
+  char *body;
   size_t len;
   struct async_result *next;
 };
@@ -346,8 +409,6 @@ static void results_lock(void) { pthread_mutex_lock(&s_results_mutex); }
 static void results_unlock(void) { pthread_mutex_unlock(&s_results_mutex); }
 #endif
 
-// Called from worker threads to enqueue a completed response. Takes ownership
-// of `body` (which must be heap-allocated, or NULL).
 static void push_result(unsigned long conn_id, int http_status,
                         char *body, size_t len) {
   struct async_result *r = (struct async_result *) calloc(1, sizeof(*r));
@@ -370,9 +431,6 @@ static void push_result(unsigned long conn_id, int http_status,
   results_unlock();
 }
 
-// Timer callback - runs on the main event loop thread. Drains the completion
-// queue and dispatches each response to the matching connection by id. If the
-// connection has been closed in the meantime, the response is simply dropped.
 static void dispatch_results(void *arg) {
   struct mg_mgr *mgr = (struct mg_mgr *) arg;
   results_lock();
@@ -396,15 +454,27 @@ static void dispatch_results(void *arg) {
   }
 }
 
-// 配置文件缓存 - 避免每次请求都读盘
 static char *g_cfg_buf = NULL;
+static time_t g_cfg_mtime = 0;
 
-// 获取配置文件内容（带缓存）。返回的是缓存指针，调用者不要 free。
 static char *get_config_buf(void) {
-  if (g_cfg_buf != NULL) return g_cfg_buf;
+  cfg_lock();
+
+  if (g_cfg_buf != NULL) {
+    struct stat st;
+    if (stat("data_config.json", &st) == 0 && st.st_mtime == g_cfg_mtime) {
+      cfg_unlock();
+      return g_cfg_buf;
+    }
+    free(g_cfg_buf);
+    g_cfg_buf = NULL;
+  }
 
   FILE *fp = fopen("data_config.json", "rb");
-  if (fp == NULL) return NULL;
+  if (fp == NULL) {
+    cfg_unlock();
+    return NULL;
+  }
 
   fseek(fp, 0, SEEK_END);
   long size = ftell(fp);
@@ -413,6 +483,7 @@ static char *get_config_buf(void) {
   g_cfg_buf = (char *) malloc((size_t) size + 1);
   if (g_cfg_buf == NULL) {
     fclose(fp);
+    cfg_unlock();
     return NULL;
   }
 
@@ -420,39 +491,14 @@ static char *get_config_buf(void) {
   fclose(fp);
   g_cfg_buf[size] = '\0';
 
+  struct stat st;
+  if (stat("data_config.json", &st) == 0) {
+    g_cfg_mtime = st.st_mtime;
+    g_cfg_parsed_valid = 0;
+  }
+
+  cfg_unlock();
   return g_cfg_buf;
-}
-
-static int get_max_page_size(void) {
-  char *cfg_buf = get_config_buf();
-  if (cfg_buf == NULL) return 100;
-
-  const char *key = "\"maxPageSize\"";
-  char *pos = strstr(cfg_buf, key);
-  if (pos == NULL) return 100;
-
-  pos += strlen(key);
-  while (*pos == ' ' || *pos == ':') pos++;
-
-  if (!isdigit((unsigned char)*pos)) return 100;
-
-  return atoi(pos);
-}
-
-static int get_default_page_size(void) {
-  char *cfg_buf = get_config_buf();
-  if (cfg_buf == NULL) return 50;
-
-  const char *key = "\"defaultPageSize\"";
-  char *pos = strstr(cfg_buf, key);
-  if (pos == NULL) return 50;
-
-  pos += strlen(key);
-  while (*pos == ' ' || *pos == ':') pos++;
-
-  if (!isdigit((unsigned char)*pos)) return 50;
-
-  return atoi(pos);
 }
 
 static void unicode_to_utf8(unsigned int codepoint, char *out, int *out_len) {
@@ -494,7 +540,7 @@ static int my_json_unescape(struct mg_str json, const char *path, char *to, size
         }
         int utf8_len;
         unicode_to_utf8(codepoint, to + j, &utf8_len);
-        j += utf8_len;
+        j += (size_t) utf8_len;
         i += 6;
       } else if (s.buf[i] == '\\' && i + 1 < s.len) {
         char c = s.buf[i + 1];
@@ -532,13 +578,11 @@ int ui_event_next(int no, struct ui_event *e) {
   return no + 1;
 }
 
-// 批量更新节点 - 使用数据库抽象层
 static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
-  struct ds_node updates_local[256];
+  struct ds_node updates_local[MAX_NODE_UPDATES];
   int update_count = 0;
 
-  // Parse JSON array to collect updates
-  for (int i = 0; i < 256; i++) {
+  for (int i = 0; i < MAX_NODE_UPDATES; i++) {
     char path[64];
     snprintf(path, sizeof(path), "$.updates[%d].id", i);
     struct mg_str id_tok = mg_json_get_tok(body, path);
@@ -566,7 +610,6 @@ static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
     return;
   }
 
-  // Create async work request
   struct work_request *wr = (struct work_request *) calloc(1, sizeof(*wr));
   wr->mgr = c->mgr;
   wr->conn_id = c->id;
@@ -575,7 +618,6 @@ static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
   memcpy(wr->updates, updates_local, sizeof(struct ds_node) * (size_t) update_count);
   wr->update_count = update_count;
 
-  // Spawn worker thread
   start_thread(nodes_batchset_thread, wr);
 }
 
@@ -584,16 +626,17 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
   int page_size = get_default_page_size();
   char page_buf[16] = "";
   char size_buf[16] = "";
-  char online_filter[16] = "";
-  char camera_filter[16] = "";
-  char operation_filter[64] = "";
-  char keyword_buf[256] = "";
+  char online_filter[MAX_FILTER_LEN] = "";
+  char camera_filter[MAX_FILTER_LEN] = "";
+  char operation_filter[MAX_FILTER_LEN] = "";
+  char keyword_buf[MAX_KEYWORD_LEN] = "";
 
   mg_http_get_var(&hm->query, "page", page_buf, sizeof(page_buf));
   mg_http_get_var(&hm->query, "pageSize", size_buf, sizeof(size_buf));
-  mg_http_get_var(&hm->query, "isOnline", online_filter, sizeof(online_filter));
-  mg_http_get_var(&hm->query, "cameraType", camera_filter, sizeof(camera_filter));
-  mg_http_get_var(&hm->query, "operation", operation_filter, sizeof(operation_filter));
+  // 使用返回值判断参数是否存在于 URL 中：>=0 表示存在，-4 表示不存在
+  int ret_online = mg_http_get_var(&hm->query, "isOnline", online_filter, sizeof(online_filter));
+  int ret_camera = mg_http_get_var(&hm->query, "cameraType", camera_filter, sizeof(camera_filter));
+  int ret_op = mg_http_get_var(&hm->query, "operation", operation_filter, sizeof(operation_filter));
   mg_http_get_var(&hm->query, "keyword", keyword_buf, sizeof(keyword_buf));
 
   if (page_buf[0] != '\0') page = atoi(page_buf);
@@ -607,13 +650,6 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
   int max_page_size = get_max_page_size();
   if (page_size > max_page_size) page_size = max_page_size;
 
-  char *cfg_buf = get_config_buf();
-  if (cfg_buf == NULL) {
-    mg_http_reply(c, 200, s_json_header, "{\"error\":\"Cannot read data_config.json\"}");
-    return;
-  }
-
-  // Create work request
   struct work_request *wr = (struct work_request *) calloc(1, sizeof(*wr));
   wr->mgr = c->mgr;
   wr->conn_id = c->id;
@@ -621,13 +657,27 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
   wr->page = page;
   wr->page_size = page_size;
 
-  // Deep copy filter parameters
-  if (online_filter[0] != '\0') strncpy(wr->isOnline_buf, online_filter, sizeof(wr->isOnline_buf) - 1);
-  if (camera_filter[0] != '\0') strncpy(wr->cameraType_buf, camera_filter, sizeof(wr->cameraType_buf) - 1);
-  if (operation_filter[0] != '\0') strncpy(wr->operation_buf, operation_filter, sizeof(wr->operation_buf) - 1);
-  if (keyword_buf[0] != '\0') strncpy(wr->keyword_buf, keyword_buf, sizeof(wr->keyword_buf) - 1);
+  // 参数存在于 URL 中（ret >= 0）：即使值为空也要复制（空值 = 空字符串 = 无匹配 = 0 条）
+  if (ret_online >= 0) {
+    wr->has_isOnline = 1;
+    strncpy(wr->isOnline_buf, online_filter, sizeof(wr->isOnline_buf) - 1);
+    wr->isOnline_buf[sizeof(wr->isOnline_buf) - 1] = '\0';
+  }
+  if (ret_camera >= 0) {
+    wr->has_cameraType = 1;
+    strncpy(wr->cameraType_buf, camera_filter, sizeof(wr->cameraType_buf) - 1);
+    wr->cameraType_buf[sizeof(wr->cameraType_buf) - 1] = '\0';
+  }
+  if (ret_op >= 0) {
+    wr->has_operation = 1;
+    strncpy(wr->operation_buf, operation_filter, sizeof(wr->operation_buf) - 1);
+    wr->operation_buf[sizeof(wr->operation_buf) - 1] = '\0';
+  }
+  if (keyword_buf[0] != '\0') {
+    strncpy(wr->keyword_buf, keyword_buf, sizeof(wr->keyword_buf) - 1);
+    wr->keyword_buf[sizeof(wr->keyword_buf) - 1] = '\0';
+  }
 
-  // Spawn worker thread
   start_thread(nodes_get_thread, wr);
 }
 
@@ -806,9 +856,6 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       opts.root_dir = "web_root";
       mg_http_serve_dir(c, ev_data, &opts);
     }
-    // Only inspect send.buf when a response was actually produced. The async
-    // handlers (nodes/get, nodes/batchset) defer the reply to a worker thread
-    // and leave send.buf empty here, so accessing send.buf[9] would crash.
     if (c->send.len > 9) {
       MG_DEBUG(("%lu %.*s %.*s -> %.*s", c->id, (int) hm->method.len,
                 hm->method.buf, (int) hm->uri.len, hm->uri.buf, (int) 3,
@@ -819,9 +866,9 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
 
 void web_init(struct mg_mgr *mgr) {
   results_mutex_init();
+  cfg_mutex_init();
   s_settings.device_name = strdup("My Device");
   MG_INFO(("Web server starting in %s mode", DS_MODE));
-  // Drain the async completion queue ~every 20ms on the main loop.
   mg_timer_add(mgr, 20, MG_TIMER_REPEAT, dispatch_results, mgr);
   mg_http_listen(mgr, HTTP_URL, fn, NULL);
   mg_http_listen(mgr, HTTPS_URL, fn, NULL);
