@@ -579,10 +579,9 @@ function Events({}) {
 <//>`;
 
 return html`
-<div class="m-4 divide-y divide-gray-200 rounded bg-white flex flex-col h-[calc(100vh-120px)]">
+<div class="m-4 divide-y divide-gray-200 rounded bg-white flex flex-col flex-1 min-h-0">
   <div class="font-semibold flex items-center text-gray-600 px-3 justify-between whitespace-nowrap border-b border-gray-200 py-2 flex-shrink-0">
     <div class="font-semibold flex items-center text-gray-600">
-      <div class="mr-4">设备通道(${totalItems})</div>
       <div class="relative mr-4 flex items-center">
         <input
           type="text"
@@ -607,6 +606,7 @@ return html`
           </button>
         `}
       </div>
+      <div class="mr-4">设备通道(${totalItems})</div>
       ${selectedNodes.length > 0 && html`
         <div class="flex items-center gap-2 mr-4">
           <span class="text-sm text-blue-600">已选择 ${selectedNodes.length} 行</span>
@@ -656,8 +656,8 @@ return html`
     </div>
     <${Pagination} currentPage=${page} setPageFn=${handlePageChange} totalItems=${totalItems} itemsPerPage=${itemsPerPage} />
   <//>
-  <div class="flex-1 overflow-y-scroll overflow-x-auto scrollbar-force">
-    <table class="border-separate border-spacing-0" style="table-layout: fixed; width: 100%;">
+  <div class="flex-1 min-h-0 overflow-auto scrollbar-force bg-white">
+    <table class="border-separate border-spacing-0 bg-white" style="table-layout: fixed; width: 100%;">
       <thead>
         <tr>
           <th scope="col" class="sticky top-0 z-10 border-b border-slate-300 bg-white bg-opacity-75 py-1.5 px-4 text-left text-sm font-semibold text-slate-900 backdrop-blur backdrop-filter" style="width:40px">
@@ -718,10 +718,10 @@ const App = function({}) {
     tipText="To login, use: admin/admin, user1/user1, user2/user2" />`; // If not logged in, show login screen
 
   return html`
-<div class="min-h-screen bg-slate-100 flex flex-col">
+<div class="h-screen bg-slate-100 flex flex-col overflow-hidden">
   <${Sidebar} url=${url} show=${showSidebar} />
   <${Header} logout=${logout} user=${user} showSidebar=${showSidebar} setShowSidebar=${setShowSidebar} dbMode=${dbMode} dbAvailable=${dbAvailable} />
-  <div class="flex-1 ${showSidebar && 'pl-40'} transition-all duration-300 transform">
+  <div class="flex-1 min-h-0 ${showSidebar && 'pl-40'} transition-all duration-300 transform flex flex-col">
     <${Events} />
   <//>
 <//>`;
