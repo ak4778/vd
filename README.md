@@ -79,3 +79,10 @@ make
 ```
 
 然后运行 `npm run watch:css`，它会监听文件变化并自动重新编译 CSS，这样修改 Tailwind class 后刷新浏览器就能直接看到效果。
+HTTP请求 → 创建work_request → 启动工作线程 → 主循环继续处理其他请求
+                                        ↓
+                              线程执行数据库操作（加锁）
+                                        ↓
+                              构建响应 → mg_wakeup唤醒主循环 → 释放资源
+                                        ↓
+                              MG_EV_WAKEUP → 发送HTTP响应

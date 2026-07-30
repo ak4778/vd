@@ -8,10 +8,36 @@
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
+#else
+#include <pthread.h>
 #endif
 
 #if !defined(CSV_MODE)
 #include "sqlite3.h"
+#endif
+
+// Cross-platform mutex
+#if defined(_WIN32) || defined(_WIN64)
+static CRITICAL_SECTION s_sqlite_mutex;
+static CRITICAL_SECTION s_csv_mutex;
+static int s_mutexes_initialized = 0;
+
+static void mutex_init(CRITICAL_SECTION *m) {
+  (void) m;
+  if (!s_mutexes_initialized) {
+    InitializeCriticalSection(&s_sqlite_mutex);
+    InitializeCriticalSection(&s_csv_mutex);
+    s_mutexes_initialized = 1;
+  }
+}
+static void mutex_lock(CRITICAL_SECTION *m) { EnterCriticalSection(m); }
+static void mutex_unlock(CRITICAL_SECTION *m) { LeaveCriticalSection(m); }
+#else
+static pthread_mutex_t s_sqlite_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t s_csv_mutex = PTHREAD_MUTEX_INITIALIZER;
+static void mutex_init(pthread_mutex_t *m) { (void)m; }
+static void mutex_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
+static void mutex_unlock(pthread_mutex_t *m) { pthread_mutex_unlock(m); }
 #endif
 
 #if !defined(CSV_MODE)
@@ -72,12 +98,16 @@ static int file_exists(const char *path) {
 }
 
 int ds_init(const char *path) {
-  
+  mutex_init(&s_sqlite_mutex);
+  mutex_init(&s_csv_mutex);
+
+  mutex_lock(&s_sqlite_mutex);
   int rc = sqlite3_open(path, &s_db);
   if (rc != SQLITE_OK) {
     fprintf(stderr, "Cannot open database: %s\n", sqlite3_errmsg(s_db));
     sqlite3_close(s_db);
     s_db = NULL;
+    mutex_unlock(&s_sqlite_mutex);
     return -1;
   }
 
@@ -98,6 +128,7 @@ int ds_init(const char *path) {
   if (exec_sql(create_table) != 0) {
     sqlite3_close(s_db);
     s_db = NULL;
+    mutex_unlock(&s_sqlite_mutex);
     return -1;
   }
 
@@ -117,38 +148,52 @@ int ds_init(const char *path) {
   
   s_db_file_exists = file_exists(path);
 
+  mutex_unlock(&s_sqlite_mutex);
   return 0;
 }
 
 void ds_cleanup(void) {
+  mutex_lock(&s_sqlite_mutex);
   if (s_db != NULL) {
     sqlite3_close(s_db);
     s_db = NULL;
   }
+  mutex_unlock(&s_sqlite_mutex);
 }
 
 int ds_is_available(void) {
-  if (s_db == NULL) return 0;
+  mutex_lock(&s_sqlite_mutex);
+  int result = 0;
+  if (s_db == NULL) {
+    mutex_unlock(&s_sqlite_mutex);
+    return 0;
+  }
   
   // Check if database has any data (count > 0)
   sqlite3_stmt *stmt;
   int rc = sqlite3_prepare_v2(s_db, "SELECT COUNT(*) FROM nodes", -1, &stmt, NULL);
-  if (rc != SQLITE_OK) return 0;
+  if (rc != SQLITE_OK) {
+    mutex_unlock(&s_sqlite_mutex);
+    return 0;
+  }
   
   rc = sqlite3_step(stmt);
   if (rc != SQLITE_ROW) {
     sqlite3_finalize(stmt);
+    mutex_unlock(&s_sqlite_mutex);
     return 0;
   }
   
   int count = sqlite3_column_int(stmt, 0);
   sqlite3_finalize(stmt);
-  
-  return count > 0;
+  result = count > 0;
+  mutex_unlock(&s_sqlite_mutex);
+  return result;
 }
 
 int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
   if (s_db == NULL || query == NULL || result == NULL) return -1;
+  mutex_lock(&s_sqlite_mutex);
 
   char sql[2048];
   char where[1024] = "";
@@ -257,12 +302,14 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
   int rc = sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL);
   if (rc != SQLITE_OK) {
     fprintf(stderr, "SQL prepare error: %s\n", sqlite3_errmsg(s_db));
+    mutex_unlock(&s_sqlite_mutex);
     return -1;
   }
 
   rc = sqlite3_step(stmt);
   if (rc != SQLITE_ROW) {
     sqlite3_finalize(stmt);
+    mutex_unlock(&s_sqlite_mutex);
     return -1;
   }
   result->total = sqlite3_column_int(stmt, 0);
@@ -278,12 +325,14 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
   rc = sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL);
   if (rc != SQLITE_OK) {
     fprintf(stderr, "SQL prepare error: %s\n", sqlite3_errmsg(s_db));
+    mutex_unlock(&s_sqlite_mutex);
     return -1;
   }
 
   result->nodes = (struct ds_node *) malloc(sizeof(struct ds_node) * query->pageSize);
   if (result->nodes == NULL) {
     sqlite3_finalize(stmt);
+    mutex_unlock(&s_sqlite_mutex);
     return -1;
   }
 
@@ -316,15 +365,18 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
   }
 
   sqlite3_finalize(stmt);
+  mutex_unlock(&s_sqlite_mutex);
   return 0;
 }
 
 int ds_update_nodes(struct ds_node *nodes, int count) {
   if (s_db == NULL || nodes == NULL || count <= 0) return -1;
+  mutex_lock(&s_sqlite_mutex);
 
   int rc = sqlite3_exec(s_db, "BEGIN TRANSACTION", NULL, NULL, NULL);
   if (rc != SQLITE_OK) {
     fprintf(stderr, "BEGIN TRANSACTION failed: %s\n", sqlite3_errmsg(s_db));
+    mutex_unlock(&s_sqlite_mutex);
     return -1;
   }
 
@@ -336,6 +388,7 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
   if (rc != SQLITE_OK) {
     fprintf(stderr, "SQL prepare error: %s\n", sqlite3_errmsg(s_db));
     sqlite3_exec(s_db, "ROLLBACK", NULL, NULL, NULL);
+    mutex_unlock(&s_sqlite_mutex);
     return -1;
   }
 
@@ -350,6 +403,7 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
       fprintf(stderr, "SQL step error: %s\n", sqlite3_errmsg(s_db));
       sqlite3_finalize(stmt);
       sqlite3_exec(s_db, "ROLLBACK", NULL, NULL, NULL);
+      mutex_unlock(&s_sqlite_mutex);
       return -1;
     }
     sqlite3_reset(stmt);
@@ -358,7 +412,7 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
 
   sqlite3_finalize(stmt);
   sqlite3_exec(s_db, "COMMIT", NULL, NULL, NULL);
-
+  mutex_unlock(&s_sqlite_mutex);
   return 0;
 }
 
@@ -560,6 +614,9 @@ static int is_value_in_list(const char *value, const char *list) {
 }
 
 int ds_init(const char *path) {
+  mutex_init(&s_sqlite_mutex);
+  mutex_init(&s_csv_mutex);
+
   if (path == NULL) return -1;
   g_csv_path = strdup(path);
   
@@ -574,18 +631,30 @@ int ds_init(const char *path) {
 }
 
 void ds_cleanup(void) {
+  mutex_lock(&s_csv_mutex);
   if (g_csv_path != NULL) {
     free(g_csv_path);
     g_csv_path = NULL;
   }
+  mutex_unlock(&s_csv_mutex);
 }
 
 int ds_is_available(void) {
-  if (g_csv_path == NULL) return 0;
+  mutex_lock(&s_csv_mutex);
+  int result = 0;
+  if (g_csv_path == NULL) {
+    mutex_unlock(&s_csv_mutex);
+    return 0;
+  }
   FILE *fp = fopen(g_csv_path, "rb");
-  if (fp == NULL) return 0;
+  if (fp == NULL) {
+    mutex_unlock(&s_csv_mutex);
+    return 0;
+  }
   fclose(fp);
-  return 1;
+  result = 1;
+  mutex_unlock(&s_csv_mutex);
+  return result;
 }
 
 static int contains_ignore_case(const char *haystack, const char *needle) {
@@ -603,8 +672,12 @@ static int contains_ignore_case(const char *haystack, const char *needle) {
 
 int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
   if (g_csv_path == NULL || query == NULL || result == NULL) return -1;
+  mutex_lock(&s_csv_mutex);
 
-  if (load_csv_cache() != 0) return -1;
+  if (load_csv_cache() != 0) {
+    mutex_unlock(&s_csv_mutex);
+    return -1;
+  }
 
   int skip_count = (query->page - 1) * query->pageSize;
   int total_count = 0;
@@ -645,7 +718,10 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
 
   result->total = total_count;
   result->nodes = (struct ds_node *) malloc(sizeof(struct ds_node) * query->pageSize);
-  if (result->nodes == NULL) return -1;
+  if (result->nodes == NULL) {
+    mutex_unlock(&s_csv_mutex);
+    return -1;
+  }
 
   result->count = 0;
   if (page_start_idx >= 0) {
@@ -691,20 +767,26 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
     }
   }
 
+  mutex_unlock(&s_csv_mutex);
   return 0;
 }
 
 int ds_update_nodes(struct ds_node *nodes, int count) {
   if (g_csv_path == NULL || nodes == NULL || count <= 0) return -1;
+  mutex_lock(&s_csv_mutex);
 
   FILE *fp_in = fopen(g_csv_path, "rb");
-  if (fp_in == NULL) return -1;
+  if (fp_in == NULL) {
+    mutex_unlock(&s_csv_mutex);
+    return -1;
+  }
 
   char edited_path[256];
   snprintf(edited_path, sizeof(edited_path), "%s.tmp", g_csv_path);
   FILE *fp_out = fopen(edited_path, "w");
   if (fp_out == NULL) {
     fclose(fp_in);
+    mutex_unlock(&s_csv_mutex);
     return -1;
   }
 
@@ -874,6 +956,7 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
   g_cache_count = 0;
   g_cache_mtime = 0;
 
+  mutex_unlock(&s_csv_mutex);
   return 0;
 }
 

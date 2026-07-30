@@ -6,16 +6,275 @@
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
-#define mg_msleep(ms) Sleep(ms)
+#include <process.h>
 #else
 #include <time.h>
-#define mg_msleep(ms) do { \
-    struct timespec ts; \
-    ts.tv_sec = (ms) / 1000; \
-    ts.tv_nsec = ((ms) % 1000) * 1000000L; \
-    nanosleep(&ts, NULL); \
-} while(0)
+#include <pthread.h>
 #endif
+
+// Cross-platform thread
+#if defined(_WIN32) || defined(_WIN64)
+static void start_thread(void *(*f)(void *), void *p) {
+  _beginthread((void(__cdecl *)(void *)) f, 0, p);
+}
+#else
+static void start_thread(void *(*f)(void *), void *p) {
+  pthread_t thread_id;
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+  pthread_create(&thread_id, &attr, f, p);
+  pthread_attr_destroy(&attr);
+}
+#endif
+
+// Retry helper - sleeps only in thread context
+static void retry_sleep(int ms) {
+#if defined(_WIN32) || defined(_WIN64)
+  Sleep(ms);
+#else
+  struct timespec ts;
+  ts.tv_sec = ms / 1000;
+  ts.tv_nsec = (ms % 1000) * 1000000L;
+  nanosleep(&ts, NULL);
+#endif
+}
+
+// Forward declarations
+static char *get_config_buf(void);
+static int get_max_page_size(void);
+static int get_default_page_size(void);
+
+// Async work request types
+#define WORK_NODES_GET 1
+#define WORK_NODES_BATCHSET 2
+
+struct work_request {
+  struct mg_mgr *mgr;
+  unsigned long conn_id;
+  int op_type;
+
+  // Response data built by worker thread
+  int http_status;
+  char *response_body;
+  size_t response_len;
+
+  // For nodes_get: deep-copied query parameters
+  char isOnline_buf[64];
+  char cameraType_buf[64];
+  char operation_buf[64];
+  char keyword_buf[256];
+  int page;
+  int page_size;
+
+  // For nodes_batchset: deep-copied update data
+  struct ds_node *updates;
+  int update_count;
+};
+
+static void free_work_request(struct work_request *wr);
+// Forward decl: completion-queue push (defined below). Called from worker threads.
+static void push_result(unsigned long conn_id, int http_status, char *body, size_t len);
+
+// Build the nodes_get response string (runs in worker thread context)
+static void build_nodes_get_response(struct work_request *wr) {
+  struct ds_query query;
+  memset(&query, 0, sizeof(query));
+  query.page = wr->page;
+  query.pageSize = wr->page_size;
+
+  if (wr->isOnline_buf[0] != '\0') query.isOnline = wr->isOnline_buf;
+  if (wr->cameraType_buf[0] != '\0') query.cameraType = wr->cameraType_buf;
+  if (wr->operation_buf[0] != '\0') query.operation = wr->operation_buf;
+  if (wr->keyword_buf[0] != '\0') query.keyword = wr->keyword_buf;
+
+  struct ds_result result = {0};
+  int retries = 0;
+  int max_retries = 2;
+  int query_result = -1;
+  int retry_delay = 30;
+
+  while (retries < max_retries && query_result != 0) {
+    query_result = ds_get_nodes(&query, &result);
+    if (query_result != 0) {
+      retries++;
+      retry_sleep(retry_delay);
+      retry_delay *= 2;
+    }
+  }
+
+  if (query_result != 0) {
+    wr->http_status = 503;
+    wr->response_body = strdup("{\"error\":\"Database query failed\"}");
+    wr->response_len = strlen(wr->response_body);
+    return;
+  }
+
+  // Get config for response
+  char *cfg_buf = get_config_buf();
+  if (cfg_buf == NULL) {
+    if (result.nodes != NULL) free(result.nodes);
+    wr->http_status = 500;
+    wr->response_body = strdup("{\"error\":\"Cannot read config\"}");
+    wr->response_len = strlen(wr->response_body);
+    return;
+  }
+
+  // Parse field keys from config
+  char field_keys[32][64] = {""};
+  int field_key_count = 0;
+  struct mg_str cfg_fields_tok = mg_json_get_tok(mg_str(cfg_buf), "$.fields");
+  if (cfg_fields_tok.len > 0) {
+    char *fields_str = (char *) malloc((size_t) cfg_fields_tok.len + 1);
+    if (fields_str != NULL) {
+      memcpy(fields_str, cfg_fields_tok.buf, (size_t) cfg_fields_tok.len);
+      fields_str[cfg_fields_tok.len] = '\0';
+      char *ptr = fields_str;
+      while (*ptr != '\0' && field_key_count < 32) {
+        char *key_ptr = strstr(ptr, "\"key\"");
+        if (key_ptr == NULL) break;
+        key_ptr += 5;
+        while (*key_ptr == ' ' || *key_ptr == '\t' || *key_ptr == ':') key_ptr++;
+        while (*key_ptr == ' ' || *key_ptr == '\t') key_ptr++;
+        if (*key_ptr != '"') break;
+        key_ptr++;
+        char *end_ptr = strchr(key_ptr, '"');
+        if (end_ptr == NULL) break;
+        int len = (int) (end_ptr - key_ptr);
+        if (len > 0 && len < 64) {
+          strncpy(field_keys[field_key_count], key_ptr, len);
+          field_keys[field_key_count][len] = '\0';
+          field_key_count++;
+        }
+        ptr = end_ptr + 1;
+      }
+      free(fields_str);
+    }
+  }
+
+  // Build response
+  size_t cfg_len = strlen(cfg_buf);
+  long total_size = (long) cfg_len + (long) wr->page_size * 1024 + 2048;
+  char *response = (char *) malloc((size_t) total_size);
+  if (response == NULL) {
+    if (result.nodes != NULL) free(result.nodes);
+    wr->http_status = 500;
+    wr->response_body = strdup("{\"error\":\"Memory allocation failed\"}");
+    wr->response_len = strlen(wr->response_body);
+    return;
+  }
+
+  int pos = 0;
+  pos += snprintf(response + pos, total_size - pos, "{\"config\":{\"defaultPageSize\":%d,\"maxPageSize\":%d,\"fields\":",
+                  get_default_page_size(), get_max_page_size());
+  if (cfg_fields_tok.len > 0) {
+    memcpy(response + pos, cfg_fields_tok.buf, (size_t) cfg_fields_tok.len);
+    pos += (int) cfg_fields_tok.len;
+  } else {
+    pos += snprintf(response + pos, total_size - pos, "[]");
+  }
+  pos += snprintf(response + pos, total_size - pos, "},");
+  pos += snprintf(response + pos, total_size - pos, "\"data\":{\"total\":%d,\"nodes\":[", result.total);
+
+  int first = 1;
+  for (int i = 0; i < result.count; i++) {
+    struct ds_node *node = &result.nodes[i];
+    if (!first) pos += snprintf(response + pos, total_size - pos, ",");
+    first = 0;
+    pos += snprintf(response + pos, total_size - pos, "{");
+    for (int j = 0; j < field_key_count; j++) {
+      if (j > 0) pos += snprintf(response + pos, total_size - pos, ",");
+      pos += snprintf(response + pos, total_size - pos, "\"%s\":\"", field_keys[j]);
+
+      const char *field_val = "";
+      if (strcmp(field_keys[j], "id") == 0) field_val = node->id;
+      else if (strcmp(field_keys[j], "name") == 0) field_val = node->name;
+      else if (strcmp(field_keys[j], "channelCode") == 0) field_val = node->channelCode;
+      else if (strcmp(field_keys[j], "isOnline") == 0) field_val = node->isOnline;
+      else if (strcmp(field_keys[j], "cameraType") == 0) field_val = node->cameraType;
+      else if (strcmp(field_keys[j], "operation") == 0) field_val = node->operation;
+      else if (strcmp(field_keys[j], "customOperation") == 0) field_val = node->customOperation;
+      else if (strcmp(field_keys[j], "P1") == 0) field_val = node->P1;
+      else if (strcmp(field_keys[j], "P3") == 0) field_val = node->P3;
+      else if (strcmp(field_keys[j], "P4") == 0) field_val = node->P4;
+
+      for (int k = 0; field_val[k] != '\0'; k++) {
+        if (field_val[k] == '"' || field_val[k] == '\\') {
+          pos += snprintf(response + pos, total_size - pos, "\\%c", field_val[k]);
+        } else if (field_val[k] == '\n') {
+          pos += snprintf(response + pos, total_size - pos, "\\n");
+        } else if (field_val[k] == '\r') {
+          pos += snprintf(response + pos, total_size - pos, "\\r");
+        } else if (field_val[k] == '\t') {
+          pos += snprintf(response + pos, total_size - pos, "\\t");
+        } else if (field_val[k] == '\b') {
+          pos += snprintf(response + pos, total_size - pos, "\\b");
+        } else if (field_val[k] == '\f') {
+          pos += snprintf(response + pos, total_size - pos, "\\f");
+        } else if ((unsigned char)field_val[k] < 0x20) {
+          pos += snprintf(response + pos, total_size - pos, "\\u%04x", (unsigned char)field_val[k]);
+        } else {
+          pos += snprintf(response + pos, total_size - pos, "%c", field_val[k]);
+        }
+      }
+      pos += snprintf(response + pos, total_size - pos, "\"");
+    }
+    pos += snprintf(response + pos, total_size - pos, "}");
+  }
+  pos += snprintf(response + pos, total_size - pos, "]}}");
+
+  if (result.nodes != NULL) free(result.nodes);
+
+  wr->http_status = 200;
+  wr->response_body = response;
+  wr->response_len = (size_t) pos;
+}
+
+// Worker thread for nodes_get
+static void *nodes_get_thread(void *param) {
+  struct work_request *wr = (struct work_request *) param;
+  build_nodes_get_response(wr);
+  // Hand the response to the completion queue. The main-loop timer will
+  // dispatch it to the matching connection. Ownership of response_body
+  // transfers to the queue.
+  push_result(wr->conn_id, wr->http_status, wr->response_body, wr->response_len);
+  wr->response_body = NULL;
+  free_work_request(wr);
+  return NULL;
+}
+
+// Worker thread for nodes_batchset
+static void *nodes_batchset_thread(void *param) {
+  struct work_request *wr = (struct work_request *) param;
+
+  int retries = 0;
+  int max_retries = 2;
+  int update_result = -1;
+  int retry_delay = 30;
+
+  while (retries < max_retries && update_result != 0) {
+    update_result = ds_update_nodes(wr->updates, wr->update_count);
+    if (update_result != 0) {
+      retries++;
+      retry_sleep(retry_delay);
+      retry_delay *= 2;
+    }
+  }
+
+  if (update_result == 0) {
+    wr->http_status = 200;
+    wr->response_body = strdup("{\"status\":\"true\",\"message\":\"Success\"}");
+  } else {
+    wr->http_status = 503;
+    wr->response_body = strdup("{\"status\":\"false\",\"message\":\"Update failed\"}");
+  }
+  wr->response_len = strlen(wr->response_body);
+
+  push_result(wr->conn_id, wr->http_status, wr->response_body, wr->response_len);
+  wr->response_body = NULL;
+  free_work_request(wr);
+  return NULL;
+}
 
 #if !defined(CSV_MODE)
 #define DS_MODE "SQLite"
@@ -41,6 +300,101 @@ static struct settings s_settings = {true, 1, 57, NULL};
 static const char *s_json_header =
     "Content-Type: application/json\r\n"
     "Cache-Control: no-cache\r\n";
+
+// Free work request resources in worker thread
+static void free_work_request(struct work_request *wr) {
+  if (wr->response_body != NULL) free(wr->response_body);
+  if (wr->updates != NULL) free(wr->updates);
+  free(wr);
+}
+
+// ---------------------------------------------------------------------------
+// Async completion queue.
+//
+// Worker threads cannot call mg_http_reply() (the connection is owned by the
+// main event loop). Instead they push a finished response onto this queue,
+// and a repeating mg_timer on the main loop drains it and sends each reply to
+// the matching connection by id. This replaces mg_wakeup() whose socketpair
+// is unreliable on Windows.
+// ---------------------------------------------------------------------------
+struct async_result {
+  unsigned long conn_id;
+  int http_status;
+  char *body;   // owned by the queue once pushed
+  size_t len;
+  struct async_result *next;
+};
+
+static struct async_result *s_results_head = NULL;
+static struct async_result *s_results_tail = NULL;
+
+#if defined(_WIN32) || defined(_WIN64)
+static CRITICAL_SECTION s_results_mutex;
+static int s_results_mutex_inited = 0;
+static void results_mutex_init(void) {
+  if (!s_results_mutex_inited) {
+    InitializeCriticalSection(&s_results_mutex);
+    s_results_mutex_inited = 1;
+  }
+}
+static void results_lock(void) { EnterCriticalSection(&s_results_mutex); }
+static void results_unlock(void) { LeaveCriticalSection(&s_results_mutex); }
+#else
+static pthread_mutex_t s_results_mutex = PTHREAD_MUTEX_INITIALIZER;
+static void results_mutex_init(void) { (void) s_results_mutex; }
+static void results_lock(void) { pthread_mutex_lock(&s_results_mutex); }
+static void results_unlock(void) { pthread_mutex_unlock(&s_results_mutex); }
+#endif
+
+// Called from worker threads to enqueue a completed response. Takes ownership
+// of `body` (which must be heap-allocated, or NULL).
+static void push_result(unsigned long conn_id, int http_status,
+                        char *body, size_t len) {
+  struct async_result *r = (struct async_result *) calloc(1, sizeof(*r));
+  if (r == NULL) {
+    if (body != NULL) free(body);
+    return;
+  }
+  r->conn_id = conn_id;
+  r->http_status = http_status;
+  r->body = body;
+  r->len = len;
+  r->next = NULL;
+  results_lock();
+  if (s_results_tail != NULL) {
+    s_results_tail->next = r;
+    s_results_tail = r;
+  } else {
+    s_results_head = s_results_tail = r;
+  }
+  results_unlock();
+}
+
+// Timer callback - runs on the main event loop thread. Drains the completion
+// queue and dispatches each response to the matching connection by id. If the
+// connection has been closed in the meantime, the response is simply dropped.
+static void dispatch_results(void *arg) {
+  struct mg_mgr *mgr = (struct mg_mgr *) arg;
+  results_lock();
+  struct async_result *r = s_results_head;
+  s_results_head = s_results_tail = NULL;
+  results_unlock();
+
+  while (r != NULL) {
+    struct async_result *next = r->next;
+    struct mg_connection *c;
+    for (c = mgr->conns; c != NULL; c = c->next) {
+      if (c->id == r->conn_id) {
+        mg_http_reply(c, r->http_status, s_json_header, "%.*s",
+                      (int) r->len, r->body);
+        break;
+      }
+    }
+    if (r->body != NULL) free(r->body);
+    free(r);
+    r = next;
+  }
+}
 
 // 配置文件缓存 - 避免每次请求都读盘
 static char *g_cfg_buf = NULL;
@@ -180,30 +534,29 @@ int ui_event_next(int no, struct ui_event *e) {
 
 // 批量更新节点 - 使用数据库抽象层
 static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
-  struct ds_node updates[256];
+  struct ds_node updates_local[256];
   int update_count = 0;
 
-  // 遍历 JSON 数组，收集所有 updates
+  // Parse JSON array to collect updates
   for (int i = 0; i < 256; i++) {
     char path[64];
     snprintf(path, sizeof(path), "$.updates[%d].id", i);
     struct mg_str id_tok = mg_json_get_tok(body, path);
     if (id_tok.len == 0) break;
 
-    my_json_unescape(body, path, updates[update_count].id, sizeof(updates[update_count].id));
-    if (updates[update_count].id[0] == '\0') break;
+    my_json_unescape(body, path, updates_local[update_count].id, sizeof(updates_local[update_count].id));
+    if (updates_local[update_count].id[0] == '\0') break;
 
     snprintf(path, sizeof(path), "$.updates[%d].operation", i);
-    my_json_unescape(body, path, updates[update_count].operation, sizeof(updates[update_count].operation));
+    my_json_unescape(body, path, updates_local[update_count].operation, sizeof(updates_local[update_count].operation));
 
     snprintf(path, sizeof(path), "$.updates[%d].customOperation", i);
-    my_json_unescape(body, path, updates[update_count].customOperation, sizeof(updates[update_count].customOperation));
+    my_json_unescape(body, path, updates_local[update_count].customOperation, sizeof(updates_local[update_count].customOperation));
 
-    // 其他字段保持为空，数据库层会处理
-    updates[update_count].name[0] = '\0';
-    updates[update_count].channelCode[0] = '\0';
-    updates[update_count].isOnline[0] = '\0';
-    updates[update_count].cameraType[0] = '\0';
+    updates_local[update_count].name[0] = '\0';
+    updates_local[update_count].channelCode[0] = '\0';
+    updates_local[update_count].isOnline[0] = '\0';
+    updates_local[update_count].cameraType[0] = '\0';
 
     update_count++;
   }
@@ -213,25 +566,17 @@ static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
     return;
   }
 
-  int retries = 0;
-  int max_retries = 2;
-  int update_result = -1;
-  int retry_delay = 30;
+  // Create async work request
+  struct work_request *wr = (struct work_request *) calloc(1, sizeof(*wr));
+  wr->mgr = c->mgr;
+  wr->conn_id = c->id;
+  wr->op_type = WORK_NODES_BATCHSET;
+  wr->updates = (struct ds_node *) malloc(sizeof(struct ds_node) * (size_t) update_count);
+  memcpy(wr->updates, updates_local, sizeof(struct ds_node) * (size_t) update_count);
+  wr->update_count = update_count;
 
-  while (retries < max_retries && update_result != 0) {
-    update_result = ds_update_nodes(updates, update_count);
-    if (update_result != 0) {
-      retries++;
-      mg_msleep(retry_delay);
-      retry_delay *= 2;
-    }
-  }
-
-  if (update_result == 0) {
-    mg_http_reply(c, 200, s_json_header, "{\"status\":\"true\",\"message\":\"Success\",\"count\":%d}", update_count);
-  } else {
-    mg_http_reply(c, 503, s_json_header, "{\"status\":\"false\",\"message\":\"Update failed after %d retries\"}", max_retries);
-  }
+  // Spawn worker thread
+  start_thread(nodes_batchset_thread, wr);
 }
 
 static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm) {
@@ -262,169 +607,28 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
   int max_page_size = get_max_page_size();
   if (page_size > max_page_size) page_size = max_page_size;
 
-  // 使用缓存的配置文件（不要 free cfg_buf）
   char *cfg_buf = get_config_buf();
   if (cfg_buf == NULL) {
     mg_http_reply(c, 200, s_json_header, "{\"error\":\"Cannot read data_config.json\"}");
     return;
   }
 
+  // Create work request
+  struct work_request *wr = (struct work_request *) calloc(1, sizeof(*wr));
+  wr->mgr = c->mgr;
+  wr->conn_id = c->id;
+  wr->op_type = WORK_NODES_GET;
+  wr->page = page;
+  wr->page_size = page_size;
 
+  // Deep copy filter parameters
+  if (online_filter[0] != '\0') strncpy(wr->isOnline_buf, online_filter, sizeof(wr->isOnline_buf) - 1);
+  if (camera_filter[0] != '\0') strncpy(wr->cameraType_buf, camera_filter, sizeof(wr->cameraType_buf) - 1);
+  if (operation_filter[0] != '\0') strncpy(wr->operation_buf, operation_filter, sizeof(wr->operation_buf) - 1);
+  if (keyword_buf[0] != '\0') strncpy(wr->keyword_buf, keyword_buf, sizeof(wr->keyword_buf) - 1);
 
-  // 解析 fields 配置，只返回配置中定义的字段
-  char field_keys[32][64] = {""};
-  int field_key_count = 0;
-  struct mg_str cfg_fields_tok = mg_json_get_tok(mg_str(cfg_buf), "$.fields");
-  if (cfg_fields_tok.len > 0) {
-    char *fields_str = (char *) malloc((size_t) cfg_fields_tok.len + 1);
-    if (fields_str != NULL) {
-      memcpy(fields_str, cfg_fields_tok.buf, (size_t) cfg_fields_tok.len);
-      fields_str[cfg_fields_tok.len] = '\0';
-      char *ptr = fields_str;
-      while (*ptr != '\0' && field_key_count < 32) {
-        char *key_ptr = strstr(ptr, "\"key\"");
-        if (key_ptr == NULL) break;
-        key_ptr += 5; // skip "\"key\""
-        // skip optional whitespace and colon
-        while (*key_ptr == ' ' || *key_ptr == '\t' || *key_ptr == ':') key_ptr++;
-        while (*key_ptr == ' ' || *key_ptr == '\t') key_ptr++;
-        if (*key_ptr != '"') break;
-        key_ptr++; // skip opening quote
-        char *end_ptr = strchr(key_ptr, '"');
-        if (end_ptr == NULL) break;
-        int len = (int) (end_ptr - key_ptr);
-        if (len > 0 && len < 64) {
-          strncpy(field_keys[field_key_count], key_ptr, len);
-          field_keys[field_key_count][len] = '\0';
-          field_key_count++;
-        }
-        ptr = end_ptr + 1;
-      }
-      free(fields_str);
-    }
-  }
-
-  // 使用数据源抽象层查询数据
-  struct ds_query query;
-  memset(&query, 0, sizeof(query));
-  query.page = page;
-  query.pageSize = page_size;
-  
-  int has_online = (online_filter[0] != '\0' || strstr(hm->query.buf, "isOnline=") != NULL);
-  int has_camera = (camera_filter[0] != '\0' || strstr(hm->query.buf, "cameraType=") != NULL);
-  int has_operation = (operation_filter[0] != '\0' || strstr(hm->query.buf, "operation=") != NULL);
-  
-  if (has_online) {
-    query.isOnline = online_filter;
-  }
-  if (has_camera) {
-    query.cameraType = camera_filter;
-  }
-  if (has_operation) {
-    query.operation = operation_filter;
-  }
-
-  if (keyword_buf[0] != '\0') {
-    query.keyword = keyword_buf;
-  }
-
-  struct ds_result result = {0};
-  int retries = 0;
-  int max_retries = 2;
-  int query_result = -1;
-  int retry_delay = 30;
-
-  while (retries < max_retries && query_result != 0) {
-    query_result = ds_get_nodes(&query, &result);
-    if (query_result != 0) {
-      retries++;
-      mg_msleep(retry_delay);
-      retry_delay *= 2;
-    }
-  }
-
-  if (query_result != 0) {
-    mg_http_reply(c, 503, s_json_header, "{\"error\":\"Database query failed after %d retries\"}", max_retries);
-    return;
-  }
-
-  // 分配响应缓冲区
-  size_t cfg_len = strlen(cfg_buf);
-  long total_size = (long) cfg_len + (long) page_size * 1024 + 2048;
-  char *response = (char *) malloc((size_t) total_size);
-  if (response == NULL) {
-    if (result.nodes != NULL) free(result.nodes);
-    mg_http_reply(c, 200, s_json_header, "{\"error\":\"Memory allocation failed\"}");
-    return;
-  }
-
-  int pos = 0;
-  pos += snprintf(response + pos, total_size - pos, "{\"config\":{\"defaultPageSize\":%d,\"maxPageSize\":%d,\"fields\":", 
-                  get_default_page_size(), get_max_page_size());
-  struct mg_str fields_tok = mg_json_get_tok(mg_str(cfg_buf), "$.fields");
-  if (fields_tok.len > 0) {
-    memcpy(response + pos, fields_tok.buf, (size_t) fields_tok.len);
-    pos += (int) fields_tok.len;
-  } else {
-    pos += snprintf(response + pos, total_size - pos, "[]");
-  }
-  pos += snprintf(response + pos, total_size - pos, "},");
-  pos += snprintf(response + pos, total_size - pos, "\"data\":{\"total\":%d,\"nodes\":[", result.total);
-
-  int first = 1;
-  for (int i = 0; i < result.count; i++) {
-    struct ds_node *node = &result.nodes[i];
-
-    if (!first) pos += snprintf(response + pos, total_size - pos, ",");
-    first = 0;
-
-    pos += snprintf(response + pos, total_size - pos, "{");
-    for (int j = 0; j < field_key_count; j++) {
-      if (j > 0) pos += snprintf(response + pos, total_size - pos, ",");
-      pos += snprintf(response + pos, total_size - pos, "\"%s\":\"", field_keys[j]);
-
-      const char *field_val = "";
-      if (strcmp(field_keys[j], "id") == 0) field_val = node->id;
-      else if (strcmp(field_keys[j], "name") == 0) field_val = node->name;
-      else if (strcmp(field_keys[j], "channelCode") == 0) field_val = node->channelCode;
-      else if (strcmp(field_keys[j], "isOnline") == 0) field_val = node->isOnline;
-      else if (strcmp(field_keys[j], "cameraType") == 0) field_val = node->cameraType;
-      else if (strcmp(field_keys[j], "operation") == 0) field_val = node->operation;
-      else if (strcmp(field_keys[j], "customOperation") == 0) field_val = node->customOperation;
-      else if (strcmp(field_keys[j], "P1") == 0) field_val = node->P1;
-      else if (strcmp(field_keys[j], "P3") == 0) field_val = node->P3;
-      else if (strcmp(field_keys[j], "P4") == 0) field_val = node->P4;
-
-      for (int k = 0; field_val[k] != '\0'; k++) {
-        if (field_val[k] == '"' || field_val[k] == '\\') {
-          pos += snprintf(response + pos, total_size - pos, "\\%c", field_val[k]);
-        } else if (field_val[k] == '\n') {
-          pos += snprintf(response + pos, total_size - pos, "\\n");
-        } else if (field_val[k] == '\r') {
-          pos += snprintf(response + pos, total_size - pos, "\\r");
-        } else if (field_val[k] == '\t') {
-          pos += snprintf(response + pos, total_size - pos, "\\t");
-        } else if (field_val[k] == '\b') {
-          pos += snprintf(response + pos, total_size - pos, "\\b");
-        } else if (field_val[k] == '\f') {
-          pos += snprintf(response + pos, total_size - pos, "\\f");
-        } else if ((unsigned char)field_val[k] < 0x20) {
-          pos += snprintf(response + pos, total_size - pos, "\\u%04x", (unsigned char)field_val[k]);
-        } else {
-          pos += snprintf(response + pos, total_size - pos, "%c", field_val[k]);
-        }
-      }
-      pos += snprintf(response + pos, total_size - pos, "\"");
-    }
-    pos += snprintf(response + pos, total_size - pos, "}");
-  }
-
-  pos += snprintf(response + pos, total_size - pos, "]}}");
-
-  mg_http_reply(c, 200, s_json_header, "%s", response);
-
-  if (result.nodes != NULL) free(result.nodes);
-  free(response);
+  // Spawn worker thread
+  start_thread(nodes_get_thread, wr);
 }
 
 static struct user *authenticate(struct mg_http_message *hm) {
@@ -602,15 +806,23 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       opts.root_dir = "web_root";
       mg_http_serve_dir(c, ev_data, &opts);
     }
-    MG_DEBUG(("%lu %.*s %.*s -> %.*s", c->id, (int) hm->method.len,
-              hm->method.buf, (int) hm->uri.len, hm->uri.buf, (int) 3,
-              &c->send.buf[9]));
+    // Only inspect send.buf when a response was actually produced. The async
+    // handlers (nodes/get, nodes/batchset) defer the reply to a worker thread
+    // and leave send.buf empty here, so accessing send.buf[9] would crash.
+    if (c->send.len > 9) {
+      MG_DEBUG(("%lu %.*s %.*s -> %.*s", c->id, (int) hm->method.len,
+                hm->method.buf, (int) hm->uri.len, hm->uri.buf, (int) 3,
+                &c->send.buf[9]));
+    }
   }
 }
 
 void web_init(struct mg_mgr *mgr) {
+  results_mutex_init();
   s_settings.device_name = strdup("My Device");
   MG_INFO(("Web server starting in %s mode", DS_MODE));
+  // Drain the async completion queue ~every 20ms on the main loop.
+  mg_timer_add(mgr, 20, MG_TIMER_REPEAT, dispatch_results, mgr);
   mg_http_listen(mgr, HTTP_URL, fn, NULL);
   mg_http_listen(mgr, HTTPS_URL, fn, NULL);
 }

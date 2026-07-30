@@ -73,6 +73,7 @@ int main(void) {
 #endif
 
   mg_mgr_init(&mgr);
+  mg_wakeup_init(&mgr);
 
   web_init(&mgr);
   while (s_sig_num == 0) {
