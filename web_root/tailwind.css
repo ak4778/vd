@@ -1,3 +1,36 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  select,
+  select:focus,
+  select:focus-visible,
+  select:active {
+    /* 强制去除所有可能的原生焦点效果 */
+    outline: none !important;
+    outline-offset: 0 !important;
+    box-shadow: none !important;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    /* 关键：隐藏 Chrome/Edge 的原生 focus ring（黑框） */
+    -webkit-focus-ring-color: transparent !important;
+    /* 去除触摸高亮（移动端兼容） */
+    -webkit-tap-highlight-color: transparent;
+    /* 自定义 SVG 下拉箭头替代原生箭头 */
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.4rem center;
+    background-size: 1rem 1rem;
+    padding-right: 1.5rem;
+  }
+  select::-ms-expand {
+    display: none;
+  }
+  /* option 元素也清除焦点效果 */
+  select option {
+    outline: none;
+    -webkit-focus-ring-color: transparent;
+  }
+}

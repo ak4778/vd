@@ -543,7 +543,7 @@ function Events({}) {
           <select 
             value=${rawValue} 
             onchange=${(e) => handleOperationChange(node.id, e.target.value)}
-            class="px-2 py-1 border rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${getOperationColor(rawValue)}">
+            class="px-2 py-1 border rounded text-sm ${getOperationColor(rawValue)}">
             ${operationOptions.map(opt => html`
               <option value=${opt.value}>${opt.label}</option>
             `)}
@@ -613,7 +613,7 @@ return html`
           <select 
             value=${batchField} 
             onchange=${(e) => { setBatchField(e.target.value); setBatchValue(''); }}
-            class="px-2 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            class="px-2 py-1 border border-gray-300 rounded text-sm">
             <option value="">请选择类型</option>
             <option value="operation">操作</option>
             <option value="customOperation">自定义</option>
@@ -622,7 +622,7 @@ return html`
             <select 
               value=${batchValue} 
               onchange=${(e) => setBatchValue(e.target.value)}
-              class="px-2 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              class="px-2 py-1 border border-gray-300 rounded text-sm">
               <option value="">请选择值</option>
               <option value="1">重点区域</option>
               <option value="2">高风险作业</option>
