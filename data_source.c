@@ -290,6 +290,7 @@ int ds_init(const char *path) {
   exec_sql("CREATE INDEX IF NOT EXISTS idx_nodes_p1 ON nodes(P1)");
   exec_sql("CREATE INDEX IF NOT EXISTS idx_nodes_p3 ON nodes(P3)");
   exec_sql("CREATE INDEX IF NOT EXISTS idx_nodes_p4 ON nodes(P4)");
+  exec_sql("CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name)");
 
   s_db_file_exists = file_exists(path);
 
@@ -379,9 +380,9 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
   int bind_idx = params.count;
 
   if (where[0] == '\0') {
-    snprintf(sql, sizeof(sql), "SELECT * FROM nodes LIMIT ? OFFSET ?");
+    snprintf(sql, sizeof(sql), "SELECT * FROM nodes ORDER BY id LIMIT ? OFFSET ?");
   } else {
-    snprintf(sql, sizeof(sql), "SELECT * FROM nodes WHERE %s LIMIT ? OFFSET ?", where);
+    snprintf(sql, sizeof(sql), "SELECT * FROM nodes WHERE %s ORDER BY id LIMIT ? OFFSET ?", where);
   }
 
   rc = sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL);

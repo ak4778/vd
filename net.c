@@ -582,6 +582,7 @@ static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
   struct ds_node updates_local[MAX_NODE_UPDATES];
   int update_count = 0;
 
+  int too_many_updates = 0;
   for (int i = 0; i < MAX_NODE_UPDATES; i++) {
     char path[64];
     snprintf(path, sizeof(path), "$.updates[%d].id", i);
@@ -603,6 +604,21 @@ static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
     updates_local[update_count].cameraType[0] = '\0';
 
     update_count++;
+    if (update_count == MAX_NODE_UPDATES) {
+      snprintf(path, sizeof(path), "$.updates[%d].id", i + 1);
+      struct mg_str next_id_tok = mg_json_get_tok(body, path);
+      if (next_id_tok.len > 0) {
+        too_many_updates = 1;
+      }
+      break;
+    }
+  }
+
+  if (too_many_updates) {
+    mg_http_reply(c, 400, s_json_header,
+                  "{\"status\":\"false\",\"message\":\"Too many updates, max %d allowed\"}",
+                  MAX_NODE_UPDATES);
+    return;
   }
 
   if (update_count == 0) {
