@@ -17,6 +17,9 @@ struct ds_node {
   char P1[128];
   char P3[128];
   char P4[128];
+  // 标志位：字段是否在更新请求中提供（用于动态拼接 SET 子句，避免覆盖未提供的字段）
+  int has_operation;
+  int has_customOperation;
 };
 
 struct ds_query {

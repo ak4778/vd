@@ -593,10 +593,24 @@ static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
     if (updates_local[update_count].id[0] == '\0') break;
 
     snprintf(path, sizeof(path), "$.updates[%d].operation", i);
-    my_json_unescape(body, path, updates_local[update_count].operation, sizeof(updates_local[update_count].operation));
+    struct mg_str op_tok = mg_json_get_tok(body, path);
+    if (op_tok.len > 0) {
+      updates_local[update_count].has_operation = 1;
+      my_json_unescape(body, path, updates_local[update_count].operation, sizeof(updates_local[update_count].operation));
+    } else {
+      updates_local[update_count].has_operation = 0;
+      updates_local[update_count].operation[0] = '\0';
+    }
 
     snprintf(path, sizeof(path), "$.updates[%d].customOperation", i);
-    my_json_unescape(body, path, updates_local[update_count].customOperation, sizeof(updates_local[update_count].customOperation));
+    struct mg_str cop_tok = mg_json_get_tok(body, path);
+    if (cop_tok.len > 0) {
+      updates_local[update_count].has_customOperation = 1;
+      my_json_unescape(body, path, updates_local[update_count].customOperation, sizeof(updates_local[update_count].customOperation));
+    } else {
+      updates_local[update_count].has_customOperation = 0;
+      updates_local[update_count].customOperation[0] = '\0';
+    }
 
     updates_local[update_count].name[0] = '\0';
     updates_local[update_count].channelCode[0] = '\0';

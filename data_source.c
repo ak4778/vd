@@ -440,6 +440,10 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
     snprintf(node->P3, sizeof(node->P3), "%s", p3 ? p3 : "");
     snprintf(node->P4, sizeof(node->P4), "%s", p4 ? p4 : "");
 
+    // 读取路径不使用这些标志位，初始化为 0 防止垃圾值
+    node->has_operation = 0;
+    node->has_customOperation = 0;
+
     result->count++;
   }
 
@@ -460,39 +464,94 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
     return -1;
   }
 
-  const char *sql = "UPDATE nodes SET operation = ?, customOperation = ? WHERE id = ?";
-
-  sqlite3_stmt *stmt;
-  rc = sqlite3_prepare_v2(s_db, sql, -1, &stmt, NULL);
-  if (rc != SQLITE_OK) {
-    fprintf(stderr, "SQL prepare error: %s\n", sqlite3_errmsg(s_db));
-    sqlite3_exec(s_db, "ROLLBACK", NULL, NULL, NULL);
-    mutex_unlock(&s_sqlite_mutex);
-    return -1;
-  }
+  // 按字段组合懒编译 3 种语句（只更新实际提供的字段，避免覆盖未提供的字段）
+  sqlite3_stmt *stmt_both = NULL;  // operation + customOperation
+  sqlite3_stmt *stmt_op   = NULL;  // operation only
+  sqlite3_stmt *stmt_cop  = NULL;  // customOperation only
 
   for (int i = 0; i < count; i++) {
     struct ds_node *node = &nodes[i];
-    sqlite3_bind_text(stmt, 1, node->operation, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, node->customOperation, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 3, node->id, -1, SQLITE_TRANSIENT);
+    int has_op  = node->has_operation;
+    int has_cop = node->has_customOperation;
+
+    // 两个字段都未提供，跳过该更新
+    if (!has_op && !has_cop) continue;
+
+    sqlite3_stmt *stmt = NULL;
+
+    if (has_op && has_cop) {
+      if (stmt_both == NULL) {
+        rc = sqlite3_prepare_v2(s_db,
+            "UPDATE nodes SET operation = ?, customOperation = ? WHERE id = ?",
+            -1, &stmt_both, NULL);
+        if (rc != SQLITE_OK) {
+          fprintf(stderr, "SQL prepare error (both): %s\n", sqlite3_errmsg(s_db));
+          goto fail;
+        }
+      }
+      stmt = stmt_both;
+      sqlite3_bind_text(stmt, 1, node->operation, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(stmt, 2, node->customOperation, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(stmt, 3, node->id, -1, SQLITE_TRANSIENT);
+    } else if (has_op) {
+      if (stmt_op == NULL) {
+        rc = sqlite3_prepare_v2(s_db,
+            "UPDATE nodes SET operation = ? WHERE id = ?",
+            -1, &stmt_op, NULL);
+        if (rc != SQLITE_OK) {
+          fprintf(stderr, "SQL prepare error (op): %s\n", sqlite3_errmsg(s_db));
+          goto fail;
+        }
+      }
+      stmt = stmt_op;
+      sqlite3_bind_text(stmt, 1, node->operation, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(stmt, 2, node->id, -1, SQLITE_TRANSIENT);
+    } else {  // has_cop only
+      if (stmt_cop == NULL) {
+        rc = sqlite3_prepare_v2(s_db,
+            "UPDATE nodes SET customOperation = ? WHERE id = ?",
+            -1, &stmt_cop, NULL);
+        if (rc != SQLITE_OK) {
+          fprintf(stderr, "SQL prepare error (cop): %s\n", sqlite3_errmsg(s_db));
+          goto fail;
+        }
+      }
+      stmt = stmt_cop;
+      sqlite3_bind_text(stmt, 1, node->customOperation, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(stmt, 2, node->id, -1, SQLITE_TRANSIENT);
+    }
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
       fprintf(stderr, "SQL step error: %s\n", sqlite3_errmsg(s_db));
-      sqlite3_finalize(stmt);
-      sqlite3_exec(s_db, "ROLLBACK", NULL, NULL, NULL);
-      mutex_unlock(&s_sqlite_mutex);
-      return -1;
+      goto fail;
     }
     sqlite3_reset(stmt);
     sqlite3_clear_bindings(stmt);
   }
 
-  sqlite3_finalize(stmt);
-  sqlite3_exec(s_db, "COMMIT", NULL, NULL, NULL);
+  if (stmt_both) sqlite3_finalize(stmt_both);
+  if (stmt_op) sqlite3_finalize(stmt_op);
+  if (stmt_cop) sqlite3_finalize(stmt_cop);
+
+  // 检查 COMMIT 返回值，失败时回滚以防止事务泄漏
+  rc = sqlite3_exec(s_db, "COMMIT", NULL, NULL, NULL);
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "COMMIT failed: %s\n", sqlite3_errmsg(s_db));
+    sqlite3_exec(s_db, "ROLLBACK", NULL, NULL, NULL);
+    mutex_unlock(&s_sqlite_mutex);
+    return -1;
+  }
   mutex_unlock(&s_sqlite_mutex);
   return 0;
+
+fail:
+  if (stmt_both) sqlite3_finalize(stmt_both);
+  if (stmt_op) sqlite3_finalize(stmt_op);
+  if (stmt_cop) sqlite3_finalize(stmt_cop);
+  sqlite3_exec(s_db, "ROLLBACK", NULL, NULL, NULL);
+  mutex_unlock(&s_sqlite_mutex);
+  return -1;
 }
 
 #else
@@ -849,6 +908,10 @@ int ds_get_nodes(struct ds_query *query, struct ds_result *result) {
       strncpy(result_node->P4, node->P4, sizeof(result_node->P4) - 1);
       result_node->P4[sizeof(result_node->P4) - 1] = '\0';
 
+      // 读取路径不使用这些标志位，初始化为 0 防止垃圾值
+      result_node->has_operation = 0;
+      result_node->has_customOperation = 0;
+
       result->count++;
     }
   }
@@ -976,9 +1039,21 @@ int ds_update_nodes(struct ds_node *nodes, int count) {
         first = 0;
         char escaped[512] = "";
         if (i == operation_idx) {
-          csv_escape_field(nodes[match_idx].operation, escaped, sizeof(escaped));
+          if (nodes[match_idx].has_operation) {
+            csv_escape_field(nodes[match_idx].operation, escaped, sizeof(escaped));
+          } else {
+            char field_val[512] = "";
+            get_csv_field(p, i, field_val, sizeof(field_val));
+            csv_escape_field(field_val, escaped, sizeof(escaped));
+          }
         } else if (i == custom_operation_idx) {
-          csv_escape_field(nodes[match_idx].customOperation, escaped, sizeof(escaped));
+          if (nodes[match_idx].has_customOperation) {
+            csv_escape_field(nodes[match_idx].customOperation, escaped, sizeof(escaped));
+          } else {
+            char field_val[512] = "";
+            get_csv_field(p, i, field_val, sizeof(field_val));
+            csv_escape_field(field_val, escaped, sizeof(escaped));
+          }
         } else {
           char field_val[512] = "";
           get_csv_field(p, i, field_val, sizeof(field_val));
