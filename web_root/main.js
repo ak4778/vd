@@ -657,7 +657,7 @@ return html`
     <${Pagination} currentPage=${page} setPageFn=${handlePageChange} totalItems=${totalItems} itemsPerPage=${itemsPerPage} />
   <//>
   <div class="flex-1 min-h-0 overflow-auto scrollbar-force bg-white">
-    <table class="border-separate border-spacing-0 bg-white" style="table-layout: fixed; width: 100%;">
+    <table class="border-separate border-spacing-0 bg-white" style="table-layout: auto; width: 100%;">
       <thead>
         <tr>
           <th scope="col" class="sticky top-0 z-10 border-b border-slate-300 bg-white bg-opacity-75 py-1.5 px-4 text-left text-sm font-semibold text-slate-900 backdrop-blur backdrop-filter" style="width:40px">
