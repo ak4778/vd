@@ -384,6 +384,13 @@ function Events({}) {
       ...prev,
       [nodeId]: value
     }));
+    // operation 为 1/2/3 时自动清空 customOperation（仅 4=自定义 才有自定义内容）
+    if (value === '1' || value === '2' || value === '3') {
+      setEditedCustomOperations(prev => ({
+        ...prev,
+        [nodeId]: ''
+      }));
+    }
     setHasPendingChanges(true);
   };
 
@@ -422,6 +429,13 @@ function Events({}) {
           ...prev,
           [nodeId]: batchValue
         }));
+        // operation 为 1/2/3 时清空 customOperation（仅 4=自定义 才有自定义内容）
+        if (batchValue === '1' || batchValue === '2' || batchValue === '3') {
+          setEditedCustomOperations(prev => ({
+            ...prev,
+            [nodeId]: ''
+          }));
+        }
       } else if (batchField === 'customOperation') {
         setEditedOperations(prev => ({
           ...prev,
@@ -449,10 +463,15 @@ function Events({}) {
       const node = data.nodes.find(n => n.id === nodeId);
       const op = editedOperations[nodeId];
       const customOp = editedCustomOperations[nodeId];
+      const finalOp = op !== undefined ? op : (node ? node.operation : '');
+      // operation 为 1/2/3 时 customOperation 必须为空（仅 4=自定义 才有自定义内容）
+      const finalCustomOp = (finalOp === '1' || finalOp === '2' || finalOp === '3')
+        ? ''
+        : (customOp !== undefined ? customOp : (node ? node.customOperation : ''));
       return {
         id: nodeId,
-        operation: op !== undefined ? op : (node ? node.operation : ''),
-        customOperation: customOp !== undefined ? customOp : (node ? node.customOperation : '')
+        operation: finalOp,
+        customOperation: finalCustomOp
       };
     });
 
