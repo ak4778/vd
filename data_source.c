@@ -292,6 +292,16 @@ int ds_init(const char *path) {
   exec_sql("CREATE INDEX IF NOT EXISTS idx_nodes_p4 ON nodes(P4)");
   exec_sql("CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name)");
 
+  /* Clean up orphaned FTS triggers/table left by older builds that used FTS.
+   * The current schema does not use FTS; leftover triggers referencing a
+   * missing nodes_fts table make every UPDATE/INSERT/DELETE fail at prepare
+   * time ("no such table: main.nodes_fts" -> HTTP 503 "Update failed").
+   * Drop them so the on-disk schema matches the current code. */
+  exec_sql("DROP TRIGGER IF EXISTS nodes_au");
+  exec_sql("DROP TRIGGER IF EXISTS nodes_ai");
+  exec_sql("DROP TRIGGER IF EXISTS nodes_ad");
+  exec_sql("DROP TABLE IF EXISTS nodes_fts");
+
   s_db_file_exists = file_exists(path);
 
   mutex_unlock(&s_sqlite_mutex);
