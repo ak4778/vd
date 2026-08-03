@@ -41,6 +41,15 @@ struct ds_result {
   int total;
 };
 
+struct ds_driver {
+  const char *name;
+  int (*init)(const char *path);
+  void (*cleanup)(void);
+  int (*is_available)(void);
+  int (*get_nodes)(struct ds_query *query, struct ds_result *result);
+  int (*update_nodes)(struct ds_node *nodes, int count);
+};
+
 int ds_init(const char *path);
 void ds_cleanup(void);
 

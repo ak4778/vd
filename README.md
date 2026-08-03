@@ -86,3 +86,29 @@ HTTP请求 → 创建work_request → 启动工作线程 → 主循环继续处�
                               构建响应 → mg_wakeup唤醒主循环 → 释放资源
                                         ↓
                               MG_EV_WAKEUP → 发送HTTP响应
+
+
+采用驱动注册模式：
+
+PlainText
+
+
+
+data_source.h          (统一接口)    ↓data_source.c          (路由层，根据配置调用不同驱动)    ↓┌───────┴───────┬───────┐sqlite_driver    mysql_driver   mongo_driver
+配置文件指定使用哪个驱动：
+
+JSON
+
+
+
+{  "dataSource": {    "type": "mysql",    "host": "localhost",    "port": 3306,    "database": "video_devices",    "user": "root",    "password": "xxx"  }}
+这样上层 net.c 完全不用改，只需新增对应数据库的驱动文件即可。
+
+
+扩展新数据库的步骤
+如果未来需要支持 MySQL/PostgreSQL/MongoDB，只需：
+
+创建 mysql_driver.c，实现 ds_driver 接口的 5 个函数
+在 data_source.c 中添加 extern const struct ds_driver mysql_driver;
+修改 select_driver() 根据配置选择驱动
+更新 Makefile 添加新源文件

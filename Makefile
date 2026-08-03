@@ -8,9 +8,10 @@ CFLAGS = -W -Wall -Wextra -g3 -ggdb -O0 -fno-omit-frame-pointer -I.             
 # To use CSV: make CSV_MODE=1
 ifeq ($(CSV_MODE),1)
   CFLAGS += -DCSV_MODE
+  SOURCES += csv_driver.c
   MODE = csv
 else
-  SOURCES += sqlite3.c
+  SOURCES += sqlite3.c sqlite_driver.c
   MODE = sqlite
 endif
 
