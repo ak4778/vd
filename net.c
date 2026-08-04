@@ -808,13 +808,25 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
     if (mg_match(hm->uri, mg_str("/api/login"), NULL)) {
       handle_login(c, u);
     } else if (mg_match(hm->uri, mg_str("/api/mode/get"), NULL)) {
-      mg_http_reply(c, 200, s_json_header, "{\"mode\":\"%s\",\"available\":%d}", DS_MODE, ds_is_available());
+      if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
+        mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");
+      } else {
+        mg_http_reply(c, 200, s_json_header, "{\"mode\":\"%s\",\"available\":%d}", DS_MODE, ds_is_available());
+      }
     } else if (mg_match(hm->uri, mg_str("/api/#"), NULL) && u == NULL) {
       mg_http_reply(c, 403, "", "Not Authorised\n");
     } else if (mg_match(hm->uri, mg_str("/api/nodes/get"), NULL)) {
-      handle_nodes_get(c, hm);
+      if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
+        mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");
+      } else {
+        handle_nodes_get(c, hm);
+      }
     } else if (mg_match(hm->uri, mg_str("/api/nodes/batchset"), NULL)) {
-      handle_nodes_batchset(c, hm->body);
+      if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+        mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");
+      } else {
+        handle_nodes_batchset(c, hm->body);
+      }
     } else if (mg_match(hm->uri, mg_str("/api/logout"), NULL)) {
       handle_logout(c, u);
     } else {
