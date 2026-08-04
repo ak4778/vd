@@ -355,8 +355,23 @@ static void *nodes_batchset_thread(void *param) {
 #endif
 
 struct user {
-  const char *name, *pass, *access_token;
+  const char *name, *pass;
+  char access_token[65];  // 64 chars + '\0'
 };
+
+static struct user s_users[] = {
+    {"admin", "admin", ""},
+    {"user1", "user1", ""},
+    {"user2", "user2", ""},
+    {NULL, NULL, ""},
+};
+
+static void generate_access_tokens(void) {
+  for (struct user *u = s_users; u->name != NULL; u++) {
+    mg_random_str(u->access_token, sizeof(u->access_token));
+    MG_INFO(("Generated token for user [%s]", u->name));
+  }
+}
 
 struct settings {
   bool log_enabled;
@@ -712,22 +727,16 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
 }
 
 static struct user *authenticate(struct mg_http_message *hm) {
-  static struct user users[] = {
-      {"admin", "admin", "admin_token"},
-      {"user1", "user1", "user1_token"},
-      {"user2", "user2", "user2_token"},
-      {NULL, NULL, NULL},
-  };
-  char user[64], pass[64];
+  char user[64], pass[128];
   struct user *u, *result = NULL;
   mg_http_creds(hm, user, sizeof(user), pass, sizeof(pass));
   MG_VERBOSE(("user [%s] pass [%s]", user, pass));
 
   if (user[0] != '\0' && pass[0] != '\0') {
-    for (u = users; result == NULL && u->name != NULL; u++)
+    for (u = s_users; result == NULL && u->name != NULL; u++)
       if (strcmp(user, u->name) == 0 && strcmp(pass, u->pass) == 0) result = u;
-  } else if (user[0] == '\0') {
-    for (u = users; result == NULL && u->name != NULL; u++)
+  } else if (user[0] == '\0' && pass[0] != '\0') {
+    for (u = s_users; result == NULL && u->name != NULL; u++)
       if (strcmp(pass, u->access_token) == 0) result = u;
   }
   return result;
@@ -738,6 +747,8 @@ static void handle_login(struct mg_connection *c, struct user *u) {
     mg_http_reply(c, 401, "", "Unauthorized\n");
     return;
   }
+  mg_random_str(u->access_token, sizeof(u->access_token));
+  MG_INFO(("User [%s] logged in, new token generated", u->name));
   char cookie[256];
   const char *cookie_name = c->is_tls ? "secure_access_token" : "access_token";
   mg_snprintf(cookie, sizeof(cookie),
@@ -748,7 +759,11 @@ static void handle_login(struct mg_connection *c, struct user *u) {
   mg_http_reply(c, 200, cookie, "{%m:%m}", MG_ESC("user"), MG_ESC(u->name));
 }
 
-static void handle_logout(struct mg_connection *c) {
+static void handle_logout(struct mg_connection *c, struct user *u) {
+  if (u != NULL) {
+    memset(u->access_token, 0, sizeof(u->access_token));
+    MG_INFO(("User [%s] logged out, token cleared", u->name));
+  }
   char cookie[256];
   const char *cookie_name = c->is_tls ? "secure_access_token" : "access_token";
   mg_snprintf(cookie, sizeof(cookie),
@@ -869,7 +884,7 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
     } else if (mg_match(hm->uri, mg_str("/api/#"), NULL) && u == NULL) {
       mg_http_reply(c, 403, "", "Not Authorised\n");
     } else if (mg_match(hm->uri, mg_str("/api/logout"), NULL)) {
-      handle_logout(c);
+      handle_logout(c, u);
     } else if (mg_match(hm->uri, mg_str("/api/debug"), NULL)) {
       handle_debug(c, hm);
     } else if (mg_match(hm->uri, mg_str("/api/stats/get"), NULL)) {
@@ -898,6 +913,7 @@ void web_init(struct mg_mgr *mgr) {
   results_mutex_init();
   cfg_mutex_init();
   s_settings.device_name = strdup("My Device");
+  generate_access_tokens();
   MG_INFO(("Web server starting in %s mode", DS_MODE));
   mg_timer_add(mgr, 20, MG_TIMER_REPEAT, dispatch_results, mgr);
   mg_http_listen(mgr, HTTP_URL, fn, NULL);

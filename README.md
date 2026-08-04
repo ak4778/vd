@@ -94,7 +94,9 @@ PlainText
 
 
 
-data_source.h          (统一接口)    ↓data_source.c          (路由层，根据配置调用不同驱动)    ↓┌───────┴───────┬───────┐sqlite_driver    mysql_driver   mongo_driver
+data_source.h          (统一接口)    ↓data_source.c          (路由层，根据配置调用不同驱动)    
+↓┌───────┴───────┬───────┐
+sqlite_driver    mysql_driver   mongo_driver
 配置文件指定使用哪个驱动：
 
 JSON
