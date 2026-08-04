@@ -83,6 +83,7 @@ struct cfg_parsed {
 
 static struct cfg_parsed g_cfg_parsed;
 static int g_cfg_parsed_valid = 0;
+static char s_global_api_token[256] = {0};  // Global fixed token for API tools like Postman
 
 #if defined(_WIN32) || defined(_WIN64)
 static CRITICAL_SECTION g_cfg_mutex;
@@ -123,6 +124,26 @@ static void parse_config_fields(const char *cfg_buf) {
     pos += strlen(mps_key);
     while (*pos == ' ' || *pos == ':') pos++;
     if (isdigit((unsigned char)*pos)) cp->maxPageSize = atoi(pos);
+  }
+
+  // Read global API token for Postman etc.
+  const char *api_key = "\"apiToken\"";
+  pos = strstr(cfg_buf, api_key);
+  if (pos) {
+    pos += strlen(api_key);
+    while (*pos == ' ' || *pos == ':') pos++;
+    if (*pos == '"') {
+      pos++;
+      char *end_pos = strchr(pos, '"');
+      if (end_pos) {
+        int len = (int) (end_pos - pos);
+        if (len > 0 && len < (int)sizeof(s_global_api_token)) {
+          memcpy(s_global_api_token, pos, (size_t) len);
+          s_global_api_token[len] = '\0';
+          MG_INFO(("Global API token loaded: %s", s_global_api_token));
+        }
+      }
+    }
   }
 
   struct mg_str cfg_fields_tok = mg_json_get_tok(mg_str((char *)cfg_buf), "$.fields");
@@ -730,12 +751,25 @@ static struct user *authenticate(struct mg_http_message *hm) {
   char user[64], pass[128];
   struct user *u, *result = NULL;
   mg_http_creds(hm, user, sizeof(user), pass, sizeof(pass));
-  MG_VERBOSE(("user [%s] pass [%s]", user, pass));
+
+  // Ensure config is loaded (for global API token)
+  cfg_lock();
+  if (!g_cfg_parsed_valid) {
+    char *buf = get_config_buf();
+    if (buf) parse_config_fields(buf);
+  }
+  cfg_unlock();
 
   if (user[0] != '\0' && pass[0] != '\0') {
     for (u = s_users; result == NULL && u->name != NULL; u++)
       if (strcmp(user, u->name) == 0 && strcmp(pass, u->pass) == 0) result = u;
   } else if (user[0] == '\0' && pass[0] != '\0') {
+    // Check global API token first (fixed token from config for Postman etc.)
+    if (s_global_api_token[0] != '\0' && strcmp(pass, s_global_api_token) == 0) {
+      static struct user global_token_user = {"_api_token_", NULL, ""};
+      MG_VERBOSE(("Authenticated via global API token"));
+      return &global_token_user;
+    }
     for (u = s_users; result == NULL && u->name != NULL; u++)
       if (strcmp(pass, u->access_token) == 0) result = u;
   }
@@ -760,7 +794,7 @@ static void handle_login(struct mg_connection *c, struct user *u) {
 }
 
 static void handle_logout(struct mg_connection *c, struct user *u) {
-  if (u != NULL) {
+  if (u != NULL && u->name != NULL && strcmp(u->name, "_api_token_") != 0) {
     memset(u->access_token, 0, sizeof(u->access_token));
     MG_INFO(("User [%s] logged out, token cleared", u->name));
   }

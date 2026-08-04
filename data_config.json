@@ -1,6 +1,7 @@
 {
     "csvFilePath": "leaf_nodes.csv",
     "sqliteFilePath": "device_dashboard.db",
+    "apiToken": "m4h38NPRPB6CCZg6ZtQncinBcj5X4351Jd6PAOqd1v4wze4MNopW1CyC10Y5Ur6x",
     "defaultPageSize": 50,
     "maxPageSize": 200,
     "fields": [

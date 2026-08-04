@@ -124,3 +124,16 @@ Basic Auth：Authorization: Basic <base64(user:pass)> — 用于登录
 Bearer Token：Authorization: Bearer <token> — token 来自登录后生成的 access_token
 Cookie：Cookie: access_token=<token> — 前端浏览器默认方式
 三种方式都经过同一个 authenticate() 函数验证，安全逻辑一致。
+
+
+
+Postman 调用 API 时，有三种方式携带 token：
+
+1. Bearer Token（推荐）
+Authorization: Bearer postman_token_2024
+
+2. Cookie
+Cookie: access_token=postman_token_2024
+
+3. URL 参数
+GET /api/nodes/get?access_token=postman_token_2024
