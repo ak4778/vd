@@ -877,12 +877,12 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       } else {
         mg_http_reply(c, 500, s_json_header, "{\"error\":\"Cannot read config\"}");
       }
+    } else if (mg_match(hm->uri, mg_str("/api/#"), NULL) && u == NULL) {
+      mg_http_reply(c, 403, "", "Not Authorised\n");
     } else if (mg_match(hm->uri, mg_str("/api/nodes/get"), NULL)) {
       handle_nodes_get(c, hm);
     } else if (mg_match(hm->uri, mg_str("/api/nodes/batchset"), NULL)) {
       handle_nodes_batchset(c, hm->body);
-    } else if (mg_match(hm->uri, mg_str("/api/#"), NULL) && u == NULL) {
-      mg_http_reply(c, 403, "", "Not Authorised\n");
     } else if (mg_match(hm->uri, mg_str("/api/logout"), NULL)) {
       handle_logout(c, u);
     } else if (mg_match(hm->uri, mg_str("/api/debug"), NULL)) {

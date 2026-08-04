@@ -114,3 +114,13 @@ JSON
 在 data_source.c 中添加 extern const struct ds_driver mysql_driver;
 修改 select_driver() 根据配置选择驱动
 更新 Makefile 添加新源文件
+
+
+
+认证方式支持
+后端支持三种认证方式（通过 mongoose 的 mg_http_creds）：
+
+Basic Auth：Authorization: Basic <base64(user:pass)> — 用于登录
+Bearer Token：Authorization: Bearer <token> — token 来自登录后生成的 access_token
+Cookie：Cookie: access_token=<token> — 前端浏览器默认方式
+三种方式都经过同一个 authenticate() 函数验证，安全逻辑一致。
