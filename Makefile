@@ -11,7 +11,9 @@ ifeq ($(CSV_MODE),1)
   SOURCES += csv_driver.c
   MODE = csv
 else
-  SOURCES += sqlite3.c sqlite_driver.c
+  SOURCES += sqlite_driver.c
+  # sqlite3.c is a third-party amalgamation; compile separately with relaxed warnings
+  SQLITE_OBJ = sqlite3.o
   MODE = sqlite
 endif
 
@@ -34,8 +36,12 @@ endif
 all: $(PROG)
 	$(RUN) $(PROG) $(ARGS)
 
-$(PROG): $(SOURCES) $(MODE_STAMP)
-	$(CC) $(SOURCES) $(CFLAGS) $(CFLAGS_MONGOOSE) $(CFLAGS_EXTRA) $(OUT)
+# Compile sqlite3.c separately: suppress unused-parameter warnings in third-party code
+sqlite3.o: sqlite3.c
+	$(CC) -c sqlite3.c $(filter-out -lws2_32 -lpthread -ldl,$(CFLAGS)) -Wno-unused-parameter -o sqlite3.o
+
+$(PROG): $(SOURCES) $(SQLITE_OBJ) $(MODE_STAMP)
+	$(CC) $(SOURCES) $(SQLITE_OBJ) $(CFLAGS) $(CFLAGS_MONGOOSE) $(CFLAGS_EXTRA) $(OUT)
 
 $(MODE_STAMP):
 	$(RM_MODE)

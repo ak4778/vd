@@ -21,17 +21,29 @@
 #define RESPONSE_OVERHEAD       4096
 
 // Cross-platform thread
+// Thread functions use void return type; on Linux a wrapper adapts to pthread's void* return.
 #if defined(_WIN32) || defined(_WIN64)
-static void start_thread(void *(*f)(void *), void *p) {
-  _beginthread((void(__cdecl *)(void *)) f, 0, p);
+static void start_thread(void (*f)(void *), void *p) {
+  _beginthread(f, 0, p);
 }
 #else
-static void start_thread(void *(*f)(void *), void *p) {
+struct thread_arg { void (*fn)(void *); void *arg; };
+static void *thread_wrapper(void *p) {
+  struct thread_arg *ta = (struct thread_arg *) p;
+  ta->fn(ta->arg);
+  free(ta);
+  return NULL;
+}
+static void start_thread(void (*f)(void *), void *p) {
+  struct thread_arg *ta = (struct thread_arg *) malloc(sizeof(*ta));
+  if (ta == NULL) return;
+  ta->fn = f;
+  ta->arg = p;
   pthread_t thread_id;
   pthread_attr_t attr;
   pthread_attr_init(&attr);
   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-  pthread_create(&thread_id, &attr, f, p);
+  pthread_create(&thread_id, &attr, thread_wrapper, ta);
   pthread_attr_destroy(&attr);
 }
 #endif
@@ -338,16 +350,15 @@ static void build_nodes_get_response(struct work_request *wr) {
   wr->response_len = (size_t) pos;
 }
 
-static void *nodes_get_thread(void *param) {
+static void nodes_get_thread(void *param) {
   struct work_request *wr = (struct work_request *) param;
   build_nodes_get_response(wr);
   push_result(wr->conn_id, wr->http_status, wr->response_body, wr->response_len);
   wr->response_body = NULL;
   free_work_request(wr);
-  return NULL;
 }
 
-static void *nodes_batchset_thread(void *param) {
+static void nodes_batchset_thread(void *param) {
   struct work_request *wr = (struct work_request *) param;
 
   int update_result = ds_update_nodes(wr->updates, wr->update_count);
@@ -364,7 +375,6 @@ static void *nodes_batchset_thread(void *param) {
   push_result(wr->conn_id, wr->http_status, wr->response_body, wr->response_len);
   wr->response_body = NULL;
   free_work_request(wr);
-  return NULL;
 }
 
 #if !defined(CSV_MODE)
@@ -393,15 +403,6 @@ static void generate_access_tokens(void) {
     MG_INFO(("Generated token for user [%s]", u->name));
   }
 }
-
-struct settings {
-  bool log_enabled;
-  int log_level;
-  long brightness;
-  char *device_name;
-};
-
-static struct settings s_settings = {true, 1, 57, NULL};
 
 static const char *s_json_header =
     "Content-Type: application/json\r\n"
@@ -598,22 +599,6 @@ static int my_json_unescape(struct mg_str json, const char *path, char *to, size
   return 0;
 }
 
-int ui_event_next(int no, struct ui_event *e) {
-  if (no < 0 || no >= MAX_EVENTS_NO) return 0;
-
-  srand((unsigned) no);
-  e->type = (uint8_t) rand() % 4;
-  e->prio = (uint8_t) rand() % 3;
-  e->timestamp =
-      (unsigned long) ((int64_t) mg_now() - 86400 * 1000 +
-                       no * 300 * 1000 +
-                       1000 * (rand() % 300)) /
-      1000UL;
-
-  mg_snprintf(e->text, MAX_EVENT_TEXT_SIZE, "event#%d", no);
-  return no + 1;
-}
-
 static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
   struct ds_node updates_local[MAX_NODE_UPDATES];
   int update_count = 0;
@@ -808,86 +793,6 @@ static void handle_logout(struct mg_connection *c, struct user *u) {
   mg_http_reply(c, 200, cookie, "true\n");
 }
 
-static void handle_debug(struct mg_connection *c, struct mg_http_message *hm) {
-  int level = (int) mg_json_get_long(hm->body, "$.level", MG_LL_DEBUG);
-  mg_log_set(level);
-  mg_http_reply(c, 200, "", "Debug level set to %d\n", level);
-}
-
-static size_t print_int_arr(void (*out)(char, void *), void *ptr, va_list *ap) {
-  size_t i, len = 0, num = va_arg(*ap, size_t);
-  int *arr = va_arg(*ap, int *);
-  for (i = 0; i < num; i++) {
-    len += mg_xprintf(out, ptr, "%s%d", i == 0 ? "" : ",", arr[i]);
-  }
-  return len;
-}
-
-static void handle_stats_get(struct mg_connection *c) {
-  int points[] = {21, 22, 22, 19, 18, 20, 23, 23, 22, 22, 22, 23, 22};
-  mg_http_reply(c, 200, s_json_header, "{%m:%d,%m:%d,%m:[%M]}\n",
-                MG_ESC("temperature"), 21,
-                MG_ESC("humidity"), 67,
-                MG_ESC("points"), print_int_arr,
-                sizeof(points) / sizeof(points[0]), points);
-}
-
-static size_t print_events(void (*out)(char, void *), void *ptr, va_list *ap) {
-  size_t len = 0;
-  struct ui_event ev;
-  int pageno = va_arg(*ap, int);
-  int no = (pageno - 1) * EVENTS_PER_PAGE;
-  int end = no + EVENTS_PER_PAGE;
-
-  while ((no = ui_event_next(no, &ev)) != 0 && no <= end) {
-    len += mg_xprintf(out, ptr, "%s{%m:%lu,%m:%d,%m:%d,%m:%m}\n",
-                      len == 0 ? "" : ",",
-                      MG_ESC("time"), ev.timestamp,
-                      MG_ESC("type"), ev.type,
-                      MG_ESC("prio"), ev.prio,
-                      MG_ESC("text"), MG_ESC(ev.text));
-  }
-
-  return len;
-}
-
-static void handle_events_get(struct mg_connection *c,
-                              struct mg_http_message *hm) {
-  int pageno = (int) mg_json_get_long(hm->body, "$.page", 1);
-  mg_http_reply(c, 200, s_json_header, "{%m:[%M], %m:%d}\n", MG_ESC("arr"),
-                print_events, pageno, MG_ESC("totalCount"), MAX_EVENTS_NO);
-}
-
-static void handle_settings_set(struct mg_connection *c, struct mg_str body) {
-  struct settings settings;
-  char *s = mg_json_get_str(body, "$.device_name");
-  bool ok = true;
-  memset(&settings, 0, sizeof(settings));
-  mg_json_get_bool(body, "$.log_enabled", &settings.log_enabled);
-  settings.log_level = (int) mg_json_get_long(body, "$.log_level", 0);
-  settings.brightness = mg_json_get_long(body, "$.brightness", 0);
-  if (s && strlen(s) < MAX_DEVICE_NAME) {
-    mg_free(settings.device_name);
-    settings.device_name = s;
-  } else {
-    mg_free(s);
-  }
-  s_settings = settings;
-  mg_http_reply(c, 200, s_json_header,
-                "{%m:%s,%m:%m}",
-                MG_ESC("status"), ok ? "true" : "false",
-                MG_ESC("message"), MG_ESC(ok ? "Success" : "Failed"));
-}
-
-static void handle_settings_get(struct mg_connection *c) {
-  mg_http_reply(c, 200, s_json_header, "{%m:%s,%m:%hhu,%m:%hhu,%m:%m}\n",
-                MG_ESC("log_enabled"),
-                s_settings.log_enabled ? "true" : "false",
-                MG_ESC("log_level"), s_settings.log_level,
-                MG_ESC("brightness"), s_settings.brightness,
-                MG_ESC("device_name"), MG_ESC(s_settings.device_name));
-}
-
 static void fn(struct mg_connection *c, int ev, void *ev_data) {
   if (ev == MG_EV_ACCEPT) {
     if (c->is_tls) {
@@ -904,13 +809,6 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       handle_login(c, u);
     } else if (mg_match(hm->uri, mg_str("/api/mode/get"), NULL)) {
       mg_http_reply(c, 200, s_json_header, "{\"mode\":\"%s\",\"available\":%d}", DS_MODE, ds_is_available());
-    } else if (mg_match(hm->uri, mg_str("/api/config/get"), NULL)) {
-      char *cfg_buf = get_config_buf();
-      if (cfg_buf != NULL) {
-        mg_http_reply(c, 200, s_json_header, "%s", cfg_buf);
-      } else {
-        mg_http_reply(c, 500, s_json_header, "{\"error\":\"Cannot read config\"}");
-      }
     } else if (mg_match(hm->uri, mg_str("/api/#"), NULL) && u == NULL) {
       mg_http_reply(c, 403, "", "Not Authorised\n");
     } else if (mg_match(hm->uri, mg_str("/api/nodes/get"), NULL)) {
@@ -919,16 +817,6 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       handle_nodes_batchset(c, hm->body);
     } else if (mg_match(hm->uri, mg_str("/api/logout"), NULL)) {
       handle_logout(c, u);
-    } else if (mg_match(hm->uri, mg_str("/api/debug"), NULL)) {
-      handle_debug(c, hm);
-    } else if (mg_match(hm->uri, mg_str("/api/stats/get"), NULL)) {
-      handle_stats_get(c);
-    } else if (mg_match(hm->uri, mg_str("/api/events/get"), NULL)) {
-      handle_events_get(c, hm);
-    } else if (mg_match(hm->uri, mg_str("/api/settings/get"), NULL)) {
-      handle_settings_get(c);
-    } else if (mg_match(hm->uri, mg_str("/api/settings/set"), NULL)) {
-      handle_settings_set(c, hm->body);
     } else {
       struct mg_http_serve_opts opts;
       memset(&opts, 0, sizeof(opts));
@@ -946,7 +834,6 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
 void web_init(struct mg_mgr *mgr) {
   results_mutex_init();
   cfg_mutex_init();
-  s_settings.device_name = strdup("My Device");
   generate_access_tokens();
   MG_INFO(("Web server starting in %s mode", DS_MODE));
   mg_timer_add(mgr, 20, MG_TIMER_REPEAT, dispatch_results, mgr);
