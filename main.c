@@ -48,6 +48,11 @@ static const char *get_path_from_config(const char *json_path, const char *defau
 int main(void) {
   struct mg_mgr mgr;
 
+  // Disable stdout/stderr buffering so logs flush immediately when
+  // redirected to files (Windows defaults to full buffering for pipes/files).
+  setvbuf(stdout, NULL, _IONBF, 0);
+  setvbuf(stderr, NULL, _IONBF, 0);
+
   signal(SIGPIPE, SIG_IGN);
   signal(SIGINT, signal_handler);
   signal(SIGTERM, signal_handler);

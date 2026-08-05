@@ -16386,7 +16386,9 @@ static const uint8_t mg_secp256r1_oid[] = {
 #define MG_TLS_CERTIFICATE_VERIFY 15
 #define MG_TLS_FINISHED 20
 
+#ifndef MG_TLS_RSA_USE_CRT
 #define MG_TLS_RSA_USE_CRT 1  // CRT instead of naive RSA
+#endif
 
 // handshake is re-entrant, so we need to keep track of its state state names
 // refer to RFC8446#A.1

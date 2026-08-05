@@ -797,9 +797,28 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
   if (ev == MG_EV_ACCEPT) {
     if (c->is_tls) {
       struct mg_tls_opts opts = {0};
-      opts.cert = mg_file_read(NULL, "certs/server_cert.pem");
-      opts.key = mg_file_read(NULL, "certs/server_key.pem");
-      mg_tls_init(c, &opts);
+      // NOTE: mg_file_read(NULL, ...) crashes because it dereferences fs->st.
+      // Must pass &mg_fs_posix explicitly (mg_http_serve_dir defaults to it
+      // internally, but mg_file_read does not).
+      opts.cert = mg_file_read(&mg_fs_posix, "certs/server_cert.pem");
+      opts.key = mg_file_read(&mg_fs_posix, "certs/server_key.pem");
+      fprintf(stderr, "[TLS] conn %lu cert=%p(%lu) key=%p(%lu)\n", c->id,
+              (void *)opts.cert.buf, (unsigned long)opts.cert.len,
+              (void *)opts.key.buf, (unsigned long)opts.key.len);
+      if (opts.cert.buf == NULL || opts.key.buf == NULL) {
+        MG_ERROR(("Failed to load TLS cert/key (cert=%p key=%p) - closing TLS connection %lu",
+                  (void *) opts.cert.buf, (void *) opts.key.buf, c->id));
+        // Free whichever one succeeded and close the connection cleanly
+        // instead of passing NULLs to mg_tls_init which would leave the
+        // connection in a half-initialised TLS state.
+        if (opts.cert.buf != NULL) mg_free((void *) opts.cert.buf);
+        if (opts.key.buf != NULL) mg_free((void *) opts.key.buf);
+        c->is_draining = 1;
+      } else {
+        mg_tls_init(c, &opts);
+        fprintf(stderr, "[TLS] mg_tls_init done conn %lu c->tls=%p is_tls=%d is_tls_hs=%d\n",
+                c->id, c->tls, c->is_tls, c->is_tls_hs);
+      }
     }
   } else if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;

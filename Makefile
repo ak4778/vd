@@ -1,7 +1,17 @@
 PROG ?= ./vvvv       # Program we are building
 OUT ?= -o $(PROG)       # Compiler argument for output file
 SOURCES = main.c mongoose.c net.c data_source.c   # Source code files
-CFLAGS = -W -Wall -Wextra -g3 -ggdb -O0 -fno-omit-frame-pointer -I.                # Build options
+# Enable mongoose's built-in TLS backend (EC P-256 + AES/ChaCha20).
+# mongoose.h only defaults to MG_TLS_BUILTIN under MG_ARCH_CUBE; on Win32/Linux
+# the default is MG_TLS_NONE, so HTTPS listen sockets silently fail handshake
+# with "TLS is not enabled". Define it explicitly here.
+CFLAGS = -W -Wall -Wextra -g3 -ggdb -O0 -fno-omit-frame-pointer -I. -DMG_TLS=MG_TLS_BUILTIN    # Build options
+
+# RSA CRT optimisation in mongoose's built-in TLS has a bug that causes
+# "CRT signing failed" during the TLS 1.2 handshake with self-signed RSA
+# certs on Windows. Disable it to fall back to standard modular exponentiation.
+# (only affects RSA certs; EC certs bypass this code path entirely)
+CFLAGS += -DMG_TLS_RSA_USE_CRT=0
 
 # Database mode: SQLite (default) or CSV
 # To use SQLite (default): make
