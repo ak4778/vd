@@ -9,10 +9,15 @@ node_modules/
 
 # Database files
 *.db
+*.db-shm
+*.db-wal
 
 # Data files (generated at runtime)
 *.csv
 *.json
+
+# Logs
+*.log
 
 # Build output
 web_root/dist/
@@ -20,6 +25,12 @@ web_root/dist/
 # Backup files
 *.bak
 *.tmp
+
+# Test artifacts (output / temp files under test/)
+test/NUL
+test/wtmp/
+test/e2tmp/
+test/*.txt
 
 # IDE files
 .vscode/
