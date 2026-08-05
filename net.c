@@ -397,6 +397,12 @@ static struct user s_users[] = {
     {NULL, NULL, ""},
 };
 
+// Sentinel user returned when a request authenticates via the global apiToken
+// (from data_config.json) — through the "apiToken" header, the access_token
+// cookie / query param, or a Bearer token. Has no password and no session
+// token: the apiToken itself is the credential.
+static struct user global_token_user = {"_api_token_", NULL, ""};
+
 static void generate_access_tokens(void) {
   for (struct user *u = s_users; u->name != NULL; u++) {
     mg_random_str(u->access_token, sizeof(u->access_token));
@@ -794,13 +800,27 @@ static struct user *authenticate(struct mg_http_message *hm) {
   }
   cfg_unlock();
 
+  // Custom "apiToken" header: if it matches the apiToken from data_config.json,
+  // authenticate as the global token user. Header-based alternative to the
+  // access_token cookie/query param for API clients (scripts, Postman, etc.).
+  if (s_global_api_token[0] != '\0') {
+    struct mg_str *api_hdr = mg_http_get_header(hm, "apiToken");
+    if (api_hdr != NULL && api_hdr->len > 0) {
+      size_t tlen = strlen(s_global_api_token);
+      if (api_hdr->len == tlen &&
+          memcmp(api_hdr->buf, s_global_api_token, tlen) == 0) {
+        MG_VERBOSE(("Authenticated via apiToken header"));
+        return &global_token_user;
+      }
+    }
+  }
+
   if (user[0] != '\0' && pass[0] != '\0') {
     for (u = s_users; result == NULL && u->name != NULL; u++)
       if (strcmp(user, u->name) == 0 && strcmp(pass, u->pass) == 0) result = u;
   } else if (user[0] == '\0' && pass[0] != '\0') {
     // Check global API token first (fixed token from config for Postman etc.)
     if (s_global_api_token[0] != '\0' && strcmp(pass, s_global_api_token) == 0) {
-      static struct user global_token_user = {"_api_token_", NULL, ""};
       MG_VERBOSE(("Authenticated via global API token"));
       return &global_token_user;
     }
