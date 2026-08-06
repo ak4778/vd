@@ -140,7 +140,7 @@ GET /api/nodes/get?access_token=postman_token_2024
 
 关键验证点：
 
-- apiToken header 是大小写不敏感的（mongoose的 mg_http_get_header 特性）
+- Api-Token header 是大小写不敏感的（mongoose的 mg_http_get_header 特性）
 - OWS（Optional Whitespace） 前导/尾随空格被HTTP层正确剥离，token仍匹配 — 符合 RFC 7230
 - token内部空格 正确拒绝（memcmp 精确匹配）
 - 多认证方式共存 ：apiToken header 优先于 cookie/Basic；Bearer token 和 ?access_token= query param 也能用 apiToken 值认证
