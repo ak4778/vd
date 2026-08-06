@@ -161,3 +161,44 @@ Set-Cookie: access_token=xxx; Path=/; Secure; HttpOnly; ...
 浏览器规范规定：带 Secure 标志的 Cookie 只会在 HTTPS 请求中发送。所以当你切回 HTTP（端口 8000）时，浏览器自动丢弃了这个 Cookie。
 
 修复方法：去掉 Secure 标志，让 Cookie 在 HTTP 和 HTTPS 中都能工作。
+
+前端**并不手动添加 cookie**，而是依赖浏览器的自动 cookie 管理 + fetch 的 `credentials: 'include'` 选项。整个 cookie 流程是这样的：
+
+## 一、Cookie 的产生（登录时由服务器写入）
+
+登录表单提交时，前端只发送 Basic Auth 头，cookie 由服务器通过 `Set-Cookie` 响应头写入浏览器：
+
+[components.js:113-117](file:///c:/s/vd/web_root/components.js#L113-L117)
+```js
+const onsubmit = function(ev) {
+  const authhdr = 'Basic ' + btoa(user + ':' + pass);
+  const headers = {Authorization: authhdr};
+  return fetch('api/login', {headers, credentials: 'include'}).then(loginFn).finally(r => setPass(''));
+};
+```
+
+服务器验证账号密码后，在响应里返回 `Set-Cookie: access_token=<token>; HttpOnly; Path=/`（HTTPS 上还会加 `Secure`），浏览器自动把这个 cookie 存起来。**前端代码完全没碰 `document.cookie`**。
+
+## 二、Cookie 的携带（每个请求都靠 `credentials: 'include'`）
+
+所有需要鉴权的请求都带了 `credentials: 'include'`，浏览器就会自动把刚才存的 `access_token` cookie 附在 `Cookie` 请求头里发出去。一共有 5 处：
+
+| 位置 | 用途 | 代码 |
+|------|------|------|
+| [main.js:721](file:///c:/s/vd/web_root/main.js#L721) | 页面加载时的自动登录（GET /api/login） | `fetchWithTimeout('api/login', { credentials: 'include' })` |
+| [main.js:715](file:///c:/s/vd/web_root/main.js#L715) | 登出 | `fetchWithTimeout('api/logout', { credentials: 'include' })` |
+| [main.js:110](file:///c:/s/vd/web_root/main.js#L110) | 加载节点数据（GET /api/nodes/get） | `fetchWithTimeout(url, { method: 'GET', cache: 'no-cache', credentials: 'include' })` |
+| [main.js:478-483](file:///c:/s/vd/web_root/main.js#L478-L483) | 批量保存（POST /api/nodes/batchset） | `fetchWithTimeout('api/nodes/batchset', { ..., credentials: 'include' })` |
+| [components.js:116](file:///c:/s/vd/web_root/components.js#L116) | 登录表单提交（POST /api/login） | `fetch('api/login', {headers, credentials: 'include'})` |
+
+## 三、关键点
+
+1. **`credentials: 'include'` 是必须的**：fetch 默认不带 cookie（同源也不带），必须显式打开。如果漏掉，浏览器就不会发送 `access_token`，服务器 `authenticate()` 拿不到 token 就返回 403。
+2. **`HttpOnly` cookie 无法被 JS 读取**：所以前端根本读不到 `access_token` 的值，只能让浏览器代为发送。这也是防 XSS 窃取 token 的设计。
+3. **服务端对应读取逻辑**：net.c 里的 `authenticate()` 用 `cookie_exact()` 在 `Cookie` 头里精确匹配 `access_token`（见 project memory 里 2026-08-05 修的 Bug 2，mongoose 的 `mg_http_get_header_var` 是子串匹配，不可靠）。
+4. **`api/mode/get` 不需要 cookie**：[main.js:722](file:///c:/s/vd/web_root/main.js#L722) 没带 `credentials`，因为它是公开端点。
+
+简而言之：**前端只在每个 fetch 里写 `credentials: 'include'`，cookie 的写入、存储、发送全由浏览器自动完成**。
+
+---
+
