@@ -144,3 +144,20 @@ GET /api/nodes/get?access_token=postman_token_2024
 - OWS（Optional Whitespace） 前导/尾随空格被HTTP层正确剥离，token仍匹配 — 符合 RFC 7230
 - token内部空格 正确拒绝（memcmp 精确匹配）
 - 多认证方式共存 ：apiToken header 优先于 cookie/Basic；Bearer token 和 ?access_token= query param 也能用 apiToken 值认证
+
+这是一个浏览器 Cookie 安全策略导致的问题。让我分析一下：
+
+net.c
+Thought
+根本原因：Secure Cookie 标志。
+
+当你通过 HTTPS 登录时（net.c:851），Cookie 被设置为：
+
+PlainText
+
+
+
+Set-Cookie: access_token=xxx; Path=/; Secure; HttpOnly; ...
+浏览器规范规定：带 Secure 标志的 Cookie 只会在 HTTPS 请求中发送。所以当你切回 HTTP（端口 8000）时，浏览器自动丢弃了这个 Cookie。
+
+修复方法：去掉 Secure 标志，让 Cookie 在 HTTP 和 HTTPS 中都能工作。

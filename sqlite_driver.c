@@ -187,7 +187,11 @@ static int build_where_sql(struct ds_query *query, char *where, int where_len,
     snprintf(like_pattern, sizeof(like_pattern), "%%%s%%", query->keyword);
 
     pos += snprintf(where + pos, (size_t)(where_len - pos),
-                     "%s(name LIKE ? OR P4 LIKE ?)", pos > 0 ? " AND " : "");
+                     "%s(id LIKE ? OR name LIKE ? OR channelCode LIKE ? OR P1 LIKE ? OR P4 LIKE ?)",
+                     pos > 0 ? " AND " : "");
+    plist_add_text(params, like_pattern);
+    plist_add_text(params, like_pattern);
+    plist_add_text(params, like_pattern);
     plist_add_text(params, like_pattern);
     plist_add_text(params, like_pattern);
   }

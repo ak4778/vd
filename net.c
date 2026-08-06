@@ -846,10 +846,11 @@ static void handle_login(struct mg_connection *c, struct user *u) {
   char cookie[256];
   mg_snprintf(cookie, sizeof(cookie),
               "Set-Cookie: access_token=%s; Path=/; "
-              "%sHttpOnly; SameSite=Lax; Max-Age=%d\r\n",
-              u->access_token,
-              c->is_tls ? "Secure; " : "", 3600 * 24);
-  mg_http_reply(c, 200, cookie, "{%m:%m}", MG_ESC("user"), MG_ESC(u->name));
+              "HttpOnly; SameSite=Lax; Max-Age=%d\r\n",
+              u->access_token, 3600 * 24);
+  mg_http_reply(c, 200, cookie, "{%m:%m,%m:%m}",
+                MG_ESC("user"), MG_ESC(u->name),
+                MG_ESC("token"), MG_ESC(u->access_token));
 }
 
 static void handle_logout(struct mg_connection *c, struct user *u) {
@@ -861,8 +862,7 @@ static void handle_logout(struct mg_connection *c, struct user *u) {
   mg_snprintf(cookie, sizeof(cookie),
               "Set-Cookie: access_token=; Path=/; "
               "Expires=Thu, 01 Jan 1970 00:00:00 UTC; "
-              "%sHttpOnly; Max-Age=0; \r\n",
-              c->is_tls ? "Secure; " : "");
+              "HttpOnly; Max-Age=0; \r\n");
   mg_http_reply(c, 200, cookie, "true\n");
 }
 
