@@ -31,7 +31,7 @@ $code = & curl.exe -s -o NUL -w '%{http_code}' "$base/index.html" 2>$null
 Check 'SEC' "index.html accessible" ($code -eq '200') "code=$code"
 
 # A3. Path traversal outside web_root
-$code = & curl.exe -s -o NUL -w '%{http_code}' "$base/../../../etc/passwd" 2>$null
+$code = & curl.exe --path-as-is -s -o NUL -w '%{http_code}' "$base/../../../etc/passwd" 2>$null
 Check 'SEC' "Path traversal /../../../etc/passwd blocked" ($code -ne '200') "code=$code (should not be 200)"
 
 # A4. Path traversal via encoded dots
@@ -43,11 +43,11 @@ $code = & curl.exe -s -o NUL -w '%{http_code}' "$base/%252e%252e/%252e%252e/etc/
 Check 'SEC' "Double-encoded path traversal blocked" ($code -ne '200') "code=$code"
 
 # A6. Path traversal targeting source code
-$code = & curl.exe -s -o NUL -w '%{http_code}' "$base/../net.c" 2>$null
+$code = & curl.exe --path-as-is -s -o NUL -w '%{http_code}' "$base/../net.c" 2>$null
 Check 'SEC' "Path traversal to net.c blocked" ($code -ne '200') "code=$code"
 
 # A7. Path traversal to database
-$code = & curl.exe -s -o NUL -w '%{http_code}' "$base/../device_dashboard.db" 2>$null
+$code = & curl.exe --path-as-is -s -o NUL -w '%{http_code}' "$base/../device_dashboard.db" 2>$null
 Check 'SEC' "Path traversal to .db blocked" ($code -ne '200') "code=$code"
 
 # A8. Nonexistent static file
@@ -55,7 +55,7 @@ $code = & curl.exe -s -o NUL -w '%{http_code}' "$base/nonexistent.html" 2>$null
 Check 'SEC' "Nonexistent file returns 404" ($code -eq '404') "code=$code"
 
 # A9. Directory listing (should not list)
-$code = & curl.exe -s -o NUL -w '%{http_code}' "$base/../" 2>$null
+$code = & curl.exe --path-as-is -s -o NUL -w '%{http_code}' "$base/../" 2>$null
 Check 'SEC' "Parent directory listing blocked" ($code -ne '200') "code=$code"
 
 # A10. Null byte in path

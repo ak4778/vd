@@ -897,7 +897,13 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
     struct user *u = authenticate(hm);
 
-    if (mg_match(hm->uri, mg_str("/api/login"), NULL)) {
+    // Path traversal defence: reject any URI containing ".." before routing.
+    // mongoose's mg_http_serve_dir normalises "/../" back to "/" and serves
+    // index.html (HTTP 200), leaking the parent dir listing. Reject early so
+    // "/../", "/../net.c", "/%2e%2e/" etc. all return 403.
+    if (mg_match(hm->uri, mg_str("*..*"), NULL)) {
+      mg_http_reply(c, 403, "", "Forbidden\n");
+    } else if (mg_match(hm->uri, mg_str("/api/login"), NULL)) {
       handle_login(c, u);
     } else if (mg_match(hm->uri, mg_str("/api/mode/get"), NULL)) {
       if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
