@@ -5,7 +5,7 @@ SOURCES = main.c mongoose.c net.c data_source.c   # Source code files
 # mongoose.h only defaults to MG_TLS_BUILTIN under MG_ARCH_CUBE; on Win32/Linux
 # the default is MG_TLS_NONE, so HTTPS listen sockets silently fail handshake
 # with "TLS is not enabled". Define it explicitly here.
-CFLAGS = -W -Wall -Wextra -g3 -ggdb -O0 -fno-omit-frame-pointer -I. -DMG_TLS=MG_TLS_BUILTIN    # Build options
+CFLAGS = -W -Wall -Wextra -g3 -ggdb -O3 -fno-omit-frame-pointer -I. -DMG_TLS=MG_TLS_BUILTIN -DMG_SOCK_LISTEN_BACKLOG_SIZE=512 -DMG_IO_SIZE=65536    # Build options
 
 # RSA CRT optimisation in mongoose's built-in TLS has a bug that causes
 # "CRT signing failed" during the TLS 1.2 handshake with self-signed RSA

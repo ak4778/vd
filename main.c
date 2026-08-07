@@ -82,7 +82,7 @@ int main(void) {
 
   web_init(&mgr);
   while (s_sig_num == 0) {
-    mg_mgr_poll(&mgr, 50);
+    mg_mgr_poll(&mgr, 10);
   }
 
   mg_mgr_free(&mgr);

@@ -208,3 +208,74 @@ mongoose.h#L1175-L1177 中 MG_SOCK_LISTEN_BACKLOG_SIZE 默认值为 128
 mongoose.c#L14318 中 listen(fd, 128) 将 TCP backlog 限制在 128
 Windows TCP 栈自身的 SOMAXCONN 上限约为 200
 主线程 accept 速度 + SQLite 互斥锁竞争，共同导致约 200 的实际并发上限
+
+
+Mongoose 可优化参数汇总
+基于对你项目（Windows + HTTP + SQLite）的分析，以下是所有可调优的参数，按影响程度从大到小排列：
+
+🔥 高影响参数
+1. MG_SOCK_LISTEN_BACKLOG_SIZE — TCP 连接等待队列
+位置: mongoose.h#L1175-L1177
+当前值: 128
+作用: 操作系统 TCP listen() 的 backlog 大小，决定能同时接受多少并发连接
+建议: 提高到 512 或 1024，但 Windows 系统硬上限约 200（SOMAXCONN）
+注意: 这是你之前极限测试中 ~200 并发读取上限的根因之一
+2. mg_mgr_poll() 轮询间隔
+位置: main.c#L85
+当前值: 50ms
+作用: 事件循环的轮询间隔，越小响应越快但 CPU 占用越高
+建议: 降低到 10ms 或 5ms（提升响应速度，代价是 CPU 略增）
+权衡: 你的定时器 dispatch_results 间隔是 20ms，所以 poll 间隔应 ≤ 20ms
+3. 编译优化等级
+位置: Makefile#L8
+当前值: -O0（调试模式，无优化）
+建议: 发布版本使用 -O2 或 -O3，性能可提升 15-30%
+注意: -O0 会使函数调用、循环等都不被优化，严重影响性能
+🟡 中等影响参数
+4. MG_IO_SIZE — IO 缓冲区粒度
+位置: mongoose.h#L856-L858（Win32 平台默认 16384）
+当前值: 16384 (16KB)
+作用: 发送/接收缓冲区的增长粒度
+建议: 对于大数据量响应（你的 nodes/get 返回大量 JSON），可提高到 65536 (64KB)，减少内存分配次数
+5. MG_MAX_RECV_SIZE — 最大接收缓冲区
+位置: mongoose.h#L1151-L1153
+当前值: 3MB
+作用: 单个请求最大允许的接收数据
+建议: 你的 POST 请求通常较小，可降低到 1MB 节省内存
+6. MG_MAX_HTTP_HEADERS — HTTP 头数量上限
+位置: mongoose.h#L1159-L1161
+当前值: 30
+作用: 每个 HTTP 请求允许的 header 数量
+建议: 你用了 Basic Auth + Cookie，约需 5-8 个 header，30 已足够，不需要改
+🟢 低影响 / 调优参数
+7. MG_ENABLE_PROFILE — 性能分析
+位置: mongoose.h#L1216-L1218
+当前值: 0（关闭）
+作用: 启用连接状态追踪，用于调试性能
+建议: 开发时可临时开启 1，发布时保持 0
+8. MG_ENABLE_LOG / mg_log_set() — 日志级别
+位置: main.c#L60
+当前值: MG_LL_DEBUG（最详细）
+作用: 日志输出量，debug 级别会产生大量 I/O
+建议: 生产环境改为 MG_LL_INFO 或 MG_LL_WARN，减少日志 I/O 开销
+9. MG_ENABLE_CHACHA20 — TLS 加密算法
+位置: mongoose.h#L1272-L1274
+当前值: 1（启用）
+作用: ChaCha20 比 AES 更高效但略耗 CPU
+建议: 已有 AES 加速的平台可关闭，嵌入式平台保留
+⚙️ 编译时可开关的功能模块
+      宏	          默认值	       作用	               建议
+MG_ENABLE_TCPIP	            1	           内置 TCP/IP 栈     保持 1（Win32 使用 Winsock）
+MG_ENABLE_WINSOCK	 1 (Win32)	   Winsock 支持	      保持 1
+MG_ENABLE_POSIX_FS	 1 (Win32)	   POSIX 文件系统     保持 1（serve_dir 需要）
+MG_ENABLE_DIRLIST	 1 (Win32)	     目录列表	      如果不用目录列表可设 0
+MG_ENABLE_SSI	            0	           服务器端包含	      保持 0（不需要）
+MG_TLS	               MG_TLS_BUILTIN	     TLS 后端	      已正确配置
+MG_TLS_RSA_USE_CRT	    0	           RSA CRT 优化	      已正确配置
+
+针对你的项目的优化建议
+基于极限测试结果（~200 并发读取上限、SQLite 锁竞争），最有效的三项优化是：
+
+MG_SOCK_LISTEN_BACKLOG_SIZE 提高到 512 — 在 Makefile 的 CFLAGS 中添加 -DMG_SOCK_LISTEN_BACKLOG_SIZE=512
+mg_mgr_poll 间隔降到 10ms — 在 main.c#L85 中将 50 改为 10
+编译优化改为 -O2 — 在 Makefile#L8 中将 -O0 改为 -O2
