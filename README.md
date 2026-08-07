@@ -202,3 +202,9 @@ const onsubmit = function(ev) {
 
 ---
 
+高并发读取瓶颈（3 项失败） — 500/800/1000 并发读取均只有约 200 个成功。这是由于：
+
+mongoose.h#L1175-L1177 中 MG_SOCK_LISTEN_BACKLOG_SIZE 默认值为 128
+mongoose.c#L14318 中 listen(fd, 128) 将 TCP backlog 限制在 128
+Windows TCP 栈自身的 SOMAXCONN 上限约为 200
+主线程 accept 速度 + SQLite 互斥锁竞争，共同导致约 200 的实际并发上限
