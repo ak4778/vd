@@ -53,14 +53,9 @@ static char *get_config_buf(void);
 static int get_max_page_size(void);
 static int get_default_page_size(void);
 
-// Async work request types
-#define WORK_NODES_GET 1
-#define WORK_NODES_BATCHSET 2
-
 struct work_request {
   struct mg_mgr *mgr;
   unsigned long conn_id;
-  int op_type;
 
   int http_status;
   char *response_body;
@@ -348,6 +343,117 @@ static void build_nodes_get_response(struct work_request *wr) {
   wr->http_status = 200;
   wr->response_body = response;
   wr->response_len = (size_t) pos;
+}
+
+static void build_nodes_queryCategory_response(struct work_request *wr) {
+  struct ds_query query;
+  memset(&query, 0, sizeof(query));
+  query.has_operation = 1;
+  query.operation = "1,2,3";
+
+  // Return ALL matching data — ignore page/pageSize.
+  // Phase 1: quick count query (pageSize=1) to learn how many rows match.
+  query.page = 1;
+  query.pageSize = 1;
+  struct ds_result result = {0};
+  int query_result = ds_get_nodes(&query, &result);
+  if (query_result != 0) {
+    wr->http_status = 503;
+    wr->response_body = strdup("{\"error\":\"Database query failed\"}");
+    wr->response_len = strlen(wr->response_body);
+    return;
+  }
+  int total = result.total;
+  if (result.nodes != NULL) { free(result.nodes); result.nodes = NULL; }
+
+  // Phase 2: fetch every matching row in one shot.
+  if (total > 0) {
+    query.pageSize = total;
+    memset(&result, 0, sizeof(result));
+    query_result = ds_get_nodes(&query, &result);
+    if (query_result != 0) {
+      wr->http_status = 503;
+      wr->response_body = strdup("{\"error\":\"Database query failed\"}");
+      wr->response_len = strlen(wr->response_body);
+      return;
+    }
+  }
+
+  size_t total_size = (size_t) ((total > 0 ? total : 1) * 512 + 4096);
+  if (total_size < 8192) total_size = 8192;
+  char *response = (char *) malloc(total_size);
+  if (response == NULL) {
+    if (result.nodes != NULL) free(result.nodes);
+    wr->http_status = 500;
+    wr->response_body = strdup("{\"error\":\"Memory allocation failed\"}");
+    wr->response_len = strlen(wr->response_body);
+    return;
+  }
+
+  int pos = 0;
+  pos += snprintf(response + pos, (size_t)(total_size - pos),
+                   "{\"data\":{\"total\":%d,\"nodes\":[", result.total);
+
+  int first = 1;
+  const char *keys[] = {"name", "channelCode", "isOnline", "P1", "P4", "operation"};
+  for (int i = 0; i < result.count; i++) {
+    struct ds_node *node = &result.nodes[i];
+    const char *fields[] = {node->name, node->channelCode, node->isOnline,
+                            node->P1, node->P4, node->operation};
+    if (!first) pos += snprintf(response + pos, (size_t)(total_size - pos), ",");
+    first = 0;
+    pos += snprintf(response + pos, (size_t)(total_size - pos), "{");
+
+    for (int j = 0; j < 6; j++) {
+      if (j > 0) pos += snprintf(response + pos, (size_t)(total_size - pos), ",");
+      if (j == 3)
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\"%s\":\"", "type");
+      else if (j == 4)
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\"%s\":\"", "company");
+      else if (j == 5)
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\"%s\":\"", "category");
+      else
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\"%s\":\"", keys[j]);
+      const char *field_val = fields[j];
+      for (int k = 0; field_val[k] != '\0'; k++) {
+        char c = field_val[k];
+        if (c == '"' || c == '\\') {
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\%c", c);
+        } else if (c == '\n') {
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\n");
+        } else if (c == '\r') {
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\r");
+        } else if (c == '\t') {
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\t");
+        } else if (c == '\b') {
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\b");
+        } else if (c == '\f') {
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\f");
+        } else if ((unsigned char) c < 0x20) {
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\u%04x", (unsigned char) c);
+        } else {
+          pos += snprintf(response + pos, (size_t)(total_size - pos), "%c", c);
+        }
+      }
+      pos += snprintf(response + pos, (size_t)(total_size - pos), "\"");
+    }
+    pos += snprintf(response + pos, (size_t)(total_size - pos), "}");
+  }
+
+  pos += snprintf(response + pos, (size_t)(total_size - pos), "]}}");
+
+  if (result.nodes != NULL) free(result.nodes);
+  wr->http_status = 200;
+  wr->response_body = response;
+  wr->response_len = (size_t) pos;
+}
+
+static void nodes_queryCategory_get_thread(void *param) {
+  struct work_request *wr = (struct work_request *) param;
+  build_nodes_queryCategory_response(wr);
+  push_result(wr->conn_id, wr->http_status, wr->response_body, wr->response_len);
+  wr->response_body = NULL;
+  free_work_request(wr);
 }
 
 static void nodes_get_thread(void *param) {
@@ -670,7 +776,6 @@ static void handle_nodes_batchset(struct mg_connection *c, struct mg_str body) {
   struct work_request *wr = (struct work_request *) calloc(1, sizeof(*wr));
   wr->mgr = c->mgr;
   wr->conn_id = c->id;
-  wr->op_type = WORK_NODES_BATCHSET;
   wr->updates = (struct ds_node *) malloc(sizeof(struct ds_node) * (size_t) update_count);
   memcpy(wr->updates, updates_local, sizeof(struct ds_node) * (size_t) update_count);
   wr->update_count = update_count;
@@ -710,7 +815,6 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
   struct work_request *wr = (struct work_request *) calloc(1, sizeof(*wr));
   wr->mgr = c->mgr;
   wr->conn_id = c->id;
-  wr->op_type = WORK_NODES_GET;
   wr->page = page;
   wr->page_size = page_size;
 
@@ -736,6 +840,19 @@ static void handle_nodes_get(struct mg_connection *c, struct mg_http_message *hm
   }
 
   start_thread(nodes_get_thread, wr);
+}
+
+static void handle_nodes_queryCategory_get(struct mg_connection *c, struct mg_http_message *hm) {
+  // Return ALL matching data — page and pageSize parameters are accepted but ignored.
+  (void) hm;  // query string not used
+
+  struct work_request *wr = (struct work_request *) calloc(1, sizeof(*wr));
+  wr->mgr = c->mgr;
+  wr->conn_id = c->id;
+  wr->page = 1;
+  wr->page_size = 0;  // 0 = return all (build_nodes_queryCategory_response ignores this)
+
+  start_thread(nodes_queryCategory_get_thread, wr);
 }
 
 // Return the value of the cookie named `name` in a Cookie header, with EXACT
@@ -913,6 +1030,12 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       }
     } else if (mg_match(hm->uri, mg_str("/api/#"), NULL) && u == NULL) {
       mg_http_reply(c, 403, "", "Not Authorised\n");
+    } else if (mg_match(hm->uri, mg_str("/api/nodes/queryCategory"), NULL)) {
+      if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
+        mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");
+      } else {
+        handle_nodes_queryCategory_get(c, hm);
+      }
     } else if (mg_match(hm->uri, mg_str("/api/nodes/get"), NULL)) {
       if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
         mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");

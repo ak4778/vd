@@ -279,3 +279,13 @@ MG_TLS_RSA_USE_CRT	    0	           RSA CRT 优化	      已正确配置
 MG_SOCK_LISTEN_BACKLOG_SIZE 提高到 512 — 在 Makefile 的 CFLAGS 中添加 -DMG_SOCK_LISTEN_BACKLOG_SIZE=512
 mg_mgr_poll 间隔降到 10ms — 在 main.c#L85 中将 50 改为 10
 编译优化改为 -O2 — 在 Makefile#L8 中将 -O0 改为 -O2
+
+时间          buffer的拥有者
+──────────────────────────────────
+build_nodes_get_response()    →  wr->response_body
+push_result()                 →  async_result->body（转移）
+wr->response_body = NULL      →  wr 明确放弃所有权
+free_work_request(wr)         →  不碰 buffer（因为是NULL）
+...等待最多20ms...
+dispatch_results()            →  发送 buffer 内容
+free(r->body)                 →  最终释放 buffer
