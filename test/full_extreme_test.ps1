@@ -344,8 +344,10 @@ Section '5. AUTHENTICATION' {
   $r = Req "$base/api/nodes/get?page=1&pageSize=1"
   Check ($r.code -eq '403') "no auth -> 403" "code=$($r.code)"
 
+  # /api/mode/get requires auth (auth guard runs before all /api/* routes
+  # except /api/login — see net.c). Only /api/login is public.
   $r = Req "$base/api/mode/get"
-  Check ($r.code -eq '200') "mode/get no auth allowed" "code=$($r.code)"
+  Check ($r.code -eq '403') "mode/get requires auth" "code=$($r.code)"
 }
 
 # ==================================================================
