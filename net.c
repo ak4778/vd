@@ -917,16 +917,26 @@ static struct user *authenticate(struct mg_http_message *hm) {
   }
   cfg_unlock();
 
-  // Custom "Api-Token" header: if it matches the apiToken from data_config.json,
+  // Custom "apiToken" header: if it matches the apiToken from data_config.json,
   // authenticate as the global token user. Header-based alternative to the
   // access_token cookie/query param for API clients (scripts, Postman, etc.).
+  // NOTE: header name MUST be exactly "apiToken" (no hyphen). mongoose's
+  // mg_http_get_header is case-insensitive on the name, but "apiToken" and
+  // "Api-Token" are genuinely different headers (the hyphen changes the token).
+  // All test scripts use "apiToken"; using "Api-Token" causes 100% 403 failures.
   if (s_global_api_token[0] != '\0') {
-    struct mg_str *api_hdr = mg_http_get_header(hm, "Api-Token");
+    struct mg_str *api_hdr = mg_http_get_header(hm, "apiToken");
     if (api_hdr != NULL && api_hdr->len > 0) {
       size_t tlen = strlen(s_global_api_token);
-      if (api_hdr->len == tlen &&
-          memcmp(api_hdr->buf, s_global_api_token, tlen) == 0) {
-        MG_VERBOSE(("Authenticated via Api-Token header"));
+      // Strip optional whitespace (OWS) from header value before comparison,
+      // since clients/proxies may pad the value with spaces or tabs.
+      const char *vbuf = api_hdr->buf;
+      size_t vlen = api_hdr->len;
+      while (vlen > 0 && (*vbuf == ' ' || *vbuf == '\t')) { vbuf++; vlen--; }
+      while (vlen > 0 && (vbuf[vlen - 1] == ' ' || vbuf[vlen - 1] == '\t'))
+        vlen--;
+      if (vlen == tlen && memcmp(vbuf, s_global_api_token, tlen) == 0) {
+        MG_VERBOSE(("Authenticated via apiToken header"));
         return &global_token_user;
       }
     }

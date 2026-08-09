@@ -46,6 +46,7 @@ extern "C" {
 #define MG_ARCH_RTTHREAD 14     // RT-Thread RTOS
 #define MG_ARCH_ARMCGT 15       // Texas Semi ARM-CGT
 #define MG_ARCH_CUBE 16	        // STM32Cube environment
+#define MG_ARCH_MCUXPRESSO 17   // MCUXpresso environment
 
 #define MG_ARCH_NEWLIB MG_ARCH_ARMGCC  // Alias, deprecate in 2025
 
@@ -406,6 +407,158 @@ static inline uint32_t mg_ota_esp32_state_set(uint32_t state) {
 #include <esp_system.h>
 
 #define MG_PATH_MAX 128
+
+#endif
+
+
+#if MG_ARCH == MG_ARCH_MCUXPRESSO
+#define _POSIX_TIMERS
+
+#include <ctype.h>
+#if !defined(MG_ENABLE_LWIP) || !MG_ENABLE_LWIP
+#include <errno.h>
+#endif
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
+
+// MCUXpresso-generated header, includes the SoC peripheral definitions.
+// NOTE: use angle brackets to prevent amalgamator ditching it
+#include <fsl_device_registers.h>
+
+#ifndef MG_PATH_MAX
+#define MG_PATH_MAX 100
+#endif
+
+#ifndef MG_ENABLE_DIRLIST
+#define MG_ENABLE_DIRLIST 0
+#endif
+
+#ifndef MG_ENABLE_TCPIP
+#define MG_ENABLE_TCPIP 1  // Enable built-in TCP/IP stack
+#endif
+
+#if MG_ENABLE_TCPIP && !defined(MG_ENABLE_DRIVER_IMXRT10) && \
+    !defined(MG_ENABLE_DRIVER_IMXRT11)
+#if defined(CPU_MIMXRT1021DAG5A) || defined(CPU_MIMXRT1024DAG5A) ||         \
+    defined(CPU_MIMXRT1042XJM5B) || defined(CPU_MIMXRT1052DVL6B) ||         \
+    defined(CPU_MIMXRT1062DVL6B) || defined(CPU_MIMXRT1064DVL6B) ||         \
+    defined(CPU_MIMXRT1062DVL6A) || defined(CPU_MIMXRT1064DVL6A) ||         \
+    defined(CPU_MIMXRT1062DVMAA_cm7) || defined(CPU_MIMXRT1062DVL6A_cm7) || \
+    defined(CPU_MIMXRT1062DVL6B_cm7) || defined(_MIMXRT1021_H_) ||          \
+    defined(_MIMXRT1024_H_) || defined(_MIMXRT1042_H_) ||                   \
+    defined(_MIMXRT1052_H_) || defined(_MIMXRT1062_H_) ||                   \
+    defined(_MIMXRT1064_H_)
+#define MG_ENABLE_DRIVER_IMXRT10 1
+#elif defined(CPU_MIMXRT1176DVMAA_cm7) || defined(CPU_MIMXRT1176DVMAA_cm4) || \
+    defined(_MIMXRT1176_cm7_H_) || defined(_MIMXRT1176_cm4_H_) ||             \
+    defined(_MIMXRT1176_H_)
+#define MG_ENABLE_DRIVER_IMXRT11 1
+#else
+#error Select an Ethernet driver in mongoose_config.h
+#endif
+#endif
+
+#ifndef MG_TLS
+#define MG_TLS MG_TLS_BUILTIN
+#endif
+
+#if !defined(MG_OTA) &&                                              \
+    (defined(CPU_MIMXRT1021DAG5A) || defined(CPU_MIMXRT1024DAG5A) || \
+     defined(_MIMXRT1021_H_) || defined(_MIMXRT1024_H_))
+#define MG_OTA MG_OTA_RT1020
+#elif !defined(MG_OTA) && \
+    (defined(CPU_MIMXRT1052DVL6B) || defined(_MIMXRT1052_H_))
+#define MG_OTA MG_OTA_RT1050
+#elif !defined(MG_OTA) &&                                                    \
+    (defined(CPU_MIMXRT1062DVL6B) || defined(CPU_MIMXRT1062DVL6A) ||         \
+     defined(CPU_MIMXRT1042XJM5B) || defined(_MIMXRT1042_H_) ||              \
+     defined(CPU_MIMXRT1062DVMAA_cm7) || defined(CPU_MIMXRT1062DVL6A_cm7) || \
+     defined(CPU_MIMXRT1062DVL6B_cm7) || defined(_MIMXRT1062_H_))
+#define MG_OTA MG_OTA_RT1060
+#elif !defined(MG_OTA) &&                                            \
+    (defined(CPU_MIMXRT1064DVL6B) || defined(CPU_MIMXRT1064DVL6A) || \
+     defined(_MIMXRT1064_H_))
+#define MG_OTA MG_OTA_RT1064
+#elif !defined(MG_OTA) &&                                                    \
+    (defined(CPU_MIMXRT1176DVMAA_cm7) || defined(CPU_MIMXRT1176DVMAA_cm4) || \
+     defined(_MIMXRT1176_cm7_H_) || defined(_MIMXRT1176_cm4_H_) ||           \
+     defined(_MIMXRT1176_H_))
+#define MG_OTA MG_OTA_RT1170
+#endif
+
+#ifndef MG_IRAM
+#define MG_IRAM __attribute__((noinline, section(".data_RAM2")))
+#endif
+
+#ifndef MG_SET_MAC_ADDRESS
+#if defined(MG_ENABLE_DRIVER_IMXRT11) && MG_ENABLE_DRIVER_IMXRT11
+#define MG_OCOTP_FUSES ((volatile uint32_t *) 0x40cac900)
+#else
+#define MG_OCOTP_FUSES ((volatile uint32_t *) 0x401f4410)
+#endif
+#define MG_SET_MAC_ADDRESS(mac)                                             \
+  do {                                                                      \
+    mac[0] = 2;                                                             \
+    mac[1] = (MG_OCOTP_FUSES[0] >> 0) & 255;                                \
+    mac[2] = (MG_OCOTP_FUSES[0] >> 10) & 255;                               \
+    mac[3] = ((MG_OCOTP_FUSES[0] >> 19) ^ (MG_OCOTP_FUSES[4] >> 19)) & 255; \
+    mac[4] = (MG_OCOTP_FUSES[4] >> 10) & 255;                               \
+    mac[5] = (MG_OCOTP_FUSES[4] >> 0) & 255;                                \
+  } while (0)
+#endif
+
+#ifndef MG_IMXRT_WDOG1_TIMEOUT_MS
+#define MG_IMXRT_WDOG1_TIMEOUT_MS 10000
+#endif
+
+#define MG_IMXRT_WDOG1_FEED() \
+  do {                        \
+    WDOG1->WSR = 0x5555;      \
+    WDOG1->WSR = 0xaaaa;      \
+  } while (0)
+
+#ifndef MG_OTA_ROLLBACK_TIMER_START
+#define MG_OTA_ROLLBACK_TIMER_START()                                     \
+  do {                                                                    \
+    uint16_t wt_ = (uint16_t) ((MG_IMXRT_WDOG1_TIMEOUT_MS / 500) - 1);    \
+    if ((WDOG1->WCR & WDOG_WCR_WDE_MASK) == 0) {                          \
+      WDOG1->WMCR = 0;                                                    \
+      WDOG1->WCR = (uint16_t) (WDOG_WCR_WDZST_MASK | WDOG_WCR_WDBG_MASK | \
+                               WDOG_WCR_WDE_MASK | WDOG_WCR_WDT_MASK |    \
+                               WDOG_WCR_SRS_MASK | WDOG_WCR_WDW_MASK |    \
+                               WDOG_WCR_WT(wt_));                         \
+    }                                                                     \
+    MG_IMXRT_WDOG1_FEED();                                                \
+  } while (0)
+#endif
+
+#ifndef MG_OTA_ROLLBACK_TIMER_FEED
+#define MG_OTA_ROLLBACK_TIMER_FEED() MG_IMXRT_WDOG1_FEED()
+#endif
+
+#ifndef MG_OTA_STATE_GET
+#define MG_OTA_STATE_GET() SNVS->LPGPR[0]
+#endif
+
+#ifndef MG_OTA_STATE_SET
+#define MG_OTA_STATE_SET(v)          \
+  do {                               \
+    if (SNVS->LPSR & (1u << 3)) {    \
+      SNVS->LPLVDR = 0x41736166u;    \
+      SNVS->LPSR = 1u << 3;          \
+    }                                \
+    SNVS->LPGPR[0] = (uint32_t) (v); \
+  } while (0)
+#endif
 
 #endif
 
@@ -953,7 +1106,8 @@ static inline void *mg_calloc(size_t cnt, size_t size) {
   ((errcode) == -pdFREERTOS_ERRNO_EWOULDBLOCK || \
    (errcode) == -pdFREERTOS_ERRNO_EISCONN ||     \
    (errcode) == -pdFREERTOS_ERRNO_EINPROGRESS || \
-   (errcode) == -pdFREERTOS_ERRNO_EAGAIN)
+   (errcode) == -pdFREERTOS_ERRNO_EAGAIN ||      \
+   (errcode) == -pdFREERTOS_ERRNO_ENOSPC)
 
 #define MG_SOCK_RESET(errcode) ((errcode) == -pdFREERTOS_ERRNO_ENOTCONN)
 
@@ -1806,6 +1960,10 @@ char *mg_random_str(char *buf, size_t len);
 // a new checksum; pass the result of a prior call to extend over more data.
 uint32_t mg_crc32(uint32_t crc, const char *buf, size_t len);
 
+// Computes CRC16 (HDLC, polynomial 0x8408) over buf/len. Pass crc=0 to start
+// a new checksum; pass the result of a prior call to extend over more data.
+uint16_t mg_crc16(uint16_t crc, const char *buf, size_t len);
+
 // Returns true if path is safe to serve from the filesystem. Rejects paths
 // that start with '~' or '..', or contain a '/../' component, to prevent
 // directory traversal attacks.
@@ -2224,6 +2382,10 @@ struct mg_connection {
   void *pfn_data;                 // Protocol-level handler argument
   char data[MG_DATA_SIZE];        // Scratch space for protocol state; freely readable
   void *tls;                      // TLS state (internal)
+  unsigned dscp : 6;              // Differentiated Services Code Point
+#define MG_DSCP_CS(class_) ((class_) << 3)
+#define MG_DSCP_AF(class_, drop_) (((class_) << 3) | ((drop_) << 1))
+#define MG_DSCP_EF 46
   unsigned is_listening : 1;      // Listening connection; accepts inbound connections
   unsigned is_client : 1;         // Outbound connection created by mg_connect()
   unsigned is_accepted : 1;       // Inbound connection accepted from a listener
@@ -2303,6 +2465,11 @@ struct mg_connection *mg_connect(struct mg_mgr *, const char *url,
 // Useful for integrating pre-opened sockets (e.g. stdin, accept() fd).
 struct mg_connection *mg_wrapfd(struct mg_mgr *mgr, int fd,
                                 mg_event_handler_t fn, void *fn_data);
+
+// Sets the 6-bit Differentiated Services Code Point for outgoing datagrams.
+// Call on MG_EV_OPEN for UDP listeners, MG_EV_CONNECT for clients, or
+// MG_EV_ACCEPT for TCP servers, before sending application data.
+bool mg_dscp(struct mg_connection *, uint8_t dscp);
 
 // Called internally after DNS resolution completes to create the OS socket
 // and initiate the TCP/IP connect. Normally not called by user code.
@@ -4054,6 +4221,7 @@ size_t mg_dns_parse_rr(const uint8_t *buf, size_t len, size_t ofs,
 // Creates an mDNS listener on UDP multicast 224.0.0.251:5353. Registers it as
 // the manager's mDNS resolver (mgr->mdns). Fires MG_EV_MDNS_REQ for incoming
 // queries and MG_EV_MDNS_RESP for incoming responses. Returns NULL on error.
+// fn_data is a NUL-terminated server name, or NULL to pass all requests to fn.
 struct mg_connection *mg_mdns_listen(struct mg_mgr *mgr, mg_event_handler_t fn,
                                      void *fn_data);
 
@@ -4460,7 +4628,7 @@ extern void mg_mqtt_poll(struct mg_mgr *);
 //
 // This is a low-level OTA API, not intended to be called directly by users.
 // Users are provided with a higher-level API:
-// - defining MG_OTA_URL enables HTTP pull-based updates
+// - defining MG_OTA_URL enables HTTP or HTTPS pull-based updates
 // - mg_http_start_ota() enables push-based updates
 //
 // However, it is possible to use the mg_ota_* API directly. Below is the
@@ -4607,8 +4775,10 @@ enum {
     }                                                              \
   } while (0)
 
-// Pull-based OTA over HTTP. Fetches metadata_url, which must return a JSON
-// object like: { "version": "1.2.3", "url": "FIRMWARE_URL", "size": 324645 }
+// Pull-based OTA over HTTP or HTTPS. If it's HTTPS, MG_OTA_TLS_CA
+// needs to be defined. Fetches metadata_url, which must
+// return a JSON object like:
+// { "version": "1.2.3", "url": "FIRMWARE_URL", "size": 324645 }
 // If the server version differs from MG_OTA_FIRMWARE_VERSION, downloads
 // FIRMWARE_URL and performs the OTA update. fn is called on every outcome:
 // NULL on successful flash, "Same version" when already up to date, or an
@@ -4618,10 +4788,16 @@ void mg_ota_url_check(struct mg_mgr *mgr, const char *metadata_url,
                       void (*fn)(const char *error_message));
 
 // Firmware info URL for mg_ota_poll() which calls mg_ota_url_check().
-// Example:  "http://mongoose.ws/ota/u/0/ota.json". See http://mongoose.ws/ota/
+// Example: "http://mongoose.ws/ota/u/0/ota.json". See http://mongoose.ws/ota/
 // Settable in mongoose_config.h
 #ifndef MG_OTA_URL
 #define MG_OTA_URL NULL
+#endif
+
+// PEM or DER CA certificate used to authenticate an HTTPS OTA server. Set to
+// NULL to use HTTP. Set in mongoose_config.h.
+#ifndef MG_OTA_TLS_CA
+#define MG_OTA_TLS_CA NULL
 #endif
 
 // OTA status callback function for mg_ota_poll()
@@ -4653,8 +4829,9 @@ void mg_ota_url_check(struct mg_mgr *mgr, const char *metadata_url,
 // E.g. on STM32, uses the 96-bit MCU UID converted to a hex string.
 void mg_ota_device_id(char *buf, size_t len);
 
-// Checks for a firmware update over HTTP. Called automatically by mg_mgr_poll()
-// when MG_OTA_URL is set in mongoose_config.h. Do not call directly.
+// Checks for a firmware update over HTTP or HTTPS. Called automatically by
+// mg_mgr_poll() when MG_OTA_URL is set in mongoose_config.h. Do not call
+// directly.
 void mg_ota_poll(struct mg_mgr *);
 
 
