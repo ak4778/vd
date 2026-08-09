@@ -29,11 +29,11 @@
 | 并发 | 纯读 200 并发 | ✅ PASS | 100% (25 r/s) |
 | 并发 | 混合读写 100 并发 | ✅ PASS | 100% (26 r/s) |
 | 并发 | 混合读写 200 并发 | ✅ PASS | 100% (26 r/s) |
-| 并发 | 极限 500 并发 (前序) | ✅ PASS | 稳定无内存泄漏 |
-| HTTPS/TLS | 内置 TLS 1.3 | ⚠️ 限制 | 仅支持 TLS 1.3, schannel 默认 1.2 不可连 |
+| 并发 | 极限 500 并发 | ⚠️ 容量限制 | ~70-76% 成功 (设计区间 ≤200 为 100%) |
+| HTTPS/TLS | 内置 TLS 1.3 | ✅ PASS | Python TLS1.3 客户端验证 5/5 通过 |
 | 服务器日志 | 错误检查 | ✅ PASS | 无 error/fail/sql 错误 |
 
-**总体结论**: ✅ **全部通过** (TLS 1.3 限制为已知设计约束, 非缺陷)
+**总体结论**: ✅ **核心功能全部通过**; 500 并发为单线程事件循环容量上限 (非缺陷), HTTPS 经 Python TLS1.3 客户端验证健康
 
 ---
 
@@ -100,9 +100,11 @@ POST /api/login  Authorization: Basic base64(admin:admin)
 | 纯读 | 200 | 200/200 (100%) | 7.88s | 25 r/s |
 | 混合读写 (1/3写) | 100 | 100/100 (100%) | 3.90s | 26 r/s |
 | 混合读写 (1/3写) | 200 | 200/200 (100%) | 7.81s | 26 r/s |
-| 极限 (前序) | 500 | 稳定 | - | 无内存泄漏 |
+| 极限 | 500 | ~340-380/500 (70-76%) | 5.6s | 88 r/s |
 
 **结论**: 服务器在 200 并发下读写均 100% 成功, 无失败无超时。
+500 并发超出单线程事件循环的可靠服务区间 (≤200), 约 70-76% 请求成功,
+失败为 TCP 连接级 (连接被拒/重置), 服务器日志无错误, 无内存泄漏。
 
 ### 6. 服务器日志
 
@@ -115,8 +117,10 @@ POST /api/login  Authorization: Basic base64(admin:admin)
 ## 三、已知限制 (非缺陷)
 
 1. **TLS 1.3 限制**: Mongoose 内置 TLS 仅支持 TLS 1.3 (X25519 + AES-GCM/ChaCha20)。
-   Windows schannel 客户端默认协商 TLS 1.2, 无法连接 HTTPS。
-   解决方案: 客户端需启用 TLS 1.3, 或使用 HTTP。
+   Windows schannel 客户端 (curl.exe / .NET 默认) 协商 TLS 1.2, 无法完成握手。
+   测试用 Python ssl 模块 (OpenSSL) 以 TLS 1.3 客户端验证 HTTPS 健康 (5/5 通过),
+   并确认 TLS 1.2 被正确拒绝 (SSLEOFError)。
+   生产客户端需启用 TLS 1.3, 或使用 HTTP。
 
 2. **.NET HttpClient 连接池**: 默认 `DefaultConnectionLimit=2` + HTTP keep-alive 为最优配置。
    提高连接数 (63/100/200) 反而因 ThreadPool 线程创建延迟和 TCP 连接开销导致性能下降。
@@ -130,22 +134,23 @@ POST /api/login  Authorization: Basic base64(admin:admin)
 
 | 脚本 | 用途 |
 |------|------|
-| [test/logout_verify.ps1](file:///c:/s/vd/test/logout_verify.ps1) | 登出/会话失效/认证测试 |
-| [test/py_concurrency_test.py](file:///c:/s/vd/test/py_concurrency_test.py) | 并发读写压测 |
 | [test/full_extreme_test.ps1](file:///c:/s/vd/test/full_extreme_test.ps1) | 综合12场景极限测试 |
-| [test/check_log.ps1](file:///c:/s/vd/test/check_log.ps1) | 服务器日志错误检查 |
-| [test/continuous_stress.ps1](file:///c:/s/vd/test/continuous_stress.ps1) | 持续压力测试 |
+| [test/https_tls13_test.py](file:///c:/s/vd/test/https_tls13_test.py) | HTTPS/TLS 1.3 测试 (Python OpenSSL 客户端) |
+| [test/py_concurrency_test.py](file:///c:/s/vd/test/py_concurrency_test.py) | 并发读写压测 |
+| [test/logout_verify.ps1](file:///c:/s/vd/test/logout_verify.ps1) | 登出/会话失效/认证测试 |
+| [test/results_extreme_final.md](file:///c:/s/vd/test/results_extreme_final.md) | 前序测试结果文档 |
 
 ---
 
 ## 五、总结
 
-本次极限测试覆盖前后端与服务器的全部核心功能: **数据加载、保存、过滤、搜索、鉴权、认证、登录、登出、分页、并发**。
+本次极限测试覆盖前后端与服务器的全部核心功能: **数据加载、保存、过滤、搜索、鉴权、认证、登录、登出、分页、并发、HTTPS/TLS**。
 
 - **功能正确性**: 全部通过, 包括会话失效的服务端验证
 - **数据持久化**: SQLite WAL 模式下保存可靠, 重载后数据一致
-- **并发性能**: 200 并发读写 100% 成功, 吞吐 25-26 r/s
-- **稳定性**: 服务器全程无错误无崩溃, 日志干净
+- **并发性能**: 200 并发读写 100% 成功, 吞吐 25-26 r/s; 500 并发为容量上限 (~70-76%)
+- **HTTPS/TLS**: Python TLS 1.3 客户端验证 5/5 通过 (mode/get, nodes/get, login, cookie auth, TLS1.2 拒绝)
+- **稳定性**: 服务器全程无错误无崩溃, 日志干净, 内存稳定 (+0.18MB)
 - **安全性**: 三种认证方式 (Basic Auth / apiToken / Cookie) 均正确鉴权, 错误凭证被拒绝
 
 系统在极限测试下表现稳定可靠。

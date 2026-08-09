@@ -517,22 +517,26 @@ Section '11. SUSTAINED LOAD' {
 # SECTION 12: HTTPS / TLS (TLS 1.3 only per mongoose builtin)
 # ==================================================================
 Section '12. HTTPS / TLS' {
-  $r = curl.exe -s -o NUL -w "%{http_code}|%{time_total}" --max-time 10 --tlsv1.3 -k "$sbase/api/mode/get" -H $apiHdr 2>$null
-  $parts = $r -split '\|'
-  Check ($parts[0] -eq '200') "HTTPS TLS1.3 mode/get" "code=$($parts[0]) t=$($parts[1])"
-  $r = curl.exe -s -o NUL -w "%{http_code}" --max-time 10 --tlsv1.3 -k "$sbase/api/nodes/get?page=1&pageSize=1" -H $apiHdr 2>$null
-  Check ($r -eq '200') "HTTPS TLS1.3 nodes/get" "code=$r"
-  $loginResp = curl.exe -s -D - -o NUL --max-time 10 --tlsv1.3 -k -X POST -u admin:admin "$sbase/api/login" 2>$null
-  $tok = $null
-  foreach ($l in $loginResp -split "`n") { if ($l -match 'access_token=([^;\r]+)') { $tok = $matches[1]; break } }
-  Check ($tok -ne $null) "HTTPS login" ""
-  if ($tok) {
-    $r = curl.exe -s -o NUL -w "%{http_code}" --max-time 10 --tlsv1.3 -k "$sbase/api/nodes/get?page=1&pageSize=1" -H "Cookie: access_token=$tok" 2>$null
-    Check ($r -eq '200') "HTTPS cookie auth" "code=$r"
+  # Mongoose built-in TLS only supports TLS 1.3 (X25519 + AES-GCM/ChaCha20).
+  # Windows curl.exe uses schannel (TLS 1.2 default) and cannot complete the
+  # handshake, so HTTPS tests via curl always return code=000. Use Python's
+  # ssl module (OpenSSL) to exercise the listener with a real TLS 1.3 client.
+  # See test/https_tls13_test.py for the per-check logic.
+  $pyOut = & python "c:\s\vd\test\https_tls13_test.py" --token $apiToken --host 127.0.0.1 --port 8443 2>&1
+  foreach ($line in $pyOut) {
+    Log "  $line"
+    if ($line -match 'HTTPS_RESULT\|([^|]+)\|(\d+)\|(PASS|FAIL)\|(.*)') {
+      $hname = $matches[1]; $hcode = $matches[2]; $hresult = $matches[3]; $hdetail = $matches[4]
+      $script:reqs++
+      if ($hresult -eq 'PASS') {
+        $script:pass++
+      } else {
+        $script:fail++
+        $script:failures += "$hname $hdetail"
+        Log "  FAIL: $hname $hdetail"
+      }
+    }
   }
-  # TLS 1.2 should FAIL (mongoose builtin only supports 1.3)
-  $r = curl.exe -s -o NUL -w "%{http_code}" --max-time 8 --tlsv1.2 --tls-max 1.2 -k "$sbase/api/mode/get" -H $apiHdr 2>$null
-  Check ($r -ne '200') "TLS1.2 rejected (mongoose builtin = TLS1.3 only)" "code=$r"
 }
 
 # ==================================================================
