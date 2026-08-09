@@ -957,25 +957,49 @@ static struct user *authenticate(struct mg_http_message *hm) {
   return result;
 }
 
-static void handle_login(struct mg_connection *c, struct user *u) {
+static struct user *find_user_by_creds(const char *name, const char *pw) {
+  if (name == NULL || pw == NULL || name[0] == '\0' || pw[0] == '\0') return NULL;
+  for (struct user *u = s_users; u->name[0] != '\0'; u++)
+    if (strcmp(name, u->name) == 0 && strcmp(pw, u->pass) == 0) return u;
+  return NULL;
+}
+
+static void handle_login(struct mg_connection *c, struct mg_http_message *hm,
+                         struct user *u) {
+  // Support 3 credential sources for /api/login:
+  //   1. Basic auth header or valid cookie (authenticate() already resolved via `u`)
+  //   2. POST body JSON: {"user":"xxx","password":"yyy"}
+  //   3. POST form-encoded: user=xxx&password=yyy
+  if (u == NULL && hm != NULL && hm->body.len > 0) {
+    char nm[sizeof(((struct user*)0)->name)] = {0};
+    char pw[sizeof(((struct user*)0)->pass)] = {0};
+    size_t nm_n = mg_json_unescape(hm->body, "$.user", nm, sizeof(nm));
+    size_t pw_n = mg_json_unescape(hm->body, "$.password", pw, sizeof(pw));
+    if (nm_n > 0 && pw_n > 0) {
+      u = find_user_by_creds(nm, pw);
+    } else {
+      mg_http_get_var(&hm->body, "user", nm, sizeof(nm));
+      mg_http_get_var(&hm->body, "password", pw, sizeof(pw));
+      if (nm[0] != '\0' && pw[0] != '\0') {
+        u = find_user_by_creds(nm, pw);
+      }
+    }
+  }
   if (u == NULL) {
-    mg_http_reply(c, 401, "", "Unauthorized\n");
+    mg_http_reply(c, 401, s_json_header,
+                  "{\"status\":\"false\",\"message\":\"Invalid credentials\"}");
     return;
   }
   mg_random_str(u->access_token, sizeof(u->access_token));
   MG_INFO(("User [%s] logged in, new token generated", u->name));
-  // mongoose's mg_http_creds() only reads the "access_token" cookie (the name
-  // is hardcoded in mongoose.c). Naming it "secure_access_token" on TLS breaks
-  // cookie-based auth: login succeeds via the Basic header, but every
-  // following request returns 403 because the cookie is never read back, so
-  // it looks like "login doesn't stick". The Secure flag already confines the
-  // cookie to HTTPS, so a single name is enough.
-  char cookie[256];
+  char cookie[512];
   mg_snprintf(cookie, sizeof(cookie),
               "Set-Cookie: access_token=%s; Path=/; "
-              "HttpOnly; SameSite=Lax; Max-Age=%d\r\n",
+              "HttpOnly; SameSite=Lax; Max-Age=%d\r\n"
+              "Content-Type: application/json\r\n",
               u->access_token, 3600 * 24);
-  mg_http_reply(c, 200, cookie, "{%m:%m,%m:%m}",
+  mg_http_reply(c, 200, cookie,
+                "{\"status\":\"true\",%m:%m,%m:%m}",
                 MG_ESC("user"), MG_ESC(u->name),
                 MG_ESC("token"), MG_ESC(u->access_token));
 }
@@ -985,12 +1009,13 @@ static void handle_logout(struct mg_connection *c, struct user *u) {
     memset(u->access_token, 0, sizeof(u->access_token));
     MG_INFO(("User [%s] logged out, token cleared", u->name));
   }
-  char cookie[256];
+  char cookie[512];
   mg_snprintf(cookie, sizeof(cookie),
               "Set-Cookie: access_token=; Path=/; "
               "Expires=Thu, 01 Jan 1970 00:00:00 UTC; "
-              "HttpOnly; Max-Age=0; \r\n");
-  mg_http_reply(c, 200, cookie, "true\n");
+              "HttpOnly; Max-Age=0\r\n"
+              "Content-Type: application/json\r\n");
+  mg_http_reply(c, 200, cookie, "{\"status\":\"true\"}");
 }
 
 static void fn(struct mg_connection *c, int ev, void *ev_data) {
@@ -1030,16 +1055,20 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
     // "/../", "/../net.c", "/%2e%2e/" etc. all return 403.
     if (mg_match(hm->uri, mg_str("*..*"), NULL)) {
       mg_http_reply(c, 403, "", "Forbidden\n");
+      // Only /api/login is PUBLIC (no auth required) — credentials come via body.
     } else if (mg_match(hm->uri, mg_str("/api/login"), NULL)) {
-      handle_login(c, u);
+      handle_login(c, hm, u);
+      // ALL OTHER /api/* ENDPOINTS REQUIRE AUTHENTICATION: reject u==NULL here,
+      // BEFORE any route handler runs (prevents "route order accidentally skips auth" bugs).
+    } else if (mg_match(hm->uri, mg_str("/api/#"), NULL) && u == NULL) {
+      mg_http_reply(c, 403, s_json_header, "{\"status\":\"false\",\"message\":\"Not Authorised\"}");
+      // ---- Protected routes below (guaranteed u != NULL for /api/*) ----
     } else if (mg_match(hm->uri, mg_str("/api/mode/get"), NULL)) {
       if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
         mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");
       } else {
         mg_http_reply(c, 200, s_json_header, "{\"mode\":\"%s\",\"available\":%d}", DS_MODE, ds_is_available());
       }
-    } else if (mg_match(hm->uri, mg_str("/api/#"), NULL) && u == NULL) {
-      mg_http_reply(c, 403, "", "Not Authorised\n");
     } else if (mg_match(hm->uri, mg_str("/api/nodes/queryCategory"), NULL)) {
       if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
         mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");

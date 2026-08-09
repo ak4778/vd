@@ -289,3 +289,23 @@ free_work_request(wr)         →  不碰 buffer（因为是NULL）
 ...等待最多20ms...
 dispatch_results()            →  发送 buffer 内容
 free(r->body)                 →  最终释放 buffer
+
+
+## A. 登录支持更多凭证来源(主要功能变更)
+新增 find_user_by_creds() 函数, handle_login() 签名增加 hm 参数以读取请求体。 /api/login 现在接受 3 种凭证:
+
+来源                                       格式                                状态 
+Basic Auth header/cookie            Authorization: Basic xxx                  原有 
+POST body JSON                  {"user":"xxx","password":"yyy"}               新增 
+POST body form-encoded             user=xxx&password=yyy                      新增
+
+原来只能通过 Basic Auth header 登录,现在前端可以用 JSON body 提交表单登录。
+
+## B. 响应格式统一为 JSON(API 规范化)
+端点/场景              旧响应                                               新响应 
+登录 401          Unauthorized\n (纯文本)               {"status":"false","message":"Invalid credentials"} 
+登录 200          {"user":"...","token":"..."}           {"status":"true","user":"...","token":"..."} 
+登出 200            true\n (纯文本)                                  {"status":"true"} 
+403 未授权         Not Authorised\n                     {"status":"false","message":"Not Authorised"}
+
+所有响应都加了 Content-Type: application/json header,cookie 缓冲区从 256→512 字节以容纳合并的 header。
