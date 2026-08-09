@@ -41,3 +41,22 @@ test/*.txt
 # OS files
 .DS_Store
 Thumbs.db
+
+# Makefile build-mode stamp
+.mode_*.win
+
+# Windows null-device artifact (curl -o NUL etc.)
+NUL
+
+# Error / stderr capture files
+*.err
+
+# Temp request bodies / cookie captures
+*.txt
+
+# Certificate backups (contain private keys)
+*_bak.pem
+
+# Stray third-party SQLite CLI amalgamation (not referenced by Makefile)
+shell.c
+sqlite3ext.h
