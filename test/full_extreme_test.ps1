@@ -344,10 +344,11 @@ Section '5. AUTHENTICATION' {
   $r = Req "$base/api/nodes/get?page=1&pageSize=1"
   Check ($r.code -eq '403') "no auth -> 403" "code=$($r.code)"
 
-  # /api/mode/get requires auth (auth guard runs before all /api/* routes
-  # except /api/login — see net.c). Only /api/login is public.
+  # /api/mode/get is intentionally PUBLIC (no auth) — the frontend calls it
+  # BEFORE login to render the SQLite/CSV mode badge. It is routed before the
+  # /api/# && u==NULL auth guard (net.c:1069, guard at net.c:1077).
   $r = Req "$base/api/mode/get"
-  Check ($r.code -eq '403') "mode/get requires auth" "code=$($r.code)"
+  Check ($r.code -eq '200') "mode/get is public (no auth)" "code=$($r.code)"
 }
 
 # ==================================================================

@@ -83,12 +83,15 @@ Log "############################################################"
 # ==================================================================
 Section '1. DATA LOADING' {
   $j = ReqJson "$base/api/nodes/get?page=1&pageSize=50" @($apiHdr)
-  Check ($j -and $j.data.total -eq 29623) "total = 29623" "total=$($j.data.total)"
+  $script:totalNodes = $j.data.total
+  Check ($j -and $script:totalNodes -gt 0) "total = $script:totalNodes" "total=$($j.data.total)"
   Check ($j -and $j.data.nodes.Count -eq 50) "page 1 returns 50 rows" "count=$($j.data.nodes.Count)"
 
-  # last page: 29623 / 50 = 592.46 -> page 593 has 23 rows
-  $j = ReqJson "$base/api/nodes/get?page=593&pageSize=50" @($apiHdr)
-  Check ($j -and $j.data.nodes.Count -eq 23) "last page (593) returns 23 rows" "count=$($j.data.nodes.Count)"
+  # last page: dynamically calculate based on actual total
+  $lastPage = [math]::Ceiling($script:totalNodes / 50.0)
+  $expected = $script:totalNodes - ($lastPage - 1) * 50
+  $j = ReqJson "$base/api/nodes/get?page=$lastPage&pageSize=50" @($apiHdr)
+  Check ($j -and $j.data.nodes.Count -eq $expected) "last page ($lastPage) returns $expected rows" "count=$($j.data.nodes.Count)"
 
   # mode/get returns DB mode (NOT config); config is embedded in nodes/get
   $j = ReqJson "$base/api/mode/get" @($apiHdr)
@@ -151,7 +154,7 @@ Section '3. FILTERING' {
   Check ($j -and $j.data.total -gt 0) "operation=0 (unmarked) filter" "total=$($j.data.total)"
 
   $j = ReqJson "$base/api/nodes/get?page=1&pageSize=5&isOnline=0,1" @($apiHdr)
-  Check ($j -and $j.data.total -eq 29623) "isOnline=0,1 returns all" "total=$($j.data.total)"
+  Check ($j -and $j.data.total -eq $script:totalNodes) "isOnline=0,1 returns all" "total=$($j.data.total)"
 
   # empty value -> 1=0 condition -> 0 results
   $j = ReqJson "$base/api/nodes/get?page=1&pageSize=5&isOnline=" @($apiHdr)

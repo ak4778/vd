@@ -38,9 +38,18 @@ for row in cursor.fetchall():
     existing_rows[row[0]] = (row[1], row[2])
 print(f"DB has {len(existing_rows)} rows")
 
+# Collect all JSON ids upfront for strict-sync delete detection
+json_ids = set()
+for node in nodes:
+    nid = str(node.get('id', ''))
+    if nid:
+        json_ids.add(nid)
+print(f"JSON has {len(json_ids)} unique ids")
+
 update_count = 0
 insert_count = 0
 skip_count = 0
+delete_count = 0
 
 for node in nodes:
     nid = str(node.get('id', ''))
@@ -83,6 +92,22 @@ for node in nodes:
         ''', (nid, name, channelCode, isOnline, cameraType, operation, customOperation, P1, P3, P4))
         insert_count += 1
 
+# Strict sync: delete DB rows whose id is NOT in JSON
+to_delete = set(existing_rows.keys()) - json_ids
+if to_delete:
+    print(f"\n----- Deleting {len(to_delete)} rows not in JSON (strict sync) -----")
+    for nid in sorted(to_delete):
+        cursor.execute(
+            "SELECT id, name, channelCode, isOnline, cameraType, P1, P3, P4, operation, customOperation "
+            "FROM nodes WHERE id=?", (nid,))
+        row = cursor.fetchone()
+        if row:
+            print(f"  DELETE id={row[0]}, name={row[1]}, channelCode={row[2]}, "
+                  f"isOnline={row[3]}, cameraType={row[4]}, P1={row[5]}, P3={row[6]}, "
+                  f"P4={row[7]}, operation={repr(row[8])}, customOperation={repr(row[9])}")
+        cursor.execute("DELETE FROM nodes WHERE id=?", (nid,))
+        delete_count += 1
+
 conn.commit()
 
 cursor.execute('SELECT COUNT(*) FROM nodes')
@@ -92,6 +117,7 @@ print(f"\n===== Update Summary =====")
 print(f"JSON nodes: {total_json}")
 print(f"Updated (existing): {update_count}")
 print(f"Inserted (new): {insert_count}")
+print(f"Deleted (not in JSON): {delete_count}")
 print(f"Skipped (no id): {skip_count}")
 print(f"DB rows now: {db_count}")
 

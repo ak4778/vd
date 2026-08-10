@@ -68,6 +68,23 @@ function Sidebar({url, show}) {
 <//>`;
 };
 
+// NOTE: Td/Node MUST be defined at module scope, NOT inside Events.
+// Defining components inside a parent gives them a new function identity on
+// every parent render, which makes Preact's diffing (it matches vnodes by
+// type reference) unmount+remount the whole table body — destroying the
+// <tr>/<td> DOM and resetting the scroll container's scrollTop to 0.
+// At module scope the type reference is stable, so Preact reconciles in place
+// and preserves the DOM (and scroll position) across edits.
+const Td = props => html`<td class="whitespace-nowrap border-b border-slate-200 py-2 px-4 pr-3 text-sm text-slate-900" style="width:${props.width}px">${props.text}</td>`;
+
+const Node = ({node, isSelected, fields, formatValue, columnWidthsRef, toggleSelectNode}) => html`
+<tr class="${isSelected ? 'bg-blue-50' : ''} hover:bg-gray-50 transition-colors cursor-pointer">
+  <td class="whitespace-nowrap border-b border-slate-200 py-2 px-4 pr-3 text-sm text-slate-900">
+    <input type="checkbox" checked=${isSelected} onclick=${() => toggleSelectNode(node.id)} class="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" />
+  </td>
+  ${fields.map(f => html`<${Td} text=${formatValue(node, f)} width=${columnWidthsRef.current[f.key]} />`)}
+<//>`;
+
 function Events({}) {
   const [data, setData] = useState({nodes: [], fields: [], totalItems: 0});
   const [page, setPage] = useState(() => {
@@ -370,7 +387,6 @@ function Events({}) {
       </th>
     `;
   };
-  const Td = props => html`<td class="whitespace-nowrap border-b border-slate-200 py-2 px-4 pr-3 text-sm text-slate-900" style="width:${props.width}px">${props.text}</td>`;
 
   const [editedOperations, setEditedOperations] = useState({});
   const [editedCustomOperations, setEditedCustomOperations] = useState({});
@@ -589,14 +605,6 @@ function Events({}) {
     return node[field.key] || '-';
   };
 
-  const Node = ({node, isSelected}) => html`
-<tr class="${isSelected ? 'bg-blue-50' : ''} hover:bg-gray-50 transition-colors cursor-pointer">
-  <td class="whitespace-nowrap border-b border-slate-200 py-2 px-4 pr-3 text-sm text-slate-900">
-    <input type="checkbox" checked=${isSelected} onclick=${() => toggleSelectNode(node.id)} class="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" />
-  </td>
-  ${fields.map(f => html`<${Td} text=${formatValue(node, f)} width=${columnWidthsRef.current[f.key]} />`)}
-<//>`;
-
 return html`
 <div class="m-4 divide-y divide-gray-200 rounded bg-white flex flex-col flex-1 min-h-0">
   <div class="font-semibold flex items-center text-gray-600 px-3 justify-between whitespace-nowrap border-b border-gray-200 py-2 flex-shrink-0">
@@ -697,7 +705,7 @@ return html`
         </td></tr>` :
         errorMsg ? html`<tr><td colspan=${fields.length + 1} class="text-center py-8 text-red-500">${errorMsg}</td></tr>` :
         nodes.length === 0 ? html`<tr><td colspan=${fields.length + 1} class="text-center py-8 text-gray-500">暂无数据，请选择过滤条件</td></tr>` :
-        nodes.map(n => h(Node, {node: n, isSelected: selectedNodes.includes(n.id)}))}
+        nodes.map(n => h(Node, {key: n.id, node: n, isSelected: selectedNodes.includes(n.id), fields, formatValue, columnWidthsRef, toggleSelectNode}))}
       </tbody>
     </table>
   <//>
