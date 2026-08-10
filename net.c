@@ -1055,20 +1055,22 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
     // "/../", "/../net.c", "/%2e%2e/" etc. all return 403.
     if (mg_match(hm->uri, mg_str("*..*"), NULL)) {
       mg_http_reply(c, 403, "", "Forbidden\n");
-      // Only /api/login is PUBLIC (no auth required) — credentials come via body.
+      // PUBLIC routes (no auth required): /api/login (credentials via body) and
+      // /api/mode/get (returns only the backend mode name + availability, needed
+      // by the frontend BEFORE login to render the mode badge correctly).
     } else if (mg_match(hm->uri, mg_str("/api/login"), NULL)) {
       handle_login(c, hm, u);
-      // ALL OTHER /api/* ENDPOINTS REQUIRE AUTHENTICATION: reject u==NULL here,
-      // BEFORE any route handler runs (prevents "route order accidentally skips auth" bugs).
-    } else if (mg_match(hm->uri, mg_str("/api/#"), NULL) && u == NULL) {
-      mg_http_reply(c, 403, s_json_header, "{\"status\":\"false\",\"message\":\"Not Authorised\"}");
-      // ---- Protected routes below (guaranteed u != NULL for /api/*) ----
     } else if (mg_match(hm->uri, mg_str("/api/mode/get"), NULL)) {
       if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
         mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");
       } else {
         mg_http_reply(c, 200, s_json_header, "{\"mode\":\"%s\",\"available\":%d}", DS_MODE, ds_is_available());
       }
+      // ALL OTHER /api/* ENDPOINTS REQUIRE AUTHENTICATION: reject u==NULL here,
+      // BEFORE any route handler runs (prevents "route order accidentally skips auth" bugs).
+    } else if (mg_match(hm->uri, mg_str("/api/#"), NULL) && u == NULL) {
+      mg_http_reply(c, 403, s_json_header, "{\"status\":\"false\",\"message\":\"Not Authorised\"}");
+      // ---- Protected routes below (guaranteed u != NULL for /api/*) ----
     } else if (mg_match(hm->uri, mg_str("/api/nodes/queryCategory"), NULL)) {
       if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
         mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");
