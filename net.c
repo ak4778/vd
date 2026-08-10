@@ -209,6 +209,48 @@ static int get_default_page_size(void) {
   return val;
 }
 
+// Append JSON-escaped `str` into out[pos..cap) using direct buffer writes.
+// Replaces the per-character snprintf loop that dominated /nodes/get serialization
+// (~15k snprintf calls per request at 50 nodes x ~10 fields x ~30 chars). Returns
+// the new position; stops writing if the buffer would overflow (the response buffer
+// is sized generously, so this never triggers in practice).
+static int json_escape_append(char *out, int pos, int cap, const char *str) {
+  if (str == NULL) return pos;
+  static const char hex[] = "0123456789abcdef";
+  for (const unsigned char *p = (const unsigned char *) str; *p != '\0'; p++) {
+    unsigned char c = *p;
+    const char *seq;
+    int seqlen;
+    switch (c) {
+      case '"':  seq = "\\\""; seqlen = 2; break;
+      case '\\': seq = "\\\\"; seqlen = 2; break;
+      case '\n': seq = "\\n";  seqlen = 2; break;
+      case '\r': seq = "\\r";  seqlen = 2; break;
+      case '\t': seq = "\\t";  seqlen = 2; break;
+      case '\b': seq = "\\b";  seqlen = 2; break;
+      case '\f': seq = "\\f";  seqlen = 2; break;
+      default:
+        if (c < 0x20) {
+          if (pos + 6 > cap) return pos;
+          out[pos++] = '\\';
+          out[pos++] = 'u';
+          out[pos++] = '0';
+          out[pos++] = '0';
+          out[pos++] = hex[c >> 4];
+          out[pos++] = hex[c & 0xf];
+        } else {
+          if (pos + 1 > cap) return pos;
+          out[pos++] = (char) c;
+        }
+        continue;
+    }
+    if (pos + seqlen > cap) return pos;
+    memcpy(out + pos, seq, (size_t) seqlen);
+    pos += seqlen;
+  }
+  return pos;
+}
+
 static void build_nodes_get_response(struct work_request *wr) {
   struct ds_query query;
   memset(&query, 0, sizeof(query));
@@ -312,26 +354,7 @@ static void build_nodes_get_response(struct work_request *wr) {
       else if (strcmp(field_keys[j], "P3") == 0) field_val = node->P3;
       else if (strcmp(field_keys[j], "P4") == 0) field_val = node->P4;
 
-      for (int k = 0; field_val[k] != '\0'; k++) {
-        char c = field_val[k];
-        if (c == '"' || c == '\\') {
-          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\%c", c);
-        } else if (c == '\n') {
-          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\n");
-        } else if (c == '\r') {
-          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\r");
-        } else if (c == '\t') {
-          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\t");
-        } else if (c == '\b') {
-          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\b");
-        } else if (c == '\f') {
-          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\f");
-        } else if ((unsigned char) c < 0x20) {
-          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\u%04x", (unsigned char) c);
-        } else {
-          pos += snprintf(response + pos, (size_t)(total_size - pos), "%c", c);
-        }
-      }
+      pos = json_escape_append(response, pos, (int) total_size, field_val);
       pos += snprintf(response + pos, (size_t)(total_size - pos), "\"");
     }
     pos += snprintf(response + pos, (size_t)(total_size - pos), "}");
@@ -415,26 +438,7 @@ static void build_nodes_queryCategory_response(struct work_request *wr) {
       else
           pos += snprintf(response + pos, (size_t)(total_size - pos), "\"%s\":\"", keys[j]);
       const char *field_val = fields[j];
-      for (int k = 0; field_val[k] != '\0'; k++) {
-        char c = field_val[k];
-        if (c == '"' || c == '\\') {
-          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\%c", c);
-        } else if (c == '\n') {
-          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\n");
-        } else if (c == '\r') {
-          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\r");
-        } else if (c == '\t') {
-          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\t");
-        } else if (c == '\b') {
-          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\b");
-        } else if (c == '\f') {
-          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\f");
-        } else if ((unsigned char) c < 0x20) {
-          pos += snprintf(response + pos, (size_t)(total_size - pos), "\\u%04x", (unsigned char) c);
-        } else {
-          pos += snprintf(response + pos, (size_t)(total_size - pos), "%c", c);
-        }
-      }
+      pos = json_escape_append(response, pos, (int) total_size, field_val);
       pos += snprintf(response + pos, (size_t)(total_size - pos), "\"");
     }
     pos += snprintf(response + pos, (size_t)(total_size - pos), "}");
@@ -696,6 +700,8 @@ static int my_json_unescape(struct mg_str json, const char *path, char *to, size
         if (c == 'n') to[j++] = '\n';
         else if (c == 'r') to[j++] = '\r';
         else if (c == 't') to[j++] = '\t';
+        else if (c == 'b') to[j++] = '\b';
+        else if (c == 'f') to[j++] = '\f';
         else if (c == '"') to[j++] = '"';
         else if (c == '\\') to[j++] = '\\';
         else if (c == '/') to[j++] = '/';
