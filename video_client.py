@@ -700,6 +700,11 @@ if __name__ == "__main__":
     setup_logging()
     
     start_time = time.time()
+
+    #host = "平台IP";
+    #"Test"
+    #"190dd326-eba0-44a1-8ad4-35152ddb5a89"
+
     
     with EVOClient(
         username="e0232091",
