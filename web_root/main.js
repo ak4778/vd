@@ -782,4 +782,4 @@ window.addEventListener('unhandledrejection', (event) => {
   }
 });
 
-window.onload = () => render(h(App), document.body);
+render(h(App), document.body);

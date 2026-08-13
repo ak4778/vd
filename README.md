@@ -309,3 +309,24 @@ POST body form-encoded             user=xxx&password=yyy                      �
 403 未授权         Not Authorised\n                     {"status":"false","message":"Not Authorised"}
 
 所有响应都加了 Content-Type: application/json header,cookie 缓冲区从 256→512 字节以容纳合并的 header。
+
+找到问题了！这是 死锁 。看调用链：
+
+```
+get_max_page_size() / get_default_page_size()
+  → cfg_lock()                              <-- 第一次加锁
+    → get_config_buf()
+      → cfg_lock()                          <-- 第二次加锁！死
+      锁（Linux 下 PTHREAD_MUTEX 默认非递归）
+```
+pthread_mutex_t 默认不是递归锁，同一线程连续 lock 两次会永久阻塞。Windows 的 CRITICAL_SECTION 天然支持递归，所以 Windows 下不死。
+调用关系形成了嵌套加锁：
+
+```
+get_max_page_size()          [net.c:191]
+  → cfg_lock()               ← 第一次加锁 ✅
+    → get_config_buf()       [net.c:614]  
+      → cfg_lock()           ← 同一线程第二次加锁 ❌ 死锁！
+```
+- Windows 的 CRITICAL_SECTION 是递归锁（同线程可重入），所以没问题
+- Linux 的 PTHREAD_MUTEX_INITIALIZER 默认是 非递归锁 ，同一线程连续 lock 两次会永久挂起

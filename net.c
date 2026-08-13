@@ -49,6 +49,7 @@ static void start_thread(void (*f)(void *), void *p) {
 #endif
 
 // Forward declarations
+static char *get_config_buf_unlocked(void);
 static char *get_config_buf(void);
 static int get_max_page_size(void);
 static int get_default_page_size(void);
@@ -190,7 +191,7 @@ static void parse_config_fields(const char *cfg_buf) {
 static int get_max_page_size(void) {
   cfg_lock();
   if (!g_cfg_parsed_valid) {
-    char *buf = get_config_buf();
+    char *buf = get_config_buf_unlocked();
     if (buf) parse_config_fields(buf);
   }
   int val = g_cfg_parsed.maxPageSize;
@@ -201,7 +202,7 @@ static int get_max_page_size(void) {
 static int get_default_page_size(void) {
   cfg_lock();
   if (!g_cfg_parsed_valid) {
-    char *buf = get_config_buf();
+    char *buf = get_config_buf_unlocked();
     if (buf) parse_config_fields(buf);
   }
   int val = g_cfg_parsed.defaultPageSize;
@@ -610,13 +611,10 @@ static void dispatch_results(void *arg) {
 static char *g_cfg_buf = NULL;
 static time_t g_cfg_mtime = 0;
 
-static char *get_config_buf(void) {
-  cfg_lock();
-
+static char *get_config_buf_unlocked(void) {
   if (g_cfg_buf != NULL) {
     struct stat st;
     if (stat("data_config.json", &st) == 0 && st.st_mtime == g_cfg_mtime) {
-      cfg_unlock();
       return g_cfg_buf;
     }
     free(g_cfg_buf);
@@ -625,7 +623,6 @@ static char *get_config_buf(void) {
 
   FILE *fp = fopen("data_config.json", "rb");
   if (fp == NULL) {
-    cfg_unlock();
     return NULL;
   }
 
@@ -636,7 +633,6 @@ static char *get_config_buf(void) {
   g_cfg_buf = (char *) malloc((size_t) size + 1);
   if (g_cfg_buf == NULL) {
     fclose(fp);
-    cfg_unlock();
     return NULL;
   }
 
@@ -650,8 +646,14 @@ static char *get_config_buf(void) {
     g_cfg_parsed_valid = 0;
   }
 
-  cfg_unlock();
   return g_cfg_buf;
+}
+
+static char *get_config_buf(void) {
+  cfg_lock();
+  char *result = get_config_buf_unlocked();
+  cfg_unlock();
+  return result;
 }
 
 static void unicode_to_utf8(unsigned int codepoint, char *out, int *out_len) {
@@ -918,7 +920,7 @@ static struct user *authenticate(struct mg_http_message *hm) {
   // Ensure config is loaded (for global API token)
   cfg_lock();
   if (!g_cfg_parsed_valid) {
-    char *buf = get_config_buf();
+    char *buf = get_config_buf_unlocked();
     if (buf) parse_config_fields(buf);
   }
   cfg_unlock();
@@ -1101,6 +1103,7 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       struct mg_http_serve_opts opts;
       memset(&opts, 0, sizeof(opts));
       opts.root_dir = "web_root";
+      opts.extra_headers = "Cache-Control: no-cache\r\n";
       mg_http_serve_dir(c, ev_data, &opts);
     }
     if (c->send.len > 9) {
