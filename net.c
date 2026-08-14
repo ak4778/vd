@@ -17,6 +17,7 @@
 #define MAX_NODE_UPDATES        256
 #define MAX_FIELD_KEYS          32
 #define MAX_FIELD_KEY_LEN       64
+#define MAX_USERS               16
 #define AVG_NODE_JSON_SIZE      2048
 #define RESPONSE_OVERHEAD       4096
 
@@ -53,6 +54,7 @@ static char *get_config_buf_unlocked(void);
 static char *get_config_buf(void);
 static int get_max_page_size(void);
 static int get_default_page_size(void);
+static void load_users_from_config(const char *cfg_buf);
 
 struct work_request {
   struct mg_mgr *mgr;
@@ -212,6 +214,9 @@ static void parse_config_fields(const char *cfg_buf) {
       }
     }
   }
+
+  // Load users from config into s_users
+  load_users_from_config(cfg_buf);
 
   g_cfg_parsed_valid = 1;
 }
@@ -525,27 +530,83 @@ static void nodes_batchset_thread(void *param) {
 #endif
 
 struct user {
-  const char *name, *pass;
+  char name[64];
+  char pass[128];
   char access_token[65];  // 64 chars + '\0'
 };
 
-static struct user s_users[] = {
-    {"Gddl-bq", "Gddl!#%2026!@", ""},
-    {"scnqjs",  "Atos.202102",   ""},
-    {NULL, NULL, ""},
-};
+// Users are loaded from data_config.json at startup (see load_users_from_config).
+// The last element is an all-zero sentinel (name[0] == '\0').
+static struct user s_users[MAX_USERS + 1];
 
 // Sentinel user returned when a request authenticates via the global Api-Token
 // (from data_config.json) — through the "Api-Token" header, the access_token
 // cookie / query param, or a Bearer token. Has no password and no session
 // token: the Api-Token itself is the credential.
-static struct user global_token_user = {"_api_token_", NULL, ""};
+static struct user global_token_user = {"_api_token_", "", ""};
 
 static void generate_access_tokens(void) {
-  for (struct user *u = s_users; u->name != NULL; u++) {
+  for (struct user *u = s_users; u->name[0] != '\0'; u++) {
     mg_random_str(u->access_token, sizeof(u->access_token));
     MG_INFO(("Generated token for user [%s]", u->name));
   }
+}
+
+// Parse "users" array from data_config.json into s_users.
+// JSON format: "users": [{"name":"xxx","pass":"yyy"}, ...]
+// Called from parse_config_fields under cfg_lock.
+static void load_users_from_config(const char *cfg_buf) {
+  memset(s_users, 0, sizeof(s_users));
+
+  struct mg_str users_tok = mg_json_get_tok(mg_str((char *)cfg_buf), "$.users");
+  if (users_tok.len <= 0) {
+    MG_INFO(("No users configured in data_config.json"));
+    return;
+  }
+
+  char *copy = (char *)malloc(users_tok.len + 1);
+  if (copy == NULL) return;
+  memcpy(copy, users_tok.buf, users_tok.len);
+  copy[users_tok.len] = '\0';
+
+  int count = 0;
+  char *ptr = copy;
+
+  while (count < MAX_USERS) {
+    char *name_key = strstr(ptr, "\"name\"");
+    if (name_key == NULL) break;
+    name_key += 6;
+    while (*name_key == ' ' || *name_key == '\t' || *name_key == ':') name_key++;
+    if (*name_key != '"') break;
+    name_key++;
+    char *name_end = strchr(name_key, '"');
+    if (name_end == NULL) break;
+    int name_len = (int)(name_end - name_key);
+    if (name_len <= 0 || name_len >= (int)sizeof(s_users[0].name)) break;
+
+    char *pass_key = strstr(name_end, "\"pass\"");
+    if (pass_key == NULL) break;
+    pass_key += 6;
+    while (*pass_key == ' ' || *pass_key == '\t' || *pass_key == ':') pass_key++;
+    if (*pass_key != '"') break;
+    pass_key++;
+    char *pass_end = strchr(pass_key, '"');
+    if (pass_end == NULL) break;
+    int pass_len = (int)(pass_end - pass_key);
+    if (pass_len <= 0 || pass_len >= (int)sizeof(s_users[0].pass)) break;
+
+    memcpy(s_users[count].name, name_key, (size_t)name_len);
+    s_users[count].name[name_len] = '\0';
+    memcpy(s_users[count].pass, pass_key, (size_t)pass_len);
+    s_users[count].pass[pass_len] = '\0';
+    MG_INFO(("User loaded from config: [%s]", s_users[count].name));
+
+    count++;
+    ptr = pass_end + 1;
+  }
+
+  free(copy);
+  MG_INFO(("Loaded %d user(s) from data_config.json", count));
 }
 
 static const char *s_json_header =
@@ -978,7 +1039,7 @@ static struct user *authenticate(struct mg_http_message *hm) {
   }
 
   if (user[0] != '\0' && pass[0] != '\0') {
-    for (u = s_users; result == NULL && u->name != NULL; u++)
+    for (u = s_users; result == NULL && u->name[0] != '\0'; u++)
       if (strcmp(user, u->name) == 0 && strcmp(pass, u->pass) == 0) result = u;
   } else if (user[0] == '\0' && pass[0] != '\0') {
     // Check global API token first (fixed token from config for Postman etc.)
@@ -986,7 +1047,7 @@ static struct user *authenticate(struct mg_http_message *hm) {
       MG_VERBOSE(("Authenticated via global API token"));
       return &global_token_user;
     }
-    for (u = s_users; result == NULL && u->name != NULL; u++)
+    for (u = s_users; result == NULL && u->name[0] != '\0'; u++)
       if (strcmp(pass, u->access_token) == 0) result = u;
   }
   return result;
@@ -1040,7 +1101,7 @@ static void handle_login(struct mg_connection *c, struct mg_http_message *hm,
 }
 
 static void handle_logout(struct mg_connection *c, struct user *u) {
-  if (u != NULL && u->name != NULL && strcmp(u->name, "_api_token_") != 0) {
+  if (u != NULL && u->name[0] != '\0' && strcmp(u->name, "_api_token_") != 0) {
     memset(u->access_token, 0, sizeof(u->access_token));
     MG_INFO(("User [%s] logged out, token cleared", u->name));
   }
@@ -1144,11 +1205,8 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
 void web_init(struct mg_mgr *mgr) {
   results_mutex_init();
   cfg_mutex_init();
-  generate_access_tokens();
-  MG_INFO(("Web server starting in %s mode", DS_MODE));
-  mg_timer_add(mgr, 20, MG_TIMER_REPEAT, dispatch_results, mgr);
 
-  // Load config to get runtime port settings
+  // Load config early: populates s_users (from data_config.json) and port settings
   cfg_lock();
   if (!g_cfg_parsed_valid) {
     char *buf = get_config_buf_unlocked();
@@ -1157,6 +1215,12 @@ void web_init(struct mg_mgr *mgr) {
   int http_port = g_cfg_parsed.httpPort;
   int https_port = g_cfg_parsed.httpsPort;
   cfg_unlock();
+
+  // Generate access tokens after users are loaded from config
+  generate_access_tokens();
+
+  MG_INFO(("Web server starting in %s mode", DS_MODE));
+  mg_timer_add(mgr, 20, MG_TIMER_REPEAT, dispatch_results, mgr);
 
   char http_url[64];
   char https_url[64];
