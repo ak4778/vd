@@ -8,6 +8,15 @@
 extern "C" {
 #endif
 
+#if !defined(HTTP_PORT)
+#define HTTP_PORT 8000
+#endif
+
+#if !defined(HTTPS_PORT)
+#define HTTPS_PORT 8443
+#endif
+
+// Legacy macros - deprecated, use HTTP_PORT/HTTPS_PORT instead
 #if !defined(HTTP_URL)
 #define HTTP_URL "http://0.0.0.0:8000"
 #endif

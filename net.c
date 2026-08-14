@@ -83,6 +83,8 @@ static void push_result(unsigned long conn_id, int http_status, char *body, size
 struct cfg_parsed {
   int defaultPageSize;
   int maxPageSize;
+  int httpPort;
+  int httpsPort;
   char field_keys[MAX_FIELD_KEYS][MAX_FIELD_KEY_LEN];
   int field_key_count;
   size_t fields_tok_len;
@@ -117,6 +119,8 @@ static void parse_config_fields(const char *cfg_buf) {
 
   cp->defaultPageSize = 50;
   cp->maxPageSize = 100;
+  cp->httpPort = HTTP_PORT;
+  cp->httpsPort = HTTPS_PORT;
 
   const char *dps_key = "\"defaultPageSize\"";
   char *pos = strstr(cfg_buf, dps_key);
@@ -132,6 +136,30 @@ static void parse_config_fields(const char *cfg_buf) {
     pos += strlen(mps_key);
     while (*pos == ' ' || *pos == ':') pos++;
     if (isdigit((unsigned char)*pos)) cp->maxPageSize = atoi(pos);
+  }
+
+  // Parse httpPort
+  const char *http_port_key = "\"httpPort\"";
+  pos = strstr(cfg_buf, http_port_key);
+  if (pos) {
+    pos += strlen(http_port_key);
+    while (*pos == ' ' || *pos == ':') pos++;
+    if (isdigit((unsigned char)*pos)) {
+      int p = atoi(pos);
+      if (p >= 1 && p <= 65535) cp->httpPort = p;
+    }
+  }
+
+  // Parse httpsPort
+  const char *https_port_key = "\"httpsPort\"";
+  pos = strstr(cfg_buf, https_port_key);
+  if (pos) {
+    pos += strlen(https_port_key);
+    while (*pos == ' ' || *pos == ':') pos++;
+    if (isdigit((unsigned char)*pos)) {
+      int p = atoi(pos);
+      if (p >= 1 && p <= 65535) cp->httpsPort = p;
+    }
   }
 
   // Read global API token for Postman etc.
@@ -502,9 +530,8 @@ struct user {
 };
 
 static struct user s_users[] = {
-    {"admin", "admin", ""},
-    {"user1", "user1", ""},
-    {"user2", "user2", ""},
+    {"Gddl-bq", "Gddl!#%2026!@", ""},
+    {"scnqjs",  "Atos.202102",   ""},
     {NULL, NULL, ""},
 };
 
@@ -1120,6 +1147,23 @@ void web_init(struct mg_mgr *mgr) {
   generate_access_tokens();
   MG_INFO(("Web server starting in %s mode", DS_MODE));
   mg_timer_add(mgr, 20, MG_TIMER_REPEAT, dispatch_results, mgr);
-  mg_http_listen(mgr, HTTP_URL, fn, NULL);
-  mg_http_listen(mgr, HTTPS_URL, fn, NULL);
+
+  // Load config to get runtime port settings
+  cfg_lock();
+  if (!g_cfg_parsed_valid) {
+    char *buf = get_config_buf_unlocked();
+    if (buf) parse_config_fields(buf);
+  }
+  int http_port = g_cfg_parsed.httpPort;
+  int https_port = g_cfg_parsed.httpsPort;
+  cfg_unlock();
+
+  char http_url[64];
+  char https_url[64];
+  snprintf(http_url, sizeof(http_url), "http://0.0.0.0:%d", http_port);
+  snprintf(https_url, sizeof(https_url), "https://0.0.0.0:%d", https_port);
+
+  MG_INFO(("HTTP listening on port %d, HTTPS listening on port %d", http_port, https_port));
+  mg_http_listen(mgr, http_url, fn, NULL);
+  mg_http_listen(mgr, https_url, fn, NULL);
 }
