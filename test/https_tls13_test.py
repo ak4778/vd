@@ -61,8 +61,8 @@ def main():
     ap.add_argument('--port', type=int, default=8443)
     ap.add_argument('--token', required=True,
                     help='apiToken value from data_config.json')
-    ap.add_argument('--user', default='admin', help='login username')
-    ap.add_argument('--pass', dest='password', default='admin', help='login password')
+    ap.add_argument('--user', default='scnqjs', help='login username')
+    ap.add_argument('--pass', dest='password', default='Atos.202102', help='login password')
     args = ap.parse_args()
 
     host, port, token = args.host, args.port, args.token

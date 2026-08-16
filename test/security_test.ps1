@@ -2,7 +2,8 @@
 # Focus: path traversal, auth edge cases, static files, URL encoding, protocol quirks
 $ErrorActionPreference = 'Continue'
 $base = 'http://localhost:8000'
-$auth = '-u','admin:admin'
+$apiToken = 'm4h38NPRPB6CCZg6ZtQncinBcj5X4351Jd6PAOqd1v4wze4MNopW1CyC10Y5Ur6x'
+$auth = '-H',"apiToken: $apiToken"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $pass = 0; $fail = 0; $issues = @()
 
@@ -67,33 +68,33 @@ Check 'SEC' "Null byte in path no crash" ($code -ge 200 -or $code -eq '404') "co
 # ============================================================
 Log "----- B. AUTHENTICATION EDGE CASES -----"
 
-# B1. Wrong password
-$code = & curl.exe -s -o NUL -w '%{http_code}' -u 'admin:wrongpass' "$base/api/nodes/get?page=1&pageSize=1" 2>$null
-Check 'AUTH' "Wrong password -> 401 or 403" ($code -eq '401' -or $code -eq '403') "code=$code"
+# B1. Wrong apiToken
+$code = & curl.exe -s -o NUL -w '%{http_code}' -H 'apiToken: wrongtoken' "$base/api/nodes/get?page=1&pageSize=1" 2>$null
+Check 'AUTH' "Wrong apiToken -> 403" ($code -eq '403') "code=$code"
 
-# B2. Wrong username
-$code = & curl.exe -s -o NUL -w '%{http_code}' -u 'wronguser:admin' "$base/api/nodes/get?page=1&pageSize=1" 2>$null
-Check 'AUTH' "Wrong username -> 401 or 403" ($code -eq '401' -or $code -eq '403') "code=$code"
+# B2. Non-existent apiToken
+$code = & curl.exe -s -o NUL -w '%{http_code}' -H 'apiToken: nonexistent' "$base/api/nodes/get?page=1&pageSize=1" 2>$null
+Check 'AUTH' "Non-existent apiToken -> 403" ($code -eq '403') "code=$code"
 
 # B3. Empty credentials (no -u)
 $code = & curl.exe -s -o NUL -w '%{http_code}' "$base/api/nodes/get?page=1&pageSize=1" 2>$null
 Check 'AUTH' "No credentials -> 403" ($code -eq '403') "code=$code"
 
-# B4. Empty username with password
-$code = & curl.exe -s -o NUL -w '%{http_code}' -u ':admin' "$base/api/nodes/get?page=1&pageSize=1" 2>$null
-Check 'AUTH' "Empty username -> 403" ($code -eq '403') "code=$code"
+# B4. No auth header (should get 403)
+$code = & curl.exe -s -o NUL -w '%{http_code}' "$base/api/nodes/get?page=1&pageSize=1" 2>$null
+Check 'AUTH' "No auth header -> 403" ($code -eq '403') "code=$code"
 
-# B5. Empty password with username
-$code = & curl.exe -s -o NUL -w '%{http_code}' -u 'admin:' "$base/api/nodes/get?page=1&pageSize=1" 2>$null
-Check 'AUTH' "Empty password -> 403" ($code -eq '403') "code=$code"
+# B5. Empty apiToken
+$code = & curl.exe -s -o NUL -w '%{http_code}' -H 'apiToken: ' "$base/api/nodes/get?page=1&pageSize=1" 2>$null
+Check 'AUTH' "Empty apiToken -> 403" ($code -eq '403') "code=$code"
 
 # B6. Login with GET method (should it work? Currently no method enforcement)
-$code = & curl.exe -s -o NUL -w '%{http_code}' -X GET -u 'admin:admin' "$base/api/login" 2>$null
+$code = & curl.exe -s -o NUL -w '%{http_code}' -X GET -u 'scnqjs:Atos.202102' "$base/api/login" 2>$null
 Check 'AUTH' "GET /api/login" ($code -eq '200') "code=$code (login has no method enforcement — informational)"
 
 # B7. Logout with GET method (CSRF risk — no method enforcement)
 $cookieJar = 'c:\s\vd\test\_tmp_sec_cookies.txt'
-$null = & curl.exe -s -c $cookieJar -u 'admin:admin' "$base/api/login" 2>$null
+$null = & curl.exe -s -c $cookieJar -u 'scnqjs:Atos.202102' "$base/api/login" 2>$null
 $code = & curl.exe -s -o NUL -w '%{http_code}' -b $cookieJar "$base/api/logout" 2>$null
 Check 'AUTH' "GET /api/logout (CSRF risk)" ($code -eq '200') "code=$code (logout has no method enforcement — potential CSRF)"
 
@@ -104,9 +105,9 @@ Check 'AUTH' "Cookie expired after GET logout" ($code -eq '403') "code=$code"
 # B9. Concurrent logins (same user gets new token each time)
 $jar1 = 'c:\s\vd\test\_tmp_sec_jar1.txt'
 $jar2 = 'c:\s\vd\test\_tmp_sec_jar2.txt'
-$null = & curl.exe -s -c $jar1 -u 'admin:admin' "$base/api/login" 2>$null
+$null = & curl.exe -s -c $jar1 -u 'scnqjs:Atos.202102' "$base/api/login" 2>$null
 Start-Sleep -Milliseconds 100
-$null = & curl.exe -s -c $jar2 -u 'admin:admin' "$base/api/login" 2>$null
+$null = & curl.exe -s -c $jar2 -u 'scnqjs:Atos.202102' "$base/api/login" 2>$null
 $tok1 = (Select-String 'access_token' $jar1 -ErrorAction SilentlyContinue) -replace '.*access_token\s+(\S+).*','$1'
 $tok2 = (Select-String 'access_token' $jar2 -ErrorAction SilentlyContinue) -replace '.*access_token\s+(\S+).*','$1'
 Check 'AUTH' "Concurrent logins get different tokens" ($tok1 -ne $tok2) "tok1=[$tok1] tok2=[$tok2]"
@@ -166,7 +167,7 @@ Check 'URL' "Space in isOnline value no crash" ($true) "total=$($r.data.total)"
 Log "----- D. ROUTING EDGE CASES -----"
 
 # D1. Case sensitivity: /API/LOGIN (should not match /api/login)
-$code = & curl.exe -s -o NUL -w '%{http_code}' -u 'admin:admin' "$base/API/LOGIN" 2>$null
+$code = & curl.exe -s -o NUL -w '%{http_code}' -u 'scnqjs:Atos.202102' "$base/API/LOGIN" 2>$null
 Check 'RTE' "Case sensitivity /API/LOGIN" ($code -ne '200') "code=$code (should NOT match /api/login — case sensitive)"
 
 # D2. Case sensitivity: /Api/Nodes/Get
@@ -187,7 +188,7 @@ $code = & curl.exe -s -o NUL -w '%{http_code}' @auth "$base/api/unknown/endpoint
 Check 'RTE' "/api/unknown/endpoint -> 403 or 404" ($code -eq '403' -or $code -eq '404') "code=$code"
 
 # D6. Trailing slash on /api/login/
-$code = & curl.exe -s -o NUL -w '%{http_code}' -u 'admin:admin' "$base/api/login/" 2>$null
+$code = & curl.exe -s -o NUL -w '%{http_code}' -H "apiToken: $apiToken" "$base/api/login/" 2>$null
 Check 'RTE' "/api/login/ trailing slash" ($code -ne '200') "code=$code (trailing slash should not match)"
 
 # D7. /api/logout with trailing slash
@@ -284,11 +285,11 @@ if ($resp -match '"true"') {
 Log "----- G. CONCURRENT SESSION / TOKEN BEHAVIOR -----"
 
 # G1. Multiple users login simultaneously
-$users = @('admin','user1','user2')
+$users = @('scnqjs')
 $jars = @{}
 foreach ($u in $users) {
     $j = "c:\s\vd\test\_tmp_sec_${u}.txt"
-    $null = & curl.exe -s -c $j -u "${u}:${u}" "$base/api/login" 2>$null
+    $null = & curl.exe -s -c $j -u 'scnqjs:Atos.202102' "$base/api/login" 2>$null
     $jars[$u] = $j
 }
 $allOk = $true
@@ -296,19 +297,19 @@ foreach ($u in $users) {
     $c = & curl.exe -s -o NUL -w '%{http_code}' -b $jars[$u] "$base/api/nodes/get?page=1&pageSize=1" 2>$null
     if ($c -ne '200') { $allOk = $false }
 }
-Check 'SESS' "All 3 users can login and use API" $allOk "users=$($users -join ',')"
+Check 'SESS' "User scnqjs can login and use API" $allOk "users=$($users -join ',')"
 
-# G2. user1 can read but can user1 write?
+# G2. scnqjs can read but can scnqjs write?
 $f = 'c:\s\vd\test\_tmp_sec_u1write.json'
-[System.IO.File]::WriteAllText($f, '{"updates":[{"id":"N113174","customOperation":"USER1_WRITE"}]}', $utf8NoBom)
-$resp = & curl.exe -s -X POST "$base/api/nodes/batchset" -H 'Content-Type: application/json' --data-binary "@$f" -b $jars['user1'] 2>$null
-Check 'SESS' "user1 can write (cookie auth)" ($resp -match '"true"') "resp=$resp"
+[System.IO.File]::WriteAllText($f, '{"updates":[{"id":"N113174","customOperation":"SCNQJS_WRITE"}]}', $utf8NoBom)
+$resp = & curl.exe -s -X POST "$base/api/nodes/batchset" -H 'Content-Type: application/json' --data-binary "@$f" -b $jars['scnqjs'] 2>$null
+Check 'SESS' "scnqjs can write (cookie auth)" ($resp -match '"true"') "resp=$resp"
 
 # G3. Token in Authorization Bearer header (should NOT work — only Basic Auth)
-$loginResp = & curl.exe -s -u 'admin:admin' "$base/api/login" 2>$null
-# Extract token from cookie — actually login returns {"user":"admin"}, token is in Set-Cookie
+$loginResp = & curl.exe -s -u 'scnqjs:Atos.202102' "$base/api/login" 2>$null
+# Extract token from cookie — login returns {"user":"scnqjs"}, token is in Set-Cookie
 # Let's try using the raw password as bearer token
-$code = & curl.exe -s -o NUL -w '%{http_code}' -H 'Authorization: Bearer admin' "$base/api/nodes/get?page=1&pageSize=1" 2>$null
+$code = & curl.exe -s -o NUL -w '%{http_code}' -H 'Authorization: Bearer scnqjs' "$base/api/nodes/get?page=1&pageSize=1" 2>$null
 Check 'SESS' "Bearer token auth (not supported)" ($code -eq '403') "code=$code (only Basic Auth + Cookie supported)"
 
 # ============================================================

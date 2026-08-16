@@ -115,6 +115,9 @@ static void cfg_lock(void) { pthread_mutex_lock(&g_cfg_mutex); }
 static void cfg_unlock(void) { pthread_mutex_unlock(&g_cfg_mutex); }
 #endif
 
+// Parse config fields using mg_json_get_tok / mg_json_get_num / mg_json_unescape
+// for proper JSON parsing. The previous hand-rolled strstr/strchr parser was
+// fragile and could not handle escaped characters or whitespace variations.
 static void parse_config_fields(const char *cfg_buf) {
   struct cfg_parsed *cp = &g_cfg_parsed;
   memset(cp, 0, sizeof(*cp));
@@ -124,93 +127,44 @@ static void parse_config_fields(const char *cfg_buf) {
   cp->httpPort = HTTP_PORT;
   cp->httpsPort = HTTPS_PORT;
 
-  const char *dps_key = "\"defaultPageSize\"";
-  char *pos = strstr(cfg_buf, dps_key);
-  if (pos) {
-    pos += strlen(dps_key);
-    while (*pos == ' ' || *pos == ':') pos++;
-    if (isdigit((unsigned char)*pos)) cp->defaultPageSize = atoi(pos);
-  }
+  struct mg_str json = mg_str((char *)cfg_buf);
+  double v;
 
-  const char *mps_key = "\"maxPageSize\"";
-  pos = strstr(cfg_buf, mps_key);
-  if (pos) {
-    pos += strlen(mps_key);
-    while (*pos == ' ' || *pos == ':') pos++;
-    if (isdigit((unsigned char)*pos)) cp->maxPageSize = atoi(pos);
-  }
+  // Parse numeric fields via mg_json_get_num
+  if (mg_json_get_num(json, "$.defaultPageSize", &v) && v > 0)
+    cp->defaultPageSize = (int)v;
+  if (mg_json_get_num(json, "$.maxPageSize", &v) && v > 0)
+    cp->maxPageSize = (int)v;
+  if (mg_json_get_num(json, "$.httpPort", &v) && v >= 1 && v <= 65535)
+    cp->httpPort = (int)v;
+  if (mg_json_get_num(json, "$.httpsPort", &v) && v >= 1 && v <= 65535)
+    cp->httpsPort = (int)v;
 
-  // Parse httpPort
-  const char *http_port_key = "\"httpPort\"";
-  pos = strstr(cfg_buf, http_port_key);
-  if (pos) {
-    pos += strlen(http_port_key);
-    while (*pos == ' ' || *pos == ':') pos++;
-    if (isdigit((unsigned char)*pos)) {
-      int p = atoi(pos);
-      if (p >= 1 && p <= 65535) cp->httpPort = p;
-    }
-  }
+  // Parse apiToken string via mg_json_unescape (handles \" \\ \/ etc.)
+  size_t tlen = mg_json_unescape(json, "$.apiToken",
+                                 s_global_api_token, sizeof(s_global_api_token));
+  if (tlen > 0)
+    MG_INFO(("Global API token loaded: %s", s_global_api_token));
 
-  // Parse httpsPort
-  const char *https_port_key = "\"httpsPort\"";
-  pos = strstr(cfg_buf, https_port_key);
-  if (pos) {
-    pos += strlen(https_port_key);
-    while (*pos == ' ' || *pos == ':') pos++;
-    if (isdigit((unsigned char)*pos)) {
-      int p = atoi(pos);
-      if (p >= 1 && p <= 65535) cp->httpsPort = p;
-    }
-  }
-
-  // Read global API token for Postman etc.
-  const char *api_key = "\"apiToken\"";
-  pos = strstr(cfg_buf, api_key);
-  if (pos) {
-    pos += strlen(api_key);
-    while (*pos == ' ' || *pos == ':') pos++;
-    if (*pos == '"') {
-      pos++;
-      char *end_pos = strchr(pos, '"');
-      if (end_pos) {
-        int len = (int) (end_pos - pos);
-        if (len > 0 && len < (int)sizeof(s_global_api_token)) {
-          memcpy(s_global_api_token, pos, (size_t) len);
-          s_global_api_token[len] = '\0';
-          MG_INFO(("Global API token loaded: %s", s_global_api_token));
-        }
-      }
-    }
-  }
-
-  struct mg_str cfg_fields_tok = mg_json_get_tok(mg_str((char *)cfg_buf), "$.fields");
+  // Parse fields array via mg_json_get_tok for the whole array, then iterate
+  // with mg_json_unescape for each $.fields[i].key
+  struct mg_str cfg_fields_tok = mg_json_get_tok(json, "$.fields");
   cp->fields_tok_len = cfg_fields_tok.len;
 
   if (cfg_fields_tok.len > 0) {
-    cp->fields_json_copy = (char *) malloc((size_t) cfg_fields_tok.len + 1);
+    cp->fields_json_copy = (char *)malloc((size_t)cfg_fields_tok.len + 1);
     if (cp->fields_json_copy) {
-      memcpy(cp->fields_json_copy, cfg_fields_tok.buf, (size_t) cfg_fields_tok.len);
+      memcpy(cp->fields_json_copy, cfg_fields_tok.buf, (size_t)cfg_fields_tok.len);
       cp->fields_json_copy[cfg_fields_tok.len] = '\0';
 
-      char *ptr = cp->fields_json_copy;
-      while (*ptr != '\0' && cp->field_key_count < MAX_FIELD_KEYS) {
-        char *key_ptr = strstr(ptr, "\"key\"");
-        if (key_ptr == NULL) break;
-        key_ptr += 5;
-        while (*key_ptr == ' ' || *key_ptr == '\t' || *key_ptr == ':') key_ptr++;
-        while (*key_ptr == ' ' || *key_ptr == '\t') key_ptr++;
-        if (*key_ptr != '"') break;
-        key_ptr++;
-        char *end_ptr = strchr(key_ptr, '"');
-        if (end_ptr == NULL) break;
-        int len = (int) (end_ptr - key_ptr);
-        if (len > 0 && len < MAX_FIELD_KEY_LEN) {
-          memcpy(cp->field_keys[cp->field_key_count], key_ptr, (size_t) len);
-          cp->field_keys[cp->field_key_count][len] = '\0';
-          cp->field_key_count++;
-        }
-        ptr = end_ptr + 1;
+      for (int i = 0; i < MAX_FIELD_KEYS; i++) {
+        char path[48];
+        mg_snprintf(path, sizeof(path), "$.fields[%d].key", i);
+        size_t klen = mg_json_unescape(json, path,
+                                       cp->field_keys[cp->field_key_count],
+                                       MAX_FIELD_KEY_LEN);
+        if (klen == 0) break;  // No more items in array
+        cp->field_key_count++;
       }
     }
   }
@@ -554,58 +508,34 @@ static void generate_access_tokens(void) {
 
 // Parse "users" array from data_config.json into s_users.
 // JSON format: "users": [{"name":"xxx","pass":"yyy"}, ...]
+// Uses mg_json_get_tok / mg_json_unescape for proper JSON parsing,
+// which correctly handles escaped characters (e.g. \" \\ \/) in names
+// and passwords — the previous hand-rolled strstr/strchr parser broke
+// on passwords containing double-quote characters.
 // Called from parse_config_fields under cfg_lock.
 static void load_users_from_config(const char *cfg_buf) {
   memset(s_users, 0, sizeof(s_users));
-
-  struct mg_str users_tok = mg_json_get_tok(mg_str((char *)cfg_buf), "$.users");
-  if (users_tok.len <= 0) {
-    MG_INFO(("No users configured in data_config.json"));
-    return;
-  }
-
-  char *copy = (char *)malloc(users_tok.len + 1);
-  if (copy == NULL) return;
-  memcpy(copy, users_tok.buf, users_tok.len);
-  copy[users_tok.len] = '\0';
+  struct mg_str json = mg_str((char *)cfg_buf);
 
   int count = 0;
-  char *ptr = copy;
+  for (int i = 0; i < MAX_USERS; i++) {
+    char path[32];
+    // Try $.users[i].name
+    mg_snprintf(path, sizeof(path), "$.users[%d].name", i);
+    size_t nlen = mg_json_unescape(json, path,
+                                   s_users[count].name, sizeof(s_users[0].name));
+    if (nlen == 0) break;  // No more users in array
 
-  while (count < MAX_USERS) {
-    char *name_key = strstr(ptr, "\"name\"");
-    if (name_key == NULL) break;
-    name_key += 6;
-    while (*name_key == ' ' || *name_key == '\t' || *name_key == ':') name_key++;
-    if (*name_key != '"') break;
-    name_key++;
-    char *name_end = strchr(name_key, '"');
-    if (name_end == NULL) break;
-    int name_len = (int)(name_end - name_key);
-    if (name_len <= 0 || name_len >= (int)sizeof(s_users[0].name)) break;
+    // Try $.users[i].pass
+    mg_snprintf(path, sizeof(path), "$.users[%d].pass", i);
+    size_t plen = mg_json_unescape(json, path,
+                                   s_users[count].pass, sizeof(s_users[0].pass));
+    if (plen == 0) continue;  // Password missing — skip this entry, try next
 
-    char *pass_key = strstr(name_end, "\"pass\"");
-    if (pass_key == NULL) break;
-    pass_key += 6;
-    while (*pass_key == ' ' || *pass_key == '\t' || *pass_key == ':') pass_key++;
-    if (*pass_key != '"') break;
-    pass_key++;
-    char *pass_end = strchr(pass_key, '"');
-    if (pass_end == NULL) break;
-    int pass_len = (int)(pass_end - pass_key);
-    if (pass_len <= 0 || pass_len >= (int)sizeof(s_users[0].pass)) break;
-
-    memcpy(s_users[count].name, name_key, (size_t)name_len);
-    s_users[count].name[name_len] = '\0';
-    memcpy(s_users[count].pass, pass_key, (size_t)pass_len);
-    s_users[count].pass[pass_len] = '\0';
     MG_INFO(("User loaded from config: [%s]", s_users[count].name));
-
     count++;
-    ptr = pass_end + 1;
   }
 
-  free(copy);
   MG_INFO(("Loaded %d user(s) from data_config.json", count));
 }
 

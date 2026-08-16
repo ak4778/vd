@@ -10,6 +10,9 @@
     ],
     "defaultPageSize": 50,
     "maxPageSize": 200,
+    "logLevel": "debug",
+    "logToFile": true,
+    "logFile": "server.log",
     "fields": [
         {"key": "id", "label": "通道ID", "editable": false, "type": "string", "width": 60},
         {"key": "name", "label": "通道名称", "editable": false, "type": "string", "width": 120},

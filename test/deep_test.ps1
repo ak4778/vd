@@ -3,7 +3,8 @@
 #        known-issue verification, data consistency under load, recovery
 $ErrorActionPreference = 'Continue'
 $base = 'http://localhost:8000'
-$auth = '-u','admin:admin'
+$apiToken = 'm4h38NPRPB6CCZg6ZtQncinBcj5X4351Jd6PAOqd1v4wze4MNopW1CyC10Y5Ur6x'
+$auth = '-H',"apiToken: $apiToken"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $pass = 0; $fail = 0; $categories = @{}
 
@@ -130,15 +131,15 @@ Check 'KNWN' "Trailing slash behavior" ($c1 -eq 200) "/get=$c1 /get/=$c2 (known:
 $f = 'c:\s\vd\test\_tmp_deep_put.json'
 $body = "{`"updates`":[{`"id`":`"$testId`",`"customOperation`":`"PUT_SHOULD_NOT_WRITE`"}]}"
 [System.IO.File]::WriteAllText($f, $body, $utf8NoBom)
-$putResp = & curl.exe -s -w '%{http_code}' -X PUT "$base/api/nodes/batchset" -H 'Content-Type: application/json' --data-binary "@$f" -u 'admin:admin' 2>$null
+$putResp = & curl.exe -s -w '%{http_code}' -X PUT "$base/api/nodes/batchset" -H 'Content-Type: application/json' -H "apiToken: $apiToken" --data-binary "@$f" 2>$null
 Check 'KNWN' "PUT to batchset rejected (405)" ($putResp -match '405') "resp=$putResp"
 
 # DELETE to batchset (should be 405)
-$delResp = & curl.exe -s -w '%{http_code}' -X DELETE "$base/api/nodes/batchset" -u 'admin:admin' 2>$null
+$delResp = & curl.exe -s -w '%{http_code}' -X DELETE "$base/api/nodes/batchset" -H "apiToken: $apiToken" 2>$null
 Check 'KNWN' "DELETE to batchset rejected (405)" ($delResp -match '405') "resp=$delResp"
 
 # PUT to nodes/get (should be 405)
-$putGetResp = & curl.exe -s -o NUL -w '%{http_code}' -X PUT "$base/api/nodes/get?page=1&pageSize=1" -u 'admin:admin' 2>$null
+$putGetResp = & curl.exe -s -o NUL -w '%{http_code}' -X PUT "$base/api/nodes/get?page=1&pageSize=1" -H "apiToken: $apiToken" 2>$null
 Check 'KNWN' "PUT to nodes/get rejected (405)" ($putGetResp -eq '405') "code=$putGetResp"
 
 # POST to mode/get (should be 405)
@@ -174,7 +175,7 @@ Check 'XCONC' "300 concurrent reads" ($ok200 -ge 60) "ok=$ok200/300 (thread pool
 # Verify recovery again
 Start-Sleep -Seconds 3
 $recoveryCode = CurlCode "$base/api/nodes/get?page=1&pageSize=1"
-$recoveryTime = & curl.exe -s -o NUL -w '%{time_total}' -u 'admin:admin' "$base/api/nodes/get?page=1&pageSize=1" 2>$null
+$recoveryTime = & curl.exe -s -o NUL -w '%{time_total}' -H "apiToken: $apiToken" "$base/api/nodes/get?page=1&pageSize=1" 2>$null
 Check 'XCONC' "Server recovers after 300-concurrent" ($recoveryCode -eq 200) "code=$recoveryCode time=${recoveryTime}s"
 
 # ============================================================
@@ -301,7 +302,7 @@ Check 'BATCH' "Batch write visible" ($node.customOperation -match 'BATCH_') "sto
 Log "----- 8. RESPONSE SIZE / TIMING -----"
 
 # Time a large response (200 nodes)
-$timing = & curl.exe -s -o NUL -w '%{time_total} %{size_download}' -u 'admin:admin' "$base/api/nodes/get?page=1&pageSize=200" 2>$null
+$timing = & curl.exe -s -o NUL -w '%{time_total} %{size_download}' -H "apiToken: $apiToken" "$base/api/nodes/get?page=1&pageSize=200" 2>$null
 $parts = $timing -split ' '
 $timeSec = [double]$parts[0]
 $sizeBytes = [long]$parts[1]
@@ -309,12 +310,12 @@ $sizeKB = [math]::Round($sizeBytes / 1024, 1)
 Check 'TIME' "200 nodes response time" ($timeSec -lt 5) "time=${timeSec}s size=${sizeKB}KB"
 
 # Time a small response (1 node)
-$timing1 = & curl.exe -s -o NUL -w '%{time_total}' -u 'admin:admin' "$base/api/nodes/get?page=1&pageSize=1" 2>$null
+$timing1 = & curl.exe -s -o NUL -w '%{time_total}' -H "apiToken: $apiToken" "$base/api/nodes/get?page=1&pageSize=1" 2>$null
 $time1 = [double]$timing1
 Check 'TIME' "1 node response time" ($time1 -lt 2) "time=${time1}s"
 
 # Time a filtered response
-$timingF = & curl.exe -s -o NUL -w '%{time_total}' -u 'admin:admin' "$base/api/nodes/get?page=1&pageSize=200&isOnline=1&cameraType=1,2,3" 2>$null
+$timingF = & curl.exe -s -o NUL -w '%{time_total}' -H "apiToken: $apiToken" "$base/api/nodes/get?page=1&pageSize=200&isOnline=1&cameraType=1,2,3" 2>$null
 $timeF = [double]$timingF
 Check 'TIME' "Filtered 200 nodes response time" ($timeF -lt 5) "time=${timeF}s"
 
@@ -324,7 +325,7 @@ Check 'TIME' "Filtered 200 nodes response time" ($timeF -lt 5) "time=${timeF}s"
 Log "----- 9. ERROR RESPONSE FORMAT -----"
 
 # 400 for bad page
-$resp = & curl.exe -s -u 'admin:admin' "$base/api/nodes/get?page=0&pageSize=10" 2>$null
+$resp = & curl.exe -s -H "apiToken: $apiToken" "$base/api/nodes/get?page=0&pageSize=10" 2>$null
 Check 'ERR' "400 response is valid JSON" ($true) "resp=$resp"
 
 # 403 for no auth
@@ -332,7 +333,7 @@ $resp = & curl.exe -s "$base/api/nodes/get?page=1&pageSize=1" 2>$null
 Check 'ERR' "403 response text" ($resp -match 'Not Authorised') "resp=$resp"
 
 # 404 for deleted endpoint
-$resp = & curl.exe -s -u 'admin:admin' "$base/api/config/get" 2>$null
+$resp = & curl.exe -s -H "apiToken: $apiToken" "$base/api/config/get" 2>$null
 $c = CurlCode "$base/api/config/get"
 Check 'ERR' "Deleted endpoint 404" ($c -eq 404) "code=$c"
 
@@ -345,7 +346,7 @@ $resp = SendUpdateFile $f
 Check 'ERR' "Too many updates error format" ($resp -match '"false"' -and $resp -match 'Too many') "resp=$resp"
 
 # batchset error: no updates
-$resp = & curl.exe -s -X POST "$base/api/nodes/batchset" -H 'Content-Type: application/json' -d '{}' -u 'admin:admin' 2>$null
+$resp = & curl.exe -s -X POST "$base/api/nodes/batchset" -H 'Content-Type: application/json' -H "apiToken: $apiToken" -d '{}' 2>$null
 Check 'ERR' "No updates error format" ($resp -match '"false"' -and $resp -match 'No updates') "resp=$resp"
 
 # ============================================================
@@ -353,17 +354,19 @@ Check 'ERR' "No updates error format" ($resp -match '"false"' -and $resp -match 
 # ============================================================
 Log "----- 10. SESSION / COOKIE HANDLING -----"
 
-# Login with cookie jar
+# Login with cookie jar — must use username/password (not apiToken),
+# because only user-based login sets a session cookie in the response.
+# apiToken auth returns global_token_user which has no session cookie.
 $cookieJar = 'c:\s\vd\test\_tmp_deep_cookies.txt'
-$loginCode = & curl.exe -s -o NUL -w '%{http_code}' -c $cookieJar -u 'admin:admin' "$base/api/login" 2>$null
+$loginCode = & curl.exe -s -o NUL -w '%{http_code}' -c $cookieJar -u 'scnqjs:Atos.202102' "$base/api/login" 2>$null
 Check 'SESS' "Login sets cookie" ($loginCode -eq 200) "code=$loginCode"
 
-# Use cookie (no -u)
+# Use cookie (no -u, no apiToken header)
 $c = & curl.exe -s -o NUL -w '%{http_code}' -b $cookieJar "$base/api/nodes/get?page=1&pageSize=1" 2>$null
 Check 'SESS' "Cookie-based auth works" ($c -eq 200) "code=$c"
 
 # Logout clears cookie
-$null = & curl.exe -s -b $cookieJar -c $cookieJar "$base/api/logout" 2>$null
+$null = & curl.exe -s -b $cookieJar -c $cookieJar -H "apiToken: $apiToken" "$base/api/logout" 2>$null
 $c = & curl.exe -s -o NUL -w '%{http_code}' -b $cookieJar "$base/api/nodes/get?page=1&pageSize=1" 2>$null
 Check 'SESS' "After logout, cookie rejected" ($c -eq 403) "code=$c (cookie expired)"
 

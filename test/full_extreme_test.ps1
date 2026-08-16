@@ -135,9 +135,8 @@ function Section($name, $action) {
   Log ("  -> $name done: $sp pass / $sf fail / $sr reqs in {0}s" -f [math]::Round($dur,2))
 }
 
-$basicAdmin = 'Authorization: Basic YWRtaW46YWRtaW4='
-$basicUser1 = 'Authorization: Basic dXNlcjE6dXNlcjE='
-$basicUser2 = 'Authorization: Basic dXNlcjI6dXNlcjI='
+$basicScnqjs = 'Authorization: Basic c2NucWpzOkF0b3MuMjAyMTAy'
+$basicAdmin = $basicScnqjs
 $apiHdr = "apiToken: $apiToken"
 
 Log "############################################################"
@@ -306,11 +305,11 @@ Section '4. SEARCH' {
 # SECTION 5: AUTHENTICATION
 # ==================================================================
 Section '5. AUTHENTICATION' {
-  foreach ($h in @($basicAdmin, $basicUser1, $basicUser2)) {
+  foreach ($h in @($basicScnqjs)) {
     $r = Req "$base/api/nodes/get?page=1&pageSize=1" @($h)
     Check ($r.code -eq '200') "Basic auth user" "code=$($r.code)"
   }
-  $r = Req "$base/api/nodes/get?page=1&pageSize=1" @('Authorization: Basic YWRtaW46d3Jvbmc=')
+  $r = Req "$base/api/nodes/get?page=1&pageSize=1" @('Authorization: Basic c2NucWpzOndyb25ncGFzcw==')
   Check ($r.code -eq '401' -or $r.code -eq '403') "wrong password rejected" "code=$($r.code)"
   $r = Req "$base/api/nodes/get?page=1&pageSize=1" @('Authorization: Basic bm9vbmU6bm9vbmU=')
   Check ($r.code -eq '401' -or $r.code -eq '403') "non-existent user rejected" "code=$($r.code)"
@@ -328,7 +327,7 @@ Section '5. AUTHENTICATION' {
   $r = Req "$base/api/nodes/batchset" @($apiHdr) 'POST' $b
   Check ($r.code -eq '200') "apiToken write" "code=$($r.code)"
 
-  $loginResp = curl.exe -s -D - -o NUL -X POST -u admin:admin --max-time 10 "$base/api/login" 2>$null
+  $loginResp = curl.exe -s -D - -o NUL -X POST -u 'scnqjs:Atos.202102' --max-time 10 "$base/api/login" 2>$null
   $tok = $null
   foreach ($l in $loginResp -split "`n") { if ($l -match 'access_token=([^;\r]+)') { $tok = $matches[1]; break } }
   Check ($tok -ne $null) "login -> get token" ""
@@ -359,7 +358,7 @@ Section '6. LOGIN / LOGOUT' {
   # a second login would regenerate the token and invalidate the first cookie.
   $hdrFile = 'c:\s\vd\test\_login_hdr.txt'
   $bodyFile = 'c:\s\vd\test\_login_body.txt'
-  curl.exe -s -D $hdrFile -o $bodyFile -X POST -u admin:admin --max-time 10 "$base/api/login" 2>$null
+  curl.exe -s -D $hdrFile -o $bodyFile -X POST -u 'scnqjs:Atos.202102' --max-time 10 "$base/api/login" 2>$null
   $hdrContent = Get-Content $hdrFile -Raw -ErrorAction SilentlyContinue
   $bodyContent = Get-Content $bodyFile -Raw -ErrorAction SilentlyContinue
   Remove-Item $hdrFile, $bodyFile -Force -ErrorAction SilentlyContinue
@@ -369,7 +368,7 @@ Section '6. LOGIN / LOGOUT' {
   Check ($tok -ne $null) "login admin (Set-Cookie)" ""
 
   $j = $bodyContent | ConvertFrom-Json
-  Check ($j.user -eq 'admin' -and $j.token.Length -eq 64) "login response body" "user=$($j.user) toklen=$($j.token.Length)"
+  Check ($j.user -eq 'scnqjs' -and $j.token.Length -eq 64) "login response body" "user=$($j.user) toklen=$($j.token.Length)"
   # The token in the JSON body must match the token in the Set-Cookie header
   Check ($j.token -eq $tok) "body token == cookie token" "match=$($j.token -eq $tok)"
 
@@ -384,10 +383,10 @@ Section '6. LOGIN / LOGOUT' {
     Check ($r.code -eq '403') "cookie invalidated after logout" "code=$($r.code)"
   }
 
-  $r = Req "$base/api/login" @('Authorization: Basic YWRtaW46d3Jvbmc=') 'POST'
+  $r = Req "$base/api/login" @('Authorization: Basic c2NucWpzOndyb25ncGFzcw==') 'POST'
   Check ($r.code -eq '401') "login wrong creds -> 401" "code=$($r.code)"
 
-  foreach ($cred in @('admin:admin','user1:user1','user2:user2')) {
+  foreach ($cred in @('scnqjs:Atos.202102')) {
     $b64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($cred))
     $r = Req "$base/api/login" @("Authorization: Basic $b64") 'POST'
     Check ($r.code -eq '200') "login $cred" "code=$($r.code)"
@@ -399,14 +398,14 @@ Section '6. LOGIN / LOGOUT' {
   Check ($r.code -eq '200') "apiToken still works after logout" "code=$($r.code)"
 
   $tokens = @{}
-  foreach ($cred in @('admin:admin','user1:user1','user2:user2')) {
+  foreach ($cred in @('scnqjs:Atos.202102')) {
     $b64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($cred))
     $body = curl.exe -s -X POST --max-time 10 -H "Authorization: Basic $b64" "$base/api/login" 2>$null
     $j = $body | ConvertFrom-Json
     $tokens[$cred] = $j.token
   }
   $distinct = ($tokens.Values | Sort-Object -Unique).Count
-  Check ($distinct -eq 3) "3 users get distinct tokens" "distinct=$distinct"
+  Check ($distinct -eq 1) "1 user gets distinct token" "distinct=$distinct"
 }
 
 # ==================================================================

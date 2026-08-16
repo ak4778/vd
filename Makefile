@@ -13,6 +13,9 @@ CFLAGS = -W -Wall -Wextra -g3 -ggdb -O3 -fno-omit-frame-pointer -I. -DMG_TLS=MG_
 # (only affects RSA certs; EC certs bypass this code path entirely)
 CFLAGS += -DMG_TLS_RSA_USE_CRT=0
 
+# Custom log format: human-readable timestamp instead of hex milliseconds
+CFLAGS += -DMG_ENABLE_CUSTOM_LOG=1
+
 # Database mode: SQLite (default) or CSV
 # To use SQLite (default): make
 # To use CSV: make CSV_MODE=1

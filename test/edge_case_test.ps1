@@ -2,7 +2,8 @@
 # Covers: Auth, Pagination, Filter, Search, Save, Concurrency, HTTP Method, URL, Data Integrity
 $ErrorActionPreference = 'Continue'
 $base = 'http://localhost:8000'
-$auth = '-u','admin:admin'
+$apiToken = 'm4h38NPRPB6CCZg6ZtQncinBcj5X4351Jd6PAOqd1v4wze4MNopW1CyC10Y5Ur6x'
+$auth = '-H',"apiToken: $apiToken"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $pass = 0; $fail = 0; $categories = @{}
 
@@ -68,20 +69,20 @@ $totalNodes = $firstPage.data.total
 # ============================================================
 Log "----- 1. AUTH BOUNDARY -----"
 
-# Correct credentials
-$c = & curl.exe -s -o NUL -w '%{http_code}' -u 'admin:admin' "$base/api/login" 2>$null
+# Correct credentials (apiToken)
+$c = & curl.exe -s -o NUL -w '%{http_code}' -H "apiToken: $apiToken" "$base/api/login" 2>$null
 Check 'AUTH' "Login correct" ($c -eq 200) "code=$c"
 
-# Wrong password
-$c = & curl.exe -s -o NUL -w '%{http_code}' -u 'admin:wrong' "$base/api/login" 2>$null
+# Wrong token
+$c = & curl.exe -s -o NUL -w '%{http_code}' -H "apiToken: wrongtoken" "$base/api/login" 2>$null
 Check 'AUTH' "Login wrong pass" ($c -eq 401) "code=$c"
 
-# Empty password
-$c = & curl.exe -s -o NUL -w '%{http_code}' -u 'admin:' "$base/api/login" 2>$null
+# No auth header (empty credentials)
+$c = & curl.exe -s -o NUL -w '%{http_code}' "$base/api/login" 2>$null
 Check 'AUTH' "Login empty pass" ($c -eq 401) "code=$c"
 
-# Non-existent user
-$c = & curl.exe -s -o NUL -w '%{http_code}' -u 'nobody:pass' "$base/api/login" 2>$null
+# Non-existent token
+$c = & curl.exe -s -o NUL -w '%{http_code}' -H "apiToken: nonexistent123" "$base/api/login" 2>$null
 Check 'AUTH' "Login non-existent user" ($c -eq 401) "code=$c"
 
 # No credentials at all
@@ -362,7 +363,7 @@ Check 'SAVE' "Long customOperation (500 chars)" ($copLen -le 255) "stored_len=$c
 $xssFile = 'c:\s\vd\test\_tmp_xss_payload.json'
 $xssBody = "{`"updates`":[{`"id`":`"$testId`",`"customOperation`":`"<script>alert(1)</script>`"}]}"
 [System.IO.File]::WriteAllText($xssFile, $xssBody, $utf8NoBom)
-$xssResp = & curl.exe -s -X POST "$base/api/nodes/batchset" -H 'Content-Type: application/json' --data-binary "@$xssFile" -u 'admin:admin' 2>$null
+$xssResp = & curl.exe -s -X POST "$base/api/nodes/batchset" -H 'Content-Type: application/json' -H "apiToken: $apiToken" --data-binary "@$xssFile" 2>$null
 $r = GetPage 1 200 | ConvertFrom-Json
 $node = $r.data.nodes | Where-Object { $_.id -eq $testId }
 $xssActual = if ($node) { $node.customOperation } else { '(node not found)' }
@@ -444,15 +445,15 @@ Check 'CONC' "10 concurrent writes to same node" ($ok -eq 10) "ok=$ok/10 (no dea
 Log "----- 7. HTTP METHOD BOUNDARY -----"
 
 # PUT to nodes/get
-$c = & curl.exe -s -o NUL -w '%{http_code}' -u 'admin:admin' -X PUT "$base/api/nodes/get?page=1&pageSize=1" 2>$null
+$c = & curl.exe -s -o NUL -w '%{http_code}' -H "apiToken: $apiToken" -X PUT "$base/api/nodes/get?page=1&pageSize=1" 2>$null
 Check 'HTTP' "PUT /api/nodes/get" ($true) "code=$c (no crash)"
 
 # DELETE to nodes/get
-$c = & curl.exe -s -o NUL -w '%{http_code}' -u 'admin:admin' -X DELETE "$base/api/nodes/get?page=1&pageSize=1" 2>$null
+$c = & curl.exe -s -o NUL -w '%{http_code}' -H "apiToken: $apiToken" -X DELETE "$base/api/nodes/get?page=1&pageSize=1" 2>$null
 Check 'HTTP' "DELETE /api/nodes/get" ($true) "code=$c (no crash)"
 
 # PATCH to nodes/get
-$c = & curl.exe -s -o NUL -w '%{http_code}' -u 'admin:admin' -X PATCH "$base/api/nodes/get?page=1&pageSize=1" 2>$null
+$c = & curl.exe -s -o NUL -w '%{http_code}' -H "apiToken: $apiToken" -X PATCH "$base/api/nodes/get?page=1&pageSize=1" 2>$null
 Check 'HTTP' "PATCH /api/nodes/get" ($true) "code=$c (no crash)"
 
 # POST to nodes/get (should still work - mg_match checks URI only)

@@ -1,9 +1,51 @@
 // Copyright (c) 2020-2023 Cesanta Software Limited
 // All rights reserved
 
+// Enable custom log format before including mongoose.h
+#define MG_ENABLE_CUSTOM_LOG 1
+
 #include "mongoose.h"
 #include "net.h"
 #include "data_source.h"
+
+// Custom log: human-readable timestamp instead of hex milliseconds
+// Format: "2026-08-15 08:49:19 2I main.c:80:main  Using SQLite..."
+// Optionally also writes to a log file (configured via logToFile/logFile in data_config.json)
+
+static FILE *s_log_fp = NULL;  // Log file handle, NULL if logToFile is false
+
+void mg_log_prefix(int level, const char *file, int line, const char *fname) {
+  const char *p = strrchr(file, '/');
+  if (p == NULL) p = strrchr(file, '\\');
+  if (p == NULL) p = file; else p++;
+
+  time_t now = time(NULL);
+  struct tm *t = localtime(&now);
+  char ts[20];
+  strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", t);
+
+  char lc = (level >= 0 && level <= 4) ? "NEIDV"[level] : '?';
+  fprintf(stderr, "%-19s %d%c %s:%d:%s  ", ts, level, lc, p, line, fname);
+  if (s_log_fp != NULL) {
+    fprintf(s_log_fp, "%-19s %d%c %s:%d:%s  ", ts, level, lc, p, line, fname);
+  }
+}
+
+void mg_log(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vfprintf(stderr, fmt, ap);
+  va_end(ap);
+  fputc('\n', stderr);
+
+  if (s_log_fp != NULL) {
+    va_start(ap, fmt);
+    vfprintf(s_log_fp, fmt, ap);
+    va_end(ap);
+    fputc('\n', s_log_fp);
+    fflush(s_log_fp);  // Flush after each complete log line
+  }
+}
 
 static int s_sig_num;
 static void signal_handler(int sig_num) {
@@ -57,7 +99,48 @@ int main(void) {
   signal(SIGINT, signal_handler);
   signal(SIGTERM, signal_handler);
 
-  mg_log_set(MG_LL_DEBUG);  // Set debug log level
+  // Read log level from config (default: info)
+  {
+    const char *ll = get_path_from_config("$.logLevel", "info");
+    int level = MG_LL_INFO;  // default
+    if (strcmp(ll, "none") == 0) level = MG_LL_NONE;
+    else if (strcmp(ll, "error") == 0) level = MG_LL_ERROR;
+    else if (strcmp(ll, "info") == 0) level = MG_LL_INFO;
+    else if (strcmp(ll, "debug") == 0) level = MG_LL_DEBUG;
+    else if (strcmp(ll, "verbose") == 0) level = MG_LL_VERBOSE;
+    mg_log_set(level);
+    // Note: get_path_from_config returns static buffer, no free needed
+  }
+
+  // Open log file if logToFile is enabled in config
+  {
+    bool log_to_file = false;
+    {
+      FILE *fp = fopen("data_config.json", "rb");
+      if (fp != NULL) {
+        fseek(fp, 0, SEEK_END);
+        long sz = ftell(fp);
+        fseek(fp, 0, SEEK_SET);
+        char *buf = (char *) malloc((size_t) sz + 1);
+        if (buf != NULL) {
+          fread(buf, 1, (size_t) sz, fp);
+          buf[sz] = '\0';
+          mg_json_get_bool(mg_str(buf), "$.logToFile", &log_to_file);
+          free(buf);
+        }
+        fclose(fp);
+      }
+    }
+    if (log_to_file) {
+      const char *log_file = get_path_from_config("$.logFile", "server.log");
+      s_log_fp = fopen(log_file, "a");
+      if (s_log_fp != NULL) {
+        setvbuf(s_log_fp, NULL, _IOLBF, 0);  // Line-buffered for timely flush
+      } else {
+        fprintf(stderr, "Warning: Cannot open log file: %s\n", log_file);
+      }
+    }
+  }
 
 #if !defined(CSV_MODE)
   // Initialize SQLite database with path from config
@@ -88,6 +171,7 @@ int main(void) {
   mg_mgr_free(&mgr);
   ds_cleanup();
   MG_INFO(("Exiting on signal %d", s_sig_num));
+  if (s_log_fp != NULL) fclose(s_log_fp);
 
   return 0;
 }

@@ -20,7 +20,7 @@
 #ifndef MONGOOSE_H
 #define MONGOOSE_H
 
-#define MG_VERSION "7.22"
+#define MG_VERSION "7.23"
 
 #ifdef __cplusplus
 extern "C" {
@@ -1671,8 +1671,8 @@ typedef size_t (*mg_pm_t)(mg_pfn_t fn, void *arg, va_list *);
 //   - mg_print_base64 - prints a buffer as a base64-encoded string
 //   - mg_print_esc - prints a JSON-escaped string
 //   - mg_print_hex - prints a buffer as a hex string
-//   - mg_print_ip - prints an IP address in a struct mg_str
-//   - mg_print_ip_port - prints IP address and port in a struct mg_str
+//   - mg_print_ip - prints an IP address in a struct mg_addr
+//   - mg_print_ip_port - prints IP address and port in a struct mg_addr
 //   - mg_print_ip4 - prints an IPv4 address
 //   - mg_print_ip6 - prints an IPv6 address
 //   - mg_print_mac - prints a MAC address
@@ -1730,15 +1730,15 @@ char *mg_mprintf(const char *fmt, ...);
 size_t mg_queue_printf(struct mg_queue *, const char *fmt, ...);
 
 // Built-in %M/%m printer functions. Each reads its argument(s) from ap.
-size_t mg_print_base64(mg_pfn_t, void *arg, va_list *ap);   // expects: const void *buf, size_t len
+size_t mg_print_base64(mg_pfn_t, void *arg, va_list *ap);   // expects: int len, uint8_t *buf
 size_t mg_print_esc(mg_pfn_t, void *arg, va_list *ap);      // expects: int len, const char *str -- use MG_ESC()
-size_t mg_print_hex(mg_pfn_t, void *arg, va_list *ap);      // expects: const void *buf, size_t len
+size_t mg_print_hex(mg_pfn_t, void *arg, va_list *ap);      // expects: int len, uint8_t *buf
 size_t mg_print_ip(mg_pfn_t, void *arg, va_list *ap);       // expects: const struct mg_addr *
 size_t mg_print_ip_port(mg_pfn_t, void *arg, va_list *ap);  // expects: const struct mg_addr *
 size_t mg_print_ip4(mg_pfn_t, void *arg, va_list *ap);      // expects: uint32_t *ipv4
 size_t mg_print_ip6(mg_pfn_t, void *arg, va_list *ap);      // expects: uint8_t[16] ipv6
 size_t mg_print_mac(mg_pfn_t, void *arg, va_list *ap);      // expects: uint8_t[6] mac
-size_t mg_print_ieee64(mg_pfn_t, void *arg, va_list *ap);   // expects: uint64_t
+size_t mg_print_ieee64(mg_pfn_t, void *arg, va_list *ap);   // expects: uint8_t[8] ieee64
 size_t mg_print_l2addr(mg_pfn_t, void *arg, va_list *ap);   // expects: uint8_t l2, uint8_t[n] n-byte l2-dependent address
 size_t mg_print_html_esc(mg_pfn_t, void *arg, va_list *ap); // expects: int len, const char *str -- use MG_ESC()
 
@@ -5111,6 +5111,7 @@ extern struct mg_tcpip_driver mg_tcpip_driver_cyw;
 extern struct mg_tcpip_driver mg_tcpip_driver_nxp_wifi;
 extern struct mg_tcpip_driver mg_tcpip_driver_st67w6;
 extern struct mg_tcpip_driver mg_tcpip_driver_atcmd;
+extern struct mg_tcpip_driver mg_tcpip_driver_netc;
 
 // SPI bus abstraction for SPI-attached network chips (e.g. W5500).
 // Populate and assign to the driver's driver_data field.
@@ -5450,6 +5451,55 @@ struct mg_tcpip_driver_imxrt_data {
     MG_SET_MAC_ADDRESS(mif_.mac);                                \
     mg_tcpip_init(mgr, &mif_);                                   \
     MG_INFO(("Driver: imxrt, MAC: %M", mg_print_mac, mif_.mac)); \
+  } while (0)
+
+#endif
+
+
+#if defined(MG_ENABLE_TCPIP) && MG_ENABLE_TCPIP && \
+    defined(MG_ENABLE_DRIVER_NETC) && MG_ENABLE_DRIVER_NETC
+
+struct mg_tcpip_driver_netc_data {
+  int mdc_cr;
+  uint8_t phy_addr;
+
+  // Selects the physical Ethernet link (ETH0 through ETH3)
+  // Its switch port is bridged to pseudo-port 4,
+  // which connects internally to ENETC1
+  // IMXRT1180 RM 53.4.1.1 NETC Block diagram
+  uint8_t link;
+};
+
+#ifndef MG_TCPIP_PHY_ADDR
+#define MG_TCPIP_PHY_ADDR 5
+#endif
+
+#ifndef MG_DRIVER_MDC_CR
+#define MG_DRIVER_MDC_CR 48
+#endif
+
+#ifndef MG_TCPIP_NETC_LINK
+#define MG_TCPIP_NETC_LINK 0
+#endif
+
+struct mg_tcpip_driver;
+extern struct mg_tcpip_driver mg_tcpip_driver_netc;
+
+#define MG_TCPIP_DRIVER_INIT(mgr)                              \
+  do {                                                         \
+    static struct mg_tcpip_driver_netc_data driver_data_;      \
+    static struct mg_tcpip_if mif_;                            \
+    driver_data_.mdc_cr = MG_DRIVER_MDC_CR;                    \
+    driver_data_.phy_addr = MG_TCPIP_PHY_ADDR;                 \
+    driver_data_.link = MG_TCPIP_NETC_LINK;                    \
+    mif_.ip = MG_TCPIP_IP;                                     \
+    mif_.mask = MG_TCPIP_MASK;                                 \
+    mif_.gw = MG_TCPIP_GW;                                     \
+    mif_.driver = &mg_tcpip_driver_netc;                       \
+    mif_.driver_data = &driver_data_;                          \
+    MG_SET_MAC_ADDRESS(mif_.mac);                              \
+    mg_tcpip_init(mgr, &mif_);                                 \
+    MG_INFO(("Driver: netc, MAC: %M", mg_print_mac, mif_.mac)); \
   } while (0)
 
 #endif
