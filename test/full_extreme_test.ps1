@@ -2,8 +2,8 @@
 # Covers: data loading, saving, filtering, search, auth, login/logout, concurrency, errors
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-$base  = 'http://127.0.0.1:8000'
-$sbase = 'https://127.0.0.1:8443'
+$base  = 'http://127.0.0.1:7777'
+$sbase = 'https://127.0.0.1:7443'
 $apiToken = 'm4h38NPRPB6CCZg6ZtQncinBcj5X4351Jd6PAOqd1v4wze4MNopW1CyC10Y5Ur6x'
 $logFile = 'c:\s\vd\test\full_extreme_test.log'
 if (Test-Path $logFile) { Remove-Item $logFile -Force }
@@ -376,7 +376,7 @@ Section '6. LOGIN / LOGOUT' {
     $r = Req "$base/api/nodes/get?page=1&pageSize=1" @("Cookie: access_token=$tok")
     Check ($r.code -eq '200') "cookie works after login" "code=$($r.code)"
 
-    $r = Req "$base/api/logout" @("Cookie: access_token=$tok") 'GET'
+    $r = Req "$base/api/logout" @("Cookie: access_token=$tok") 'POST'
     Check ($r.code -eq '200') "logout" "code=$($r.code)"
 
     $r = Req "$base/api/nodes/get?page=1&pageSize=1" @("Cookie: access_token=$tok")
@@ -392,7 +392,7 @@ Section '6. LOGIN / LOGOUT' {
     Check ($r.code -eq '200') "login $cred" "code=$($r.code)"
   }
 
-  $r = Req "$base/api/logout" @($apiHdr) 'GET'
+  $r = Req "$base/api/logout" @($apiHdr) 'POST'
   Check ($r.code -eq '200') "logout via apiToken" "code=$($r.code)"
   $r = Req "$base/api/nodes/get?page=1&pageSize=1" @($apiHdr)
   Check ($r.code -eq '200') "apiToken still works after logout" "code=$($r.code)"
@@ -524,7 +524,7 @@ Section '12. HTTPS / TLS' {
   # handshake, so HTTPS tests via curl always return code=000. Use Python's
   # ssl module (OpenSSL) to exercise the listener with a real TLS 1.3 client.
   # See test/https_tls13_test.py for the per-check logic.
-  $pyOut = & python "c:\s\vd\test\https_tls13_test.py" --token $apiToken --host 127.0.0.1 --port 8443 2>&1
+  $pyOut = & python "c:\s\vd\test\https_tls13_test.py" --token $apiToken --host 127.0.0.1 --port 7443 2>&1
   foreach ($line in $pyOut) {
     Log "  $line"
     if ($line -match 'HTTPS_RESULT\|([^|]+)\|(\d+)\|(PASS|FAIL)\|(.*)') {

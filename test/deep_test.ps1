@@ -2,7 +2,7 @@
 # Focus: extreme concurrency, sustained load, Unicode/CJK search, memory stability,
 #        known-issue verification, data consistency under load, recovery
 $ErrorActionPreference = 'Continue'
-$base = 'http://localhost:8000'
+$base = 'http://localhost:7777'
 $apiToken = 'm4h38NPRPB6CCZg6ZtQncinBcj5X4351Jd6PAOqd1v4wze4MNopW1CyC10Y5Ur6x'
 $auth = '-H',"apiToken: $apiToken"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -358,15 +358,19 @@ Log "----- 10. SESSION / COOKIE HANDLING -----"
 # because only user-based login sets a session cookie in the response.
 # apiToken auth returns global_token_user which has no session cookie.
 $cookieJar = 'c:\s\vd\test\_tmp_deep_cookies.txt'
-$loginCode = & curl.exe -s -o NUL -w '%{http_code}' -c $cookieJar -u 'scnqjs:Atos.202102' "$base/api/login" 2>$null
+$loginBody = '{"user":"scnqjs","password":"Atos.202102"}'
+$loginFile = 'c:\s\vd\test\_tmp_deep_login.json'
+[System.IO.File]::WriteAllText($loginFile, $loginBody, (New-Object System.Text.UTF8Encoding $false))
+$loginCode = & curl.exe -s -o NUL -w '%{http_code}' -c $cookieJar -X POST -H 'Content-Type: application/json' --data-binary "@$loginFile" "$base/api/login" 2>$null
+Remove-Item $loginFile -Force -ErrorAction SilentlyContinue
 Check 'SESS' "Login sets cookie" ($loginCode -eq 200) "code=$loginCode"
 
 # Use cookie (no -u, no apiToken header)
 $c = & curl.exe -s -o NUL -w '%{http_code}' -b $cookieJar "$base/api/nodes/get?page=1&pageSize=1" 2>$null
 Check 'SESS' "Cookie-based auth works" ($c -eq 200) "code=$c"
 
-# Logout clears cookie
-$null = & curl.exe -s -b $cookieJar -c $cookieJar -H "apiToken: $apiToken" "$base/api/logout" 2>$null
+# Logout clears cookie (POST-only since 2026-08-16)
+$null = & curl.exe -s -b $cookieJar -c $cookieJar -X POST -H "apiToken: $apiToken" "$base/api/logout" 2>$null
 $c = & curl.exe -s -o NUL -w '%{http_code}' -b $cookieJar "$base/api/nodes/get?page=1&pageSize=1" 2>$null
 Check 'SESS' "After logout, cookie rejected" ($c -eq 403) "code=$c (cookie expired)"
 

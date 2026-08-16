@@ -111,9 +111,9 @@ export function Login({loginFn, logoIcon, title, tipText}) {
   const [user, setUser] = useState('');
   const [pass, setPass] = useState('');
   const onsubmit = function(ev) {
-    const authhdr = 'Basic ' + btoa(user + ':' + pass);
-    const headers = {Authorization: authhdr};
-    return fetch('api/login', {headers, credentials: 'include'}).then(loginFn).finally(r => setPass(''));
+    const body = JSON.stringify({user, password: pass});
+    const headers = {'Content-Type': 'application/json'};
+    return fetch('api/login', {method: 'POST', headers, body, credentials: 'include'}).then(loginFn).finally(r => setPass(''));
   };
   return html`
 <div class="h-full flex items-center justify-center bg-slate-200">

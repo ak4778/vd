@@ -1085,7 +1085,22 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       // /api/mode/get (returns only the backend mode name + availability, needed
       // by the frontend BEFORE login to render the mode badge correctly).
     } else if (mg_match(hm->uri, mg_str("/api/login"), NULL)) {
-      handle_login(c, hm, u);
+      if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+        mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");
+      } else {
+        handle_login(c, hm, u);
+      }
+    } else if (mg_match(hm->uri, mg_str("/api/logout"), NULL)) {
+      // /api/logout is a PUBLIC endpoint (like /api/login): it must clear the
+      // cookie even when no auth is presented, and POST-only enforcement must
+      // run BEFORE the /api/# && u==NULL 403 guard below — otherwise GET
+      // /api/logout with no creds would return 403 instead of 405, hiding the
+      // method-not-allowed signal that protects against CSRF via <img> tags.
+      if (mg_strcmp(hm->method, mg_str("POST")) != 0) {
+        mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");
+      } else {
+        handle_logout(c, u);
+      }
     } else if (mg_match(hm->uri, mg_str("/api/mode/get"), NULL)) {
       if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
         mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");
@@ -1115,8 +1130,6 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       } else {
         handle_nodes_batchset(c, hm->body);
       }
-    } else if (mg_match(hm->uri, mg_str("/api/logout"), NULL)) {
-      handle_logout(c, u);
     } else {
       struct mg_http_serve_opts opts;
       memset(&opts, 0, sizeof(opts));

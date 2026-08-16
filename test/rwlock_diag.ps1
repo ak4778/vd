@@ -23,7 +23,7 @@ if (-not (SvcAlive $svc.Id)) { "FATAL: server died at startup"; exit 1 }
 "--- Phase 1: 5 sequential authenticated /api/nodes/get ---"
 $seqCodes = @()
 for ($i=1; $i -le 5; $i++) {
-  $c = curl.exe -s -o NUL -w "%{http_code}" -H "apiToken: $token" "http://127.0.0.1:8000/api/nodes/get?page=1&pageSize=10" 2>$null
+  $c = curl.exe -s -o NUL -w "%{http_code}" -H "apiToken: $token" "http://127.0.0.1:7777/api/nodes/get?page=1&pageSize=10" 2>$null
   $seqCodes += $c
 }
 "codes: $($seqCodes -join ' ')"
@@ -32,7 +32,7 @@ for ($i=1; $i -le 5; $i++) {
 # Phase 2: 30 concurrent authenticated requests
 "--- Phase 2: 30 concurrent authenticated /api/nodes/get ---"
 $jobs = 1..30 | ForEach-Object {
-  Start-Job -ScriptBlock { param($t) curl.exe -s -o NUL -w "%{http_code}" -H "apiToken: $t" "http://127.0.0.1:8000/api/nodes/get?page=1&pageSize=10" 2>$null } -ArgumentList $token
+  Start-Job -ScriptBlock { param($t) curl.exe -s -o NUL -w "%{http_code}" -H "apiToken: $t" "http://127.0.0.1:7777/api/nodes/get?page=1&pageSize=10" 2>$null } -ArgumentList $token
 }
 $jobs | Wait-Job -Timeout 20 | Out-Null
 $codes = $jobs | Receive-Job
@@ -44,7 +44,7 @@ $ok = ($codes | Where-Object { $_ -eq '200' }).Count
 # Phase 3: 100 concurrent
 "--- Phase 3: 100 concurrent ---"
 $jobs = 1..100 | ForEach-Object {
-  Start-Job -ScriptBlock { param($t) curl.exe -s -o NUL -w "%{http_code}" -H "apiToken: $t" "http://127.0.0.1:8000/api/nodes/get?page=1&pageSize=10" 2>$null } -ArgumentList $token
+  Start-Job -ScriptBlock { param($t) curl.exe -s -o NUL -w "%{http_code}" -H "apiToken: $t" "http://127.0.0.1:7777/api/nodes/get?page=1&pageSize=10" 2>$null } -ArgumentList $token
 }
 $jobs | Wait-Job -Timeout 30 | Out-Null
 $codes = $jobs | Receive-Job

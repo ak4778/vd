@@ -1,7 +1,7 @@
 # Security & Edge Case Test v3 — targets UNTESTED areas
 # Focus: path traversal, auth edge cases, static files, URL encoding, protocol quirks
 $ErrorActionPreference = 'Continue'
-$base = 'http://localhost:8000'
+$base = 'http://localhost:7777'
 $apiToken = 'm4h38NPRPB6CCZg6ZtQncinBcj5X4351Jd6PAOqd1v4wze4MNopW1CyC10Y5Ur6x'
 $auth = '-H',"apiToken: $apiToken"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -88,26 +88,33 @@ Check 'AUTH' "No auth header -> 403" ($code -eq '403') "code=$code"
 $code = & curl.exe -s -o NUL -w '%{http_code}' -H 'apiToken: ' "$base/api/nodes/get?page=1&pageSize=1" 2>$null
 Check 'AUTH' "Empty apiToken -> 403" ($code -eq '403') "code=$code"
 
-# B6. Login with GET method (should it work? Currently no method enforcement)
+# B6. Login with GET method — POST-only enforcement since 2026-08-16
 $code = & curl.exe -s -o NUL -w '%{http_code}' -X GET -u 'scnqjs:Atos.202102' "$base/api/login" 2>$null
-Check 'AUTH' "GET /api/login" ($code -eq '200') "code=$code (login has no method enforcement — informational)"
+Check 'AUTH' "GET /api/login rejected (POST-only)" ($code -eq '405') "code=$code (login now enforces POST)"
 
-# B7. Logout with GET method (CSRF risk — no method enforcement)
+# B7. Logout with GET method — POST-only enforcement blocks CSRF
 $cookieJar = 'c:\s\vd\test\_tmp_sec_cookies.txt'
-$null = & curl.exe -s -c $cookieJar -u 'scnqjs:Atos.202102' "$base/api/login" 2>$null
+$loginBody = '{"user":"scnqjs","password":"Atos.202102"}'
+$loginFile = 'c:\s\vd\test\_tmp_sec_login.json'
+[System.IO.File]::WriteAllText($loginFile, $loginBody, (New-Object System.Text.UTF8Encoding $false))
+$null = & curl.exe -s -c $cookieJar -X POST -H 'Content-Type: application/json' --data-binary "@$loginFile" "$base/api/login" 2>$null
+Remove-Item $loginFile -Force -ErrorAction SilentlyContinue
 $code = & curl.exe -s -o NUL -w '%{http_code}' -b $cookieJar "$base/api/logout" 2>$null
-Check 'AUTH' "GET /api/logout (CSRF risk)" ($code -eq '200') "code=$code (logout has no method enforcement — potential CSRF)"
+Check 'AUTH' "GET /api/logout rejected (CSRF protection)" ($code -eq '405') "code=$code (logout now enforces POST — CSRF blocked)"
 
-# B8. After GET logout, cookie should be expired
+# B8. After GET logout rejected, cookie should still be valid
 $code = & curl.exe -s -o NUL -w '%{http_code}' -b $cookieJar "$base/api/nodes/get?page=1&pageSize=1" 2>$null
-Check 'AUTH' "Cookie expired after GET logout" ($code -eq '403') "code=$code"
+Check 'AUTH' "Cookie still valid after GET logout rejected" ($code -eq '200') "code=$code"
 
 # B9. Concurrent logins (same user gets new token each time)
 $jar1 = 'c:\s\vd\test\_tmp_sec_jar1.txt'
 $jar2 = 'c:\s\vd\test\_tmp_sec_jar2.txt'
-$null = & curl.exe -s -c $jar1 -u 'scnqjs:Atos.202102' "$base/api/login" 2>$null
+$loginFile = 'c:\s\vd\test\_tmp_sec_login.json'
+[System.IO.File]::WriteAllText($loginFile, $loginBody, (New-Object System.Text.UTF8Encoding $false))
+$null = & curl.exe -s -c $jar1 -X POST -H 'Content-Type: application/json' --data-binary "@$loginFile" "$base/api/login" 2>$null
 Start-Sleep -Milliseconds 100
-$null = & curl.exe -s -c $jar2 -u 'scnqjs:Atos.202102' "$base/api/login" 2>$null
+$null = & curl.exe -s -c $jar2 -X POST -H 'Content-Type: application/json' --data-binary "@$loginFile" "$base/api/login" 2>$null
+Remove-Item $loginFile -Force -ErrorAction SilentlyContinue
 $tok1 = (Select-String 'access_token' $jar1 -ErrorAction SilentlyContinue) -replace '.*access_token\s+(\S+).*','$1'
 $tok2 = (Select-String 'access_token' $jar2 -ErrorAction SilentlyContinue) -replace '.*access_token\s+(\S+).*','$1'
 Check 'AUTH' "Concurrent logins get different tokens" ($tok1 -ne $tok2) "tok1=[$tok1] tok2=[$tok2]"
@@ -289,7 +296,10 @@ $users = @('scnqjs')
 $jars = @{}
 foreach ($u in $users) {
     $j = "c:\s\vd\test\_tmp_sec_${u}.txt"
-    $null = & curl.exe -s -c $j -u 'scnqjs:Atos.202102' "$base/api/login" 2>$null
+    $loginFile = 'c:\s\vd\test\_tmp_sec_login.json'
+    [System.IO.File]::WriteAllText($loginFile, '{"user":"scnqjs","password":"Atos.202102"}', (New-Object System.Text.UTF8Encoding $false))
+    $null = & curl.exe -s -c $j -X POST -H 'Content-Type: application/json' --data-binary "@$loginFile" "$base/api/login" 2>$null
+    Remove-Item $loginFile -Force -ErrorAction SilentlyContinue
     $jars[$u] = $j
 }
 $allOk = $true
@@ -305,8 +315,11 @@ $f = 'c:\s\vd\test\_tmp_sec_u1write.json'
 $resp = & curl.exe -s -X POST "$base/api/nodes/batchset" -H 'Content-Type: application/json' --data-binary "@$f" -b $jars['scnqjs'] 2>$null
 Check 'SESS' "scnqjs can write (cookie auth)" ($resp -match '"true"') "resp=$resp"
 
-# G3. Token in Authorization Bearer header (should NOT work — only Basic Auth)
-$loginResp = & curl.exe -s -u 'scnqjs:Atos.202102' "$base/api/login" 2>$null
+# G3. Token in Authorization Bearer header (should NOT work — only Basic Auth + Cookie)
+$loginFile = 'c:\s\vd\test\_tmp_sec_login.json'
+[System.IO.File]::WriteAllText($loginFile, '{"user":"scnqjs","password":"Atos.202102"}', (New-Object System.Text.UTF8Encoding $false))
+$loginResp = & curl.exe -s -X POST -H 'Content-Type: application/json' --data-binary "@$loginFile" "$base/api/login" 2>$null
+Remove-Item $loginFile -Force -ErrorAction SilentlyContinue
 # Extract token from cookie — login returns {"user":"scnqjs"}, token is in Set-Cookie
 # Let's try using the raw password as bearer token
 $code = & curl.exe -s -o NUL -w '%{http_code}' -H 'Authorization: Bearer scnqjs' "$base/api/nodes/get?page=1&pageSize=1" 2>$null

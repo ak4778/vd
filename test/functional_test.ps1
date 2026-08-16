@@ -3,7 +3,7 @@
 # No concurrency / stress — verifies correct behavior under normal single-request use.
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-$base     = 'http://127.0.0.1:8000'
+$base     = 'http://127.0.0.1:7777'
 $apiToken = 'm4h38NPRPB6CCZg6ZtQncinBcj5X4351Jd6PAOqd1v4wze4MNopW1CyC10Y5Ur6x'
 $apiHdr   = "apiToken: $apiToken"
 $logFile  = 'c:\s\vd\test\functional_test.log'
@@ -214,12 +214,19 @@ Section '5. AUTHENTICATION' {
 # 6. LOGIN / LOGOUT (session lifecycle)
 # ==================================================================
 Section '6. LOGIN / LOGOUT' {
-  $resp = & curl.exe -s -D - -o NUL --max-time 15 -X POST -u admin:admin "$base/api/login" 2>$null
+  # Use POST + JSON body (login is POST-only since 2026-08-16).
+  # User "admin" no longer exists in data_config.json; use the configured
+  # user "scnqjs" with its actual password.
+  $loginBody = '{"user":"scnqjs","password":"Atos.202102"}'
+  $loginFile = 'c:\s\vd\test\_tmp_func_login.json'
+  [System.IO.File]::WriteAllText($loginFile, $loginBody, (New-Object System.Text.UTF8Encoding $false))
+  $resp = & curl.exe -s -D - -o NUL --max-time 15 -X POST -H 'Content-Type: application/json' --data-binary "@$loginFile" "$base/api/login" 2>$null
+  Remove-Item $loginFile -Force -ErrorAction SilentlyContinue
   $tok = $null
   foreach ($l in $resp -split "`n") {
     if ($l -match 'access_token=([^;\r]+)') { $tok = $matches[1]; break }
   }
-  Check ($tok -ne $null) "login Basic Auth returns token" ""
+  Check ($tok -ne $null) "login POST JSON returns token" ""
 
   if ($tok) {
     $c = Req "$base/api/nodes/get?page=1&pageSize=1&access_token=$tok"

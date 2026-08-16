@@ -58,7 +58,7 @@ def extract_token(set_cookie):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--host', default='127.0.0.1')
-    ap.add_argument('--port', type=int, default=8443)
+    ap.add_argument('--port', type=int, default=7443)
     ap.add_argument('--token', required=True,
                     help='apiToken value from data_config.json')
     ap.add_argument('--user', default='scnqjs', help='login username')

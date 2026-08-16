@@ -720,13 +720,13 @@ const App = function({}) {
   const [dbMode, setDbMode] = useState('');
   const [dbAvailable, setDbAvailable] = useState(true);
 
-  const logout = () => fetchWithTimeout('api/logout', { credentials: 'include' }).then(r => setUser('')).catch(() => setUser(''));
+  const logout = () => fetchWithTimeout('api/logout', { method: 'POST', credentials: 'include' }).then(r => setUser('')).catch(() => setUser(''));
   const login = r => !r.ok ? setLoading(false) && setUser(null) : r.json()
       .then(r => setUser(r.user))
       .finally(r => setLoading(false));
 
   useEffect(() => {
-    fetchWithTimeout('api/login', { credentials: 'include' }).then(login).catch(() => { setLoading(false); setUser(null); });
+    fetchWithTimeout('api/login', { method: 'POST', credentials: 'include' }).then(login).catch(() => { setLoading(false); setUser(null); });
     fetchWithTimeout('api/mode/get')
       .then(r => r.json())
       .then(r => {

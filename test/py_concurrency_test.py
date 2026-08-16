@@ -4,7 +4,7 @@ Tests both pure reads and mixed read+write workloads."""
 import urllib.request, json, time, sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-BASE = 'http://127.0.0.1:8000'
+BASE = 'http://127.0.0.1:7777'
 API_TOKEN = 'm4h38NPRPB6CCZg6ZtQncinBcj5X4351Jd6PAOqd1v4wze4MNopW1CyC10Y5Ur6x'
 
 def fetch_read(i):

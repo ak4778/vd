@@ -1,7 +1,7 @@
 # Edge Case & Boundary Condition Stress Test
 # Covers: Auth, Pagination, Filter, Search, Save, Concurrency, HTTP Method, URL, Data Integrity
 $ErrorActionPreference = 'Continue'
-$base = 'http://localhost:8000'
+$base = 'http://localhost:7777'
 $apiToken = 'm4h38NPRPB6CCZg6ZtQncinBcj5X4351Jd6PAOqd1v4wze4MNopW1CyC10Y5Ur6x'
 $auth = '-H',"apiToken: $apiToken"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -69,20 +69,20 @@ $totalNodes = $firstPage.data.total
 # ============================================================
 Log "----- 1. AUTH BOUNDARY -----"
 
-# Correct credentials (apiToken)
-$c = & curl.exe -s -o NUL -w '%{http_code}' -H "apiToken: $apiToken" "$base/api/login" 2>$null
+# Correct credentials (apiToken) — POST-only since 2026-08-16
+$c = & curl.exe -s -o NUL -w '%{http_code}' -X POST -H "apiToken: $apiToken" "$base/api/login" 2>$null
 Check 'AUTH' "Login correct" ($c -eq 200) "code=$c"
 
 # Wrong token
-$c = & curl.exe -s -o NUL -w '%{http_code}' -H "apiToken: wrongtoken" "$base/api/login" 2>$null
+$c = & curl.exe -s -o NUL -w '%{http_code}' -X POST -H "apiToken: wrongtoken" "$base/api/login" 2>$null
 Check 'AUTH' "Login wrong pass" ($c -eq 401) "code=$c"
 
 # No auth header (empty credentials)
-$c = & curl.exe -s -o NUL -w '%{http_code}' "$base/api/login" 2>$null
+$c = & curl.exe -s -o NUL -w '%{http_code}' -X POST "$base/api/login" 2>$null
 Check 'AUTH' "Login empty pass" ($c -eq 401) "code=$c"
 
 # Non-existent token
-$c = & curl.exe -s -o NUL -w '%{http_code}' -H "apiToken: nonexistent123" "$base/api/login" 2>$null
+$c = & curl.exe -s -o NUL -w '%{http_code}' -X POST -H "apiToken: nonexistent123" "$base/api/login" 2>$null
 Check 'AUTH' "Login non-existent user" ($c -eq 401) "code=$c"
 
 # No credentials at all

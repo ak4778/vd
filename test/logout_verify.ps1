@@ -1,7 +1,7 @@
 # Logout / session invalidation verification using curl.exe
 # Tests: login (Basic Auth) -> use token (ok) -> logout -> reuse token (must fail)
 $ErrorActionPreference = 'Continue'
-$base = 'http://127.0.0.1:8000'
+$base = 'http://127.0.0.1:7777'
 $curl = 'curl.exe'
 
 function Curl-Api([string]$url, [string]$method = 'GET', [string]$body = $null, [string[]]$headers = @()) {
