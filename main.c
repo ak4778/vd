@@ -31,17 +31,24 @@ void mg_log_prefix(int level, const char *file, int line, const char *fname) {
   }
 }
 
+// Output one char to stderr and (optionally) the log file.
+// Required because mg_vxprintf drives formatting via a char-by-char callback,
+// which is the only way mongoose's non-standard %M/%m specifiers get expanded.
+static void log_pfn(char c, void *param) {
+  (void) param;
+  fputc(c, stderr);
+  if (s_log_fp != NULL) fputc(c, s_log_fp);
+}
+
 void mg_log(const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  vfprintf(stderr, fmt, ap);
+  // Use mongoose's formatter so %M/%m invoke the custom mg_pm_t callbacks
+  // (e.g. mg_print_ip_port). C standard vfprintf does NOT understand %M.
+  mg_vxprintf(log_pfn, NULL, fmt, &ap);
   va_end(ap);
   fputc('\n', stderr);
-
   if (s_log_fp != NULL) {
-    va_start(ap, fmt);
-    vfprintf(s_log_fp, fmt, ap);
-    va_end(ap);
     fputc('\n', s_log_fp);
     fflush(s_log_fp);  // Flush after each complete log line
   }
