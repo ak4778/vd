@@ -723,6 +723,8 @@ def main():
                 ws1.column_dimensions['D'].width = 14
                 ws1.column_dimensions['E'].width = 20
                 ws1.row_dimensions[1].height = 22
+                for _r in range(2, len(csv_rows) + 2):
+                    ws1.row_dimensions[_r].height = 23
                 ws1.auto_filter.ref = f"A1:E{len(csv_rows) + 1}"
 
                 # ===== Sheet 2: 水电离线明细 =====
@@ -772,6 +774,8 @@ def main():
                 ws2.column_dimensions['C'].width = 22
                 ws2.column_dimensions['D'].width = 20
                 ws2.row_dimensions[1].height = 22
+                for _r in range(2, water_rows + 2):
+                    ws2.row_dimensions[_r].height = 23
                 ws2.auto_filter.ref = f"A1:D{water_rows + 1}"
 
                 # ===== Sheet 3: 火电离线明细 =====
@@ -820,6 +824,8 @@ def main():
                 ws3.column_dimensions['C'].width = 22
                 ws3.column_dimensions['D'].width = 20
                 ws3.row_dimensions[1].height = 22
+                for _r in range(2, fire_rows + 2):
+                    ws3.row_dimensions[_r].height = 23
                 ws3.auto_filter.ref = f"A1:D{fire_rows + 1}"
 
                 # ===== Sheet 4: 新能源离线明细 =====
@@ -865,6 +871,8 @@ def main():
                 ws4.column_dimensions['D'].width = 22
                 ws4.column_dimensions['E'].width = 20
                 ws4.row_dimensions[1].height = 22
+                for _r in range(2, ne_rows + 2):
+                    ws4.row_dimensions[_r].height = 23
                 ws4.auto_filter.ref = f"A1:E{ne_rows + 1}"
 
                 wb.save('summary.xlsx')
