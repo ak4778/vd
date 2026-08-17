@@ -115,12 +115,13 @@ export function Login({loginFn, logoIcon, title, tipText}) {
     // plaintext JSON body. Backend's mg_http_creds() auto-parses Basic header,
     // so no server-side change needed. NOTE: base64 is encoding not encryption;
     // real transport security comes from HTTPS (port 7443).
+    if (ev && ev.preventDefault) ev.preventDefault();  // form submit default would reload the page
     const headers = {'Authorization': 'Basic ' + btoa(user + ':' + pass)};
     return fetch('api/login', {method: 'POST', headers, credentials: 'include'}).then(loginFn).finally(r => setPass(''));
   };
   return html`
 <div class="h-full flex items-center justify-center bg-slate-200">
-  <div class="border rounded bg-white w-96 p-5">
+  <form class="border rounded bg-white w-96 p-5" onsubmit=${onsubmit}>
     <div class="my-5 py-2 flex items-center justify-center gap-x-4">
       <${logoIcon} class="h-12 stroke-cyan-600 stroke-1" />
       <h1 class="font-bold text-xl">${title || 'Login'}<//>
@@ -142,6 +143,7 @@ export function Login({loginFn, logoIcon, title, tipText}) {
         value=${pass} />
     <//>
     <div class="mt-7">
+      <button type="submit" class="hidden" aria-hidden="true" tabindex="-1"></button>
       <${Button} title="Sign In" icon=${Icons.logout} onclick=${onsubmit} cls="flex w-full justify-center" />
     <//>
     <div class="mt-5 text-slate-400 text-xs">${tipText}<//>
