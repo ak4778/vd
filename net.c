@@ -2,6 +2,7 @@
 // All rights reserved
 
 #include "net.h"
+#include "password_hash.h"
 #include "data_source.h"
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -485,8 +486,10 @@ static void nodes_batchset_thread(void *param) {
 
 struct user {
   char name[64];
-  char pass[128];
-  char access_token[65];  // 64 chars + '\0'
+  char pass[128];          // Plaintext password (legacy fallback when passHash absent)
+  char passHash[65];       // 64 hex chars + '\0' — 10000 iterations of SHA256(salt+password)
+  char salt[33];           // 32 hex chars + '\0'
+  char access_token[65];   // 64 chars + '\0'
 };
 
 // Users are loaded from data_config.json at startup (see load_users_from_config).
@@ -497,7 +500,10 @@ static struct user s_users[MAX_USERS + 1];
 // (from data_config.json) — through the "Api-Token" header, the access_token
 // cookie / query param, or a Bearer token. Has no password and no session
 // token: the Api-Token itself is the credential.
-static struct user global_token_user = {"_api_token_", "", ""};
+static struct user global_token_user = {"_api_token_", "", "", "", ""};
+
+// hash_password / ct_memcmp / verify_password live in password_hash.h
+// (header-only, so unit tests can exercise the real implementation).
 
 static void generate_access_tokens(void) {
   for (struct user *u = s_users; u->name[0] != '\0'; u++) {
@@ -507,7 +513,10 @@ static void generate_access_tokens(void) {
 }
 
 // Parse "users" array from data_config.json into s_users.
-// JSON format: "users": [{"name":"xxx","pass":"yyy"}, ...]
+// JSON format (preferred — hashed):
+//   {"name":"xxx","passHash":"<64 hex>","salt":"<32 hex>"}
+// JSON format (legacy — plaintext, auto-migrated to hash on first login attempt):
+//   {"name":"xxx","pass":"yyy"}
 // Uses mg_json_get_tok / mg_json_unescape for proper JSON parsing,
 // which correctly handles escaped characters (e.g. \" \\ \/) in names
 // and passwords — the previous hand-rolled strstr/strchr parser broke
@@ -519,20 +528,37 @@ static void load_users_from_config(const char *cfg_buf) {
 
   int count = 0;
   for (int i = 0; i < MAX_USERS; i++) {
-    char path[32];
+    char path[40];
     // Try $.users[i].name
     mg_snprintf(path, sizeof(path), "$.users[%d].name", i);
     size_t nlen = mg_json_unescape(json, path,
                                    s_users[count].name, sizeof(s_users[0].name));
     if (nlen == 0) break;  // No more users in array
 
-    // Try $.users[i].pass
+    // Preferred: $.users[i].passHash (64 hex chars) + $.users[i].salt (32 hex chars)
+    mg_snprintf(path, sizeof(path), "$.users[%d].passHash", i);
+    size_t hlen = mg_json_unescape(json, path,
+                                   s_users[count].passHash, sizeof(s_users[0].passHash));
+    mg_snprintf(path, sizeof(path), "$.users[%d].salt", i);
+    size_t slen = mg_json_unescape(json, path,
+                                   s_users[count].salt, sizeof(s_users[0].salt));
+
+    if (hlen == 64 && slen == 32) {
+      // Hashed password entry — preferred path
+      MG_INFO(("User loaded (hashed) from config: [%s]", s_users[count].name));
+      count++;
+      continue;
+    }
+
+    // Fallback: $.users[i].pass (plaintext, legacy)
+    s_users[count].passHash[0] = '\0';
+    s_users[count].salt[0] = '\0';
     mg_snprintf(path, sizeof(path), "$.users[%d].pass", i);
     size_t plen = mg_json_unescape(json, path,
                                    s_users[count].pass, sizeof(s_users[0].pass));
-    if (plen == 0) continue;  // Password missing — skip this entry, try next
+    if (plen == 0) continue;  // No pass and no passHash — skip
 
-    MG_INFO(("User loaded from config: [%s]", s_users[count].name));
+    MG_INFO(("User loaded (plaintext, legacy) from config: [%s]", s_users[count].name));
     count++;
   }
 
@@ -970,35 +996,50 @@ static struct user *authenticate(struct mg_http_message *hm) {
 
   if (user[0] != '\0' && pass[0] != '\0') {
     for (u = s_users; result == NULL && u->name[0] != '\0'; u++)
-      if (strcmp(user, u->name) == 0 && strcmp(pass, u->pass) == 0) result = u;
+      if (strcmp(user, u->name) == 0 && verify_password(u->passHash, u->salt, u->pass, pass)) result = u;
   } else if (user[0] == '\0' && pass[0] != '\0') {
+    // Session tokens are compared in constant time to avoid timing
+    // side-channels on long-lived 64-char random credentials.
+    size_t pwlen = strlen(pass);
     // Check global API token first (fixed token from config for Postman etc.)
-    if (s_global_api_token[0] != '\0' && strcmp(pass, s_global_api_token) == 0) {
+    size_t gtlen = strlen(s_global_api_token);
+    if (gtlen > 0 && pwlen == gtlen &&
+        ct_memcmp(pass, s_global_api_token, gtlen) == 0) {
       MG_VERBOSE(("Authenticated via global API token"));
+      memset(user, 0, sizeof(user));
+      memset(pass, 0, sizeof(pass));
       return &global_token_user;
     }
-    for (u = s_users; result == NULL && u->name[0] != '\0'; u++)
-      if (strcmp(pass, u->access_token) == 0) result = u;
+    for (u = s_users; result == NULL && u->name[0] != '\0'; u++) {
+      size_t tlen = strlen(u->access_token);
+      if (tlen > 0 && pwlen == tlen &&
+          ct_memcmp(pass, u->access_token, tlen) == 0)
+        result = u;
+    }
   }
+  // Scrub credentials from the stack frame before returning.
+  memset(user, 0, sizeof(user));
+  memset(pass, 0, sizeof(pass));
   return result;
 }
 
 static struct user *find_user_by_creds(const char *name, const char *pw) {
   if (name == NULL || pw == NULL || name[0] == '\0' || pw[0] == '\0') return NULL;
   for (struct user *u = s_users; u->name[0] != '\0'; u++)
-    if (strcmp(name, u->name) == 0 && strcmp(pw, u->pass) == 0) return u;
+    if (strcmp(name, u->name) == 0 && verify_password(u->passHash, u->salt, u->pass, pw)) return u;
   return NULL;
 }
 
 static void handle_login(struct mg_connection *c, struct mg_http_message *hm,
                          struct user *u) {
+  // Lifted to function scope so we can scrub them on every return path.
+  char nm[sizeof(((struct user*)0)->name)] = {0};
+  char pw[sizeof(((struct user*)0)->pass)] = {0};
   // Support 3 credential sources for /api/login:
   //   1. Basic auth header or valid cookie (authenticate() already resolved via `u`)
   //   2. POST body JSON: {"user":"xxx","password":"yyy"}
   //   3. POST form-encoded: user=xxx&password=yyy
   if (u == NULL && hm != NULL && hm->body.len > 0) {
-    char nm[sizeof(((struct user*)0)->name)] = {0};
-    char pw[sizeof(((struct user*)0)->pass)] = {0};
     size_t nm_n = mg_json_unescape(hm->body, "$.user", nm, sizeof(nm));
     size_t pw_n = mg_json_unescape(hm->body, "$.password", pw, sizeof(pw));
     if (nm_n > 0 && pw_n > 0) {
@@ -1012,6 +1053,8 @@ static void handle_login(struct mg_connection *c, struct mg_http_message *hm,
     }
   }
   if (u == NULL) {
+    memset(nm, 0, sizeof(nm));
+    memset(pw, 0, sizeof(pw));
     mg_http_reply(c, 401, s_json_header,
                   "{\"status\":\"false\",\"message\":\"Invalid credentials\"}");
     return;
@@ -1028,6 +1071,9 @@ static void handle_login(struct mg_connection *c, struct mg_http_message *hm,
                 "{\"status\":\"true\",%m:%m,%m:%m}",
                 MG_ESC("user"), MG_ESC(u->name),
                 MG_ESC("token"), MG_ESC(u->access_token));
+  // Scrub submitted plaintext password from the stack frame.
+  memset(nm, 0, sizeof(nm));
+  memset(pw, 0, sizeof(pw));
 }
 
 static void handle_logout(struct mg_connection *c, struct user *u) {

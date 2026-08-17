@@ -5,8 +5,16 @@
     "httpPort": 7777,
     "httpsPort": 7443,
     "users": [
-        {"name": "Gddl-bq", "pass": "Gddl!#%2026!@"},
-        {"name": "scnqjs",  "pass": "Atos.202102"}
+        {
+            "name": "Gddl-bq",
+            "passHash": "6ea774be1d52833c3f237f5fb025b69d959b3d4469ad7b32e5053d3357716a69",
+            "salt": "c91368f202902d4845e7e72e5306b43a"
+        },
+        {
+            "name": "scnqjs",
+            "passHash": "d506b5cbe049740b8a259e96278608285e5daf2a1274902f4f3b1b34abda8258",
+            "salt": "3c83a6d3a9d33b40d2166d017fee201b"
+        }
     ],
     "defaultPageSize": 50,
     "maxPageSize": 200,
@@ -14,14 +22,68 @@
     "logToFile": true,
     "logFile": "server.log",
     "fields": [
-        {"key": "id", "label": "通道ID", "editable": false, "type": "string", "width": 60},
-        {"key": "name", "label": "通道名称", "editable": false, "type": "string", "width": 120},
-        {"key": "channelCode", "label": "通道编号", "editable": false, "type": "string", "width": 120},
-        {"key": "isOnline", "label": "状态", "editable": false, "type": "string", "width": 60},
-        {"key": "cameraType", "label": "设备类型", "editable": false, "type": "string", "width": 60},
-        {"key": "P1", "label": "场站类型", "editable": false, "type": "string", "width": 80},
-        {"key": "P4", "label": "公司名称", "editable": false, "type": "string", "width": 120},
-        {"key": "operation", "label": "操作", "editable": true, "type": "string", "width": 60},
-        {"key": "customOperation", "label": "自定义", "editable": true, "type": "string", "width": 200}
+        {
+            "key": "id",
+            "label": "通道ID",
+            "editable": false,
+            "type": "string",
+            "width": 60
+        },
+        {
+            "key": "name",
+            "label": "通道名称",
+            "editable": false,
+            "type": "string",
+            "width": 120
+        },
+        {
+            "key": "channelCode",
+            "label": "通道编号",
+            "editable": false,
+            "type": "string",
+            "width": 120
+        },
+        {
+            "key": "isOnline",
+            "label": "状态",
+            "editable": false,
+            "type": "string",
+            "width": 60
+        },
+        {
+            "key": "cameraType",
+            "label": "设备类型",
+            "editable": false,
+            "type": "string",
+            "width": 60
+        },
+        {
+            "key": "P1",
+            "label": "场站类型",
+            "editable": false,
+            "type": "string",
+            "width": 80
+        },
+        {
+            "key": "P4",
+            "label": "公司名称",
+            "editable": false,
+            "type": "string",
+            "width": 120
+        },
+        {
+            "key": "operation",
+            "label": "操作",
+            "editable": true,
+            "type": "string",
+            "width": 60
+        },
+        {
+            "key": "customOperation",
+            "label": "自定义",
+            "editable": true,
+            "type": "string",
+            "width": 200
+        }
     ]
 }
