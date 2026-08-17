@@ -111,9 +111,12 @@ export function Login({loginFn, logoIcon, title, tipText}) {
   const [user, setUser] = useState('');
   const [pass, setPass] = useState('');
   const onsubmit = function(ev) {
-    const body = JSON.stringify({user, password: pass});
-    const headers = {'Content-Type': 'application/json'};
-    return fetch('api/login', {method: 'POST', headers, body, credentials: 'include'}).then(loginFn).finally(r => setPass(''));
+    // Send credentials via HTTP Basic header (base64-encoded) instead of
+    // plaintext JSON body. Backend's mg_http_creds() auto-parses Basic header,
+    // so no server-side change needed. NOTE: base64 is encoding not encryption;
+    // real transport security comes from HTTPS (port 7443).
+    const headers = {'Authorization': 'Basic ' + btoa(user + ':' + pass)};
+    return fetch('api/login', {method: 'POST', headers, credentials: 'include'}).then(loginFn).finally(r => setPass(''));
   };
   return html`
 <div class="h-full flex items-center justify-center bg-slate-200">

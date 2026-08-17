@@ -330,3 +330,18 @@ get_max_page_size()          [net.c:191]
 ```
 - Windows 的 CRITICAL_SECTION 是递归锁（同线程可重入），所以没问题
 - Linux 的 PTHREAD_MUTEX_INITIALIZER 默认是 非递归锁 ，同一线程连续 lock 两次会永久挂起
+
+
+gen_passhash.py ，三种用法：
+
+```
+# 1. 交互式（只打印结果，手动复制）
+python gen_passhash.py
+
+# 2. 命令行参数
+python gen_passhash.py Gddl-bq "Gddl!#%2026!@"
+
+# 3. 直接更新 data_config.json（新增或替换已有用户）
+python gen_passhash.py --update
+```
+echo b3MuMjAyMTAy | base64 -d
