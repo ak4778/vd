@@ -7,8 +7,8 @@
     "users": [
         {
             "name": "Gddl-bq",
-            "passHash": "6ea774be1d52833c3f237f5fb025b69d959b3d4469ad7b32e5053d3357716a69",
-            "salt": "c91368f202902d4845e7e72e5306b43a"
+            "passHash": "6cc9c7e9172981344520b8cf589b6261b05e5379315320e111f2c678020c2537",
+            "salt": "e0dc7b86b2b6ccdd2259076127d0aaea"
         },
         {
             "name": "scnqjs",
@@ -19,7 +19,7 @@
     "defaultPageSize": 50,
     "maxPageSize": 200,
     "logLevel": "debug",
-    "logToFile": true,
+    "logToFile": false,
     "logFile": "server.log",
     "fields": [
         {
