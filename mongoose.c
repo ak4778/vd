@@ -1145,6 +1145,11 @@ void mg_dash_send_change(struct mg_mgr *mgr, struct mg_field_set *set) {
     struct mg_dash_cdata *d;
     struct mg_dash_user *u;
     if (!c->is_websocket) continue;
+    if (c->send.len > MG_DASH_MAX_SEND_BUF_SIZE) {  // Skip slow consumers
+      MG_ERROR(("skipping, send buf %lu > %d", (unsigned long) c->send.len,
+                MG_DASH_MAX_SEND_BUF_SIZE));
+      continue;
+    }
     d = (struct mg_dash_cdata *) c->data;
     u = d->u;
     if (u == NULL) continue;
@@ -3122,9 +3127,9 @@ static void *ff_open(const char *path, int flags) {
   if (flags & MG_FS_WRITE) {
     mode |= FA_WRITE;
     if (flags & MG_FS_EXCL) {
-      mode |= FA_OPEN_ALWAYS | FA_OPEN_APPEND;
-    } else {
       mode |= FA_CREATE_NEW;
+    } else {
+      mode |= FA_OPEN_ALWAYS | FA_OPEN_APPEND;
     }
   }
   if ((fp = mg_calloc(1, sizeof(*fp))) != NULL &&
@@ -9698,6 +9703,8 @@ static void read_conn(struct mg_connection *c, struct pkt *pkt) {
   struct connstate *s = (struct connstate *) (c + 1);
   struct mg_iobuf *io = c->is_tls ? &c->rtls : &c->recv;
   uint32_t seq = mg_ntohl(pkt->tcp->seq);
+  // Evaluation order is important: 1) process FIN, 2) process keep-alive,
+  // 3) discard invalid SEG.SEQ, 4) process ACK and payload.
   if (pkt->tcp->flags & TH_FIN) {
     uint8_t flags = TH_ACK;
     if (mg_ntohl(pkt->tcp->seq) != s->ack) {
@@ -9726,18 +9733,12 @@ static void read_conn(struct mg_connection *c, struct pkt *pkt) {
     }
     tx_tcp(c->mgr->ifp, s->mac, &c->loc, &c->rem, c->dscp, flags,
            mg_htonl(s->seq), mg_htonl(s->ack), "", 0);
-    if (pkt->pay.len == 0) return;  // if no data, we're done
   } else if (pkt->pay.len <= 1 && mg_ntohl(pkt->tcp->seq) == s->ack - 1) {
     // Keep-Alive (RFC-9293 3.8.4, allow erroneous implementations)
     MG_VERBOSE(("%lu keepalive ACK", c->id));
     tx_tcp(c->mgr->ifp, s->mac, &c->loc, &c->rem, c->dscp, TH_ACK,
            mg_htonl(s->seq), mg_htonl(s->ack), NULL, 0);
-    return;                        // no data to process
-  } else if (pkt->pay.len == 0) {  // this is an ACK
-    if (pkt->tcp->flags & TH_ACK)
-      handle_ack(s, mg_ntohl(pkt->tcp->ack), mg_ntohs(pkt->tcp->win));
-    if (s->fin_rcvd && s->ttype == MIP_TTYPE_FIN) s->twclosure = true;
-    return;  // no data to process
+    return;  // RFC-9293 3.10.7.4 discard (incorrect) payload, ACK, window
   } else if (seq != s->ack) {
     uint32_t ack = (uint32_t) (mg_htonl(pkt->tcp->seq) + pkt->pay.len);
     if (s->ack == ack) {
@@ -9747,14 +9748,20 @@ static void read_conn(struct mg_connection *c, struct pkt *pkt) {
       tx_tcp(c->mgr->ifp, s->mac, &c->loc, &c->rem, c->dscp, TH_ACK,
              mg_htonl(s->seq), mg_htonl(s->ack), "", 0);
     }
-    return;  // drop it
-  } else if (io->size - io->len < pkt->pay.len &&
-             !mg_iobuf_resize(io, io->len + pkt->pay.len)) {
+    return;  // drop it, RFC-9293 3.10.7.4: ignore ACKno
+  }
+  // Now process the segment for ACK and payload
+  if (pkt->tcp->flags & TH_ACK) {
+    handle_ack(s, mg_ntohl(pkt->tcp->ack), mg_ntohs(pkt->tcp->win));
+    if (pkt->pay.len == 0 && s->fin_rcvd && s->ttype == MIP_TTYPE_FIN)
+      s->twclosure = true;
+  }
+  if (pkt->pay.len == 0) return;
+  if (io->size - io->len < pkt->pay.len &&
+      !mg_iobuf_resize(io, io->len + pkt->pay.len)) {
     mg_error(c, "oom");
     return;  // drop it
   }
-  if (pkt->tcp->flags & TH_ACK)
-    handle_ack(s, mg_ntohl(pkt->tcp->ack), mg_ntohs(pkt->tcp->win));
   // Copy TCP payload into the IO buffer. If the connection is plain text,
   // we copy to c->recv. If the connection is TLS, this data is encrypted,
   // therefore we copy that encrypted data to the c->rtls iobuffer instead,
@@ -9763,9 +9770,11 @@ static void read_conn(struct mg_connection *c, struct pkt *pkt) {
   memcpy(&io->buf[io->len], pkt->pay.buf, pkt->pay.len);
   io->len += pkt->pay.len;
   MG_VERBOSE(("%lu SEQ %x -> %x", c->id, mg_htonl(pkt->tcp->seq), s->ack));
-  // Advance ACK counter
-  s->ack = (uint32_t) (mg_htonl(pkt->tcp->seq) + pkt->pay.len);
-  s->unacked += pkt->pay.len;
+  if (!(pkt->tcp->flags & TH_FIN)) {  // FIN already advanced s->ack
+    // Advance ACK counter
+    s->ack = (uint32_t) (mg_htonl(pkt->tcp->seq) + pkt->pay.len);
+    s->unacked += pkt->pay.len;
+  }
   // size_t diff = s->acked <= s->ack ? s->ack - s->acked : s->ack;
   if (s->unacked > MG_TCPIP_WIN / 2 && s->acked != s->ack) {
     // Send ACK immediately
@@ -10478,8 +10487,7 @@ static void write_conn(struct mg_connection *c) {
 
 static void init_closure(struct mg_connection *c) {
   struct connstate *s = (struct connstate *) (c + 1);
-  if (c->is_udp == false && c->is_listening == false &&
-      c->is_connecting == false) {  // For TCP conns,
+  if (c->is_listening == false && c->is_connecting == false) {
     tx_tcp(c->mgr->ifp, s->mac, &c->loc, &c->rem, c->dscp, TH_FIN | TH_ACK,
            mg_htonl(s->seq), mg_htonl(s->ack), NULL, 0);
     settmout(c, MIP_TTYPE_FIN);
@@ -10519,8 +10527,10 @@ void mg_mgr_poll(struct mg_mgr *mgr, int ms) {
       c->is_tls_hs ? mg_tls_handshake(c) : handle_tls_recv(c);
     if (can_write(c)) write_conn(c);
     if (is_tls && c->send.len == 0) mg_tls_flush(c);
-    if (c->is_draining && c->send.len == 0 && s->ttype != MIP_TTYPE_FIN)
-      init_closure(c);
+    if (c->is_draining && c->send.len == 0) {
+      if (c->is_udp) c->is_closing = 1;
+      if (!c->is_udp && s->ttype != MIP_TTYPE_FIN) init_closure(c);
+    }
     // For non-TLS, close immediately upon completing the 3-way closure
     // For TLS, handle any pending data (above) until MIP_TTYPE_FIN expires
     if (s->twclosure &&
@@ -28699,7 +28709,9 @@ struct netc_enetc { // 53.4.6.6
   struct {
     volatile uint32_t PSIPMAR0, PSIPMAR1, PSIVLANR, reserved0, PSICFGR0,
       PSICFGR1, PSICFGR2;
-    volatile uint8_t reserved1[0x64];
+    volatile uint8_t reserved1[0x3c];
+    volatile uint32_t PSIMMHFR0, PSIMMHFR1;
+    volatile uint8_t reserved2[0x20];
   } PSI[1];
 };
 
@@ -29042,7 +29054,18 @@ static size_t mg_tcpip_driver_netc_tx(const void *buf, size_t len,
   return len;
 }
 
+static void mg_tcpip_driver_netc_update_hash_table(struct mg_tcpip_if *ifp) {
+  // mcast address has NETC XOR hash index 56 (RM 53.4.2.3.1.3.8.4.1)
+  NETC_ENETC1->PSI[0].PSIMMHFR0 = 0;
+  NETC_ENETC1->PSI[0].PSIMMHFR1 = MG_BIT(24);
+  (void) ifp;
+}
+
 static bool mg_tcpip_driver_netc_poll(struct mg_tcpip_if *ifp, bool s1) {
+  if (ifp->update_mac_hash_table) {
+    mg_tcpip_driver_netc_update_hash_table(ifp);
+    ifp->update_mac_hash_table = false;
+  }
   if (!s1) return false;
   struct mg_tcpip_driver_netc_data *d =
       (struct mg_tcpip_driver_netc_data *) ifp->driver_data;

@@ -5,7 +5,7 @@ SOURCES = main.c mongoose.c net.c data_source.c   # Source code files
 # mongoose.h only defaults to MG_TLS_BUILTIN under MG_ARCH_CUBE; on Win32/Linux
 # the default is MG_TLS_NONE, so HTTPS listen sockets silently fail handshake
 # with "TLS is not enabled". Define it explicitly here.
-CFLAGS = -W -Wall -Wextra -g3 -ggdb -O3 -fno-omit-frame-pointer -I. -DMG_TLS=MG_TLS_BUILTIN -DMG_SOCK_LISTEN_BACKLOG_SIZE=512 -DMG_IO_SIZE=65536    # Build options
+CFLAGS = -W -Wall -Wextra -g3 -ggdb -O3 -fno-omit-frame-pointer -I. -DMG_TLS=MG_TLS_BUILTIN -DMG_SOCK_LISTEN_BACKLOG_SIZE=1024 -DMG_IO_SIZE=65536    # Build options
 
 # RSA CRT optimisation in mongoose's built-in TLS has a bug that causes
 # "CRT signing failed" during the TLS 1.2 handshake with self-signed RSA
@@ -15,6 +15,10 @@ CFLAGS += -DMG_TLS_RSA_USE_CRT=0
 
 # Custom log format: human-readable timestamp instead of hex milliseconds
 CFLAGS += -DMG_ENABLE_CUSTOM_LOG=1
+
+# Custom log line buffer (bytes, main.c s_lbuf).  2048 fits a full URI with a
+# URL-encoded CJK keyword; oversized lines chunk-flush, nothing is lost.
+CFLAGS += -DLOG_LINE_BUF_SIZE=2048
 
 # Database mode: SQLite (default) or CSV
 # To use SQLite (default): make
@@ -34,12 +38,29 @@ ifeq ($(OS),Windows_NT)         # Windows settings. Assume MinGW compiler.
   PROG = vvvv.exe
   CC = gcc
   CFLAGS += -lws2_32
+  # Force select() on Windows: mongoose global default sets MG_ENABLE_EPOLL=1
+  # which fails to compile on MinGW (no <sys/epoll.h>).  MG_ENABLE_POLL=0 is
+  # also required because MG_ENABLE_POLL=1 on MinGW hits known WSAPoll hangs.
+  CFLAGS += -DMG_ENABLE_EPOLL=0 -DMG_ENABLE_POLL=0
+  # WinSock2 fd_set tracks at most FD_SETSIZE sockets *simultaneously*
+  # (count-based append, NOT handle-value indexed like Linux).  Above the
+  # limit the *oldest* sockets are silently dropped from select() -- and
+  # since new connections sit at the head of mgr->conns, the LISTEN socket
+  # (tail) is dropped first -> server silently stops accepting new
+  # connections.  Default 64 broke at ~78 concurrent connections.
+  CFLAGS += -DFD_SETSIZE=4096
   MODE_STAMP = .mode_$(MODE).win
   RM_MODE = -del /Q /F .mode_csv.win .mode_sqlite.win 2>nul
   TOUCH_MODE = type nul >
   DEL_CMD = cmd /C del /Q /F /S
 else
   CFLAGS += -lpthread -ldl      # Link against pthread and dl for SQLite on Linux
+  # Linux: use epoll() for scalable I/O multiplexing.  mongoose's MG_ARCH_UNIX
+  # block already sets MG_ENABLE_EPOLL=1 under __linux__, but we spell it out
+  # explicitly so it also works on distros where __linux__ is defined later.
+  ifeq ($(shell uname -s 2>/dev/null),Linux)
+    CFLAGS += -DMG_ENABLE_EPOLL=1 -DMG_ENABLE_POLL=0
+  endif
   MODE_STAMP = .mode_$(MODE)
   RM_MODE = @rm -f .mode_csv .mode_sqlite
   TOUCH_MODE = @touch

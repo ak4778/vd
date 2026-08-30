@@ -345,3 +345,44 @@ python gen_passhash.py Gddl-bq "Gddl!#%2026!@"
 python gen_passhash.py --update
 ```
 echo b3MuMjAyMTAy | base64 -d
+## Windows 实际上会发生什么
+Windows 下即使 fd 超过 FD_SETSIZE， accept 也会 照单全收 。限制在后面的 select() 主循环里才暴露：
+
+mongoose.c:14825-14844 （select 分支）：
+
+FD_SET 宏 本身不做边界检查 。 fd_set 在 WinSock2 里是一个长度为 FD_SETSIZE(=64) 的 SOCKET fd_array[] 。fd ≥ 64 时：
+
+- 不会报错
+- 会越界写到栈上 fd_set 结构体后面的内存 （ rset / wset / eset 都是栈变量）
+- 结果：随机值覆盖 / select 行为错乱 / 直接 crash（segfault / access violation）
+所以 Windows 的表现不是"优雅地拒绝连接"，而是"表面正常，超过 64 个 socket 后随时可能崩"。
+
+## 修正后的各平台实际限制表
+平台                        accept检查               硬限制位置           限制值                       超限表现 
+Windows（当前）               ❌ 无               select() 栈越界写   FD_SETSIZE=64              静默越界 + 随机 crash 
+Linux（select 模式）          ✅ 有（L14683）        accept 阶段     FD_SETSIZE=1024     打印 error、closesocket，用户侧断连 
+Linux（MG_ENABLE_EPOLL=1）   ❌ 不检查                无此限制          看ulimit                      正常工作
+
+## 怎么修 Windows 的隐患
+有两条路：
+
+### 方案 A：Windows 改走 poll（推荐，开销小）
+项目的 memory 里已经记载了：
+ Mongoose 必须在 Windows 下用 -DMG_ENABLE_POLL=0 ，否则 WSAPoll bug 导致高并发卡死
+这条路 有已知 bug，不能用 。
+
+### 方案 B：显式 #define FD_SETSIZE 到更大的值
+必须在 #include <winsock2.h> 之前生效。最稳妥的办法是编译选项直接传：
+
+```
+# Makefile Windows 分支里加
+ifeq ($(OS),Windows_NT)
+  CFLAGS += -DFD_SETSIZE=4096
+endif
+```
+FD_SETSIZE=4096 后 fd_set 结构体的大小从 64*sizeof(SOCKET)=256B 变成 4096*8=32KB ， 但它是栈上变量 ， mg_iotest() 里一次就 3 个（rset/wset/eset）= 96KB。一般 Windows 默认栈 1MB，这个开销没问题。
+
+### 方案 C：在 Windows 的 accept 里补一个检查，超限就 closesocket
+在 accept_conn 里给 Windows 也加一段逻辑（不依赖现有 #if ），但改 mongoose.c 不太好。
+
+总结：你是对的，Windows 完全走不到 14683，FD_SETSIZE 限制会以更危险的形式（越界写导致 crash）出现。建议直接 -DFD_SETSIZE=4096 编译。
