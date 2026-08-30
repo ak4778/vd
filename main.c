@@ -14,6 +14,34 @@
 
 static FILE *s_log_fp = NULL;  // Log file handle, NULL if logToFile is false
 
+// Line buffer: accumulate a complete log line, then write it with a single
+// fwrite per sink.  Writing char-by-char to unbuffered stderr costs one
+// syscall per byte, which is catastrophic when stderr is a PowerShell
+// Start-Process redirect pipe (~10ms per line -> +25-50ms per request at
+// debug level, serializing the whole event loop down to ~20 r/s).
+// Line buffer size: 2048 covers the longest line (full URI with a URL-encoded
+// CJK keyword: ~9 bytes per char, net.c:1187 / mongoose.c:1335).  Override at
+// build time with -DLOG_LINE_BUF_SIZE=4096 (Makefile sets it).  If a line
+// still overflows, log_pfn flushes mid-line in chunks -- nothing is lost.
+#ifndef LOG_LINE_BUF_SIZE
+#define LOG_LINE_BUF_SIZE 2048
+#endif
+#if LOG_LINE_BUF_SIZE < 256
+#error "LOG_LINE_BUF_SIZE too small: the log prefix alone can reach ~60 bytes"
+#endif
+static char s_lbuf[LOG_LINE_BUF_SIZE];
+static size_t s_llen = 0;
+
+static void lbuf_flush(void) {
+  if (s_llen == 0) return;
+  fwrite(s_lbuf, 1, s_llen, stderr);
+  if (s_log_fp != NULL) {
+    fwrite(s_lbuf, 1, s_llen, s_log_fp);
+    fflush(s_log_fp);  // Flush after each complete log line
+  }
+  s_llen = 0;
+}
+
 void mg_log_prefix(int level, const char *file, int line, const char *fname) {
   const char *p = strrchr(file, '/');
   if (p == NULL) p = strrchr(file, '\\');
@@ -25,19 +53,20 @@ void mg_log_prefix(int level, const char *file, int line, const char *fname) {
   strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", t);
 
   char lc = (level >= 0 && level <= 4) ? "NEIDV"[level] : '?';
-  fprintf(stderr, "%-19s %d%c %s:%d:%s  ", ts, level, lc, p, line, fname);
-  if (s_log_fp != NULL) {
-    fprintf(s_log_fp, "%-19s %d%c %s:%d:%s  ", ts, level, lc, p, line, fname);
-  }
+  int n = snprintf(s_lbuf, sizeof(s_lbuf), "%-19s %d%c %s:%d:%s  ", ts, level,
+                   lc, p, line, fname);
+  s_llen = (n > 0) ? ((size_t) n >= sizeof(s_lbuf) ? sizeof(s_lbuf) - 1
+                                                   : (size_t) n)
+                   : 0;
 }
 
-// Output one char to stderr and (optionally) the log file.
-// Required because mg_vxprintf drives formatting via a char-by-char callback,
-// which is the only way mongoose's non-standard %M/%m specifiers get expanded.
+// Feed one char into the line buffer.  Required because mg_vxprintf drives
+// formatting via a char-by-char callback, which is the only way mongoose's
+// non-standard %M/%m specifiers get expanded.
 static void log_pfn(char c, void *param) {
   (void) param;
-  fputc(c, stderr);
-  if (s_log_fp != NULL) fputc(c, s_log_fp);
+  if (s_llen + 1 >= sizeof(s_lbuf)) lbuf_flush();  // overflow: flush early
+  s_lbuf[s_llen++] = c;
 }
 
 void mg_log(const char *fmt, ...) {
@@ -47,11 +76,9 @@ void mg_log(const char *fmt, ...) {
   // (e.g. mg_print_ip_port). C standard vfprintf does NOT understand %M.
   mg_vxprintf(log_pfn, NULL, fmt, &ap);
   va_end(ap);
-  fputc('\n', stderr);
-  if (s_log_fp != NULL) {
-    fputc('\n', s_log_fp);
-    fflush(s_log_fp);  // Flush after each complete log line
-  }
+  if (s_llen + 1 >= sizeof(s_lbuf)) lbuf_flush();
+  s_lbuf[s_llen++] = '\n';
+  lbuf_flush();
 }
 
 static int s_sig_num;
@@ -96,6 +123,10 @@ static const char *get_path_from_config(const char *json_path, const char *defau
 
 int main(void) {
   struct mg_mgr mgr;
+
+  // Runtime FD_SETSIZE probe: prove the compiled fd_set capacity.
+  fprintf(stderr, "[probe] FD_SETSIZE=%d sizeof(fd_set)=%d\n",
+          (int) FD_SETSIZE, (int) sizeof(fd_set));
 
   // Disable stdout/stderr buffering so logs flush immediately when
   // redirected to files (Windows defaults to full buffering for pipes/files).
