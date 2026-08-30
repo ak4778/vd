@@ -60,3 +60,13 @@ NUL
 # Stray third-party SQLite CLI amalgamation (not referenced by Makefile)
 shell.c
 sqlite3ext.h
+
+# Build artifacts (Linux binaries synced back from VM)
+vvvv
+test/test_verify_password
+
+# Runtime pid/lock files
+.*.pid
+
+# Python cache
+__pycache__/
