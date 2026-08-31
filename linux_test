@@ -1,0 +1,452 @@
+#!/bin/bash
+# =============================================================================
+#  linux_test  —  Linux (epoll) 一键完整测试脚本
+#  使用: chmod +x ./linux_test && ./linux_test
+#
+#  阶段:
+#    1) 环境检测 & 依赖检查（gcc/make/python3/ulimit/openssl）
+#    2) 重编译（Makefile Linux 分支自动 -DMG_ENABLE_EPOLL=1）
+#    3) 停旧进程 + 启动新服务器 + 冒烟（HTTP/HTTPS）
+#    4) 记录启动前 fd 基线（用于后续泄漏对比）
+#    5) FD 阶梯测试（test_fd_setsize.py，累计 1224 连接）
+#    6) 完整极限压测（_extreme_stress_detailed.py，24 级别）
+#    7) 密码哈希单元测试（test_verify_password.c，49 用例）
+#    8) 运行后 fd 对比 → 泄漏判定
+#    9) 打印 SUMMARY + 生成 report 快照
+# =============================================================================
+set -u
+set -o pipefail
+
+# -------------------- 配置 --------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+# Linux 默认产出 ./vvvv（Makefile 第 1 行: PROG ?= ./vvvv）。
+# 若项目通过共享文件夹挂载到 Linux（如 VirtualBox shared folder），
+# 可能保留 Windows 产出名 vvvv.exe，两种都兼容 —— 按 Makefile 里
+# 当前 OS 的条件分支自动选，都没有再回退到已存在的那个。
+detect_prog_bin() {
+    local try1="${SCRIPT_DIR}/vvvv"
+    local try2="${SCRIPT_DIR}/vvvv.exe"
+    # 按 OS 决定产出名，"文件是否存在"只作参考 —— 共享文件夹里 Windows
+    # 的 vvvv.exe 同样可见且可执行（vboxsf 全部文件带 x 位），若因存在而
+    # 选中它，Linux 上 make 就会 "No rule to make target 'vvvv.exe'"。
+    # 必须以 uname 为准：Linux 分支永远构建 ./vvvv。
+    case "$(uname -s 2>/dev/null)" in
+        *Linux*|*CYGWIN*|*MSYS*|*Darwin*) echo "$try1" ;;
+        *) echo "$try2" ;;
+    esac
+}
+# make 的 build target 要和 Makefile 匹配 —— all/PROG 产出路径是
+#   Linux/Mac  ->  ./vvvv
+#   Windows    ->  vvvv.exe
+# 因此直接调用 make 时传的目标名要用 basename 取出来：
+#   PROG_BIN=/path/vvvv  -> 目标 = "vvvv"（但 ./vvvv 要去掉前缀 "./"）
+#   PROG_BIN=/path/vvvv.exe -> 目标 = "vvvv.exe"
+make_target_from_prog() {
+    # Makefile 里的 PROG 是带 ./ 前缀的 (PROG ?= ./vvvv / PROG = vvvv.exe)。
+    # 生成与 Makefile PREREQ 一致的目标名，避免 "No rule to make target"
+    case "$1" in
+        *.exe) basename "$1" ;;                # Windows: vvvv.exe（无前缀）
+        *)     printf './%s\n' "$(basename "$1")" ;;  # Linux: ./vvvv（有 ./）
+    esac
+}
+PROG_BIN="$(detect_prog_bin)"
+PROG_TARGET="$(make_target_from_prog "$PROG_BIN")"
+
+DATA_CONFIG="${SCRIPT_DIR}/data_config.json"
+TEST_DIR="${SCRIPT_DIR}/test"
+LOG_DIR="${TEST_DIR}"
+PID_FILE="${SCRIPT_DIR}/.linux_test.pid"     # 单实例锁
+SERVER_STDERR="${LOG_DIR}/server_stderr.log"
+
+# 从 data_config.json 中抽取 API token（兼容带/不带换行）
+# 脚本不依赖 jq（若系统有 jq 会用更快的路径）
+extract_token() {
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '.apiToken // ""' "$DATA_CONFIG" 2>/dev/null || true
+    else
+        python3 -c '
+import json, sys
+try:
+    with open("'"$DATA_CONFIG"'", "r", encoding="utf-8") as f:
+        d = json.load(f)
+    print(d.get("apiToken", ""))
+except Exception:
+    sys.exit(0)
+' 2>/dev/null || true
+    fi
+}
+extract_http_port() {
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '.httpPort // 7777' "$DATA_CONFIG" 2>/dev/null
+    else
+        python3 -c '
+import json
+try:
+    with open("'"$DATA_CONFIG"'","r",encoding="utf-8") as f: d=json.load(f)
+    print(d.get("httpPort",7777))
+except Exception: print(7777)
+'
+    fi
+}
+extract_https_port() {
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '.httpsPort // 7443' "$DATA_CONFIG" 2>/dev/null
+    else
+        python3 -c '
+import json
+try:
+    with open("'"$DATA_CONFIG"'","r",encoding="utf-8") as f: d=json.load(f)
+    print(d.get("httpsPort",7443))
+except Exception: print(7443)
+'
+    fi
+}
+
+if [ ! -f "$DATA_CONFIG" ]; then
+    echo "[ERROR] data_config.json 不存在: $DATA_CONFIG" >&2
+    exit 2
+fi
+API_TOKEN="${API_TOKEN:-$(extract_token)}"
+HTTP_PORT="${HTTP_PORT:-$(extract_http_port)}"
+HTTPS_PORT="${HTTPS_PORT:-$(extract_https_port)}"
+
+if [ -z "$API_TOKEN" ]; then
+    echo "[ERROR] 无法从 data_config.json 读取 apiToken，也未通过环境变量 API_TOKEN= 指定" >&2
+    exit 2
+fi
+
+# -------------------- 工具函数 --------------------
+PASS=0
+FAIL=0
+STEP=0
+T0=$(date +%s)
+REPORT="${LOG_DIR}/linux_test_report.$(date +%Y%m%d_%H%M%S).log"
+
+log_line() { echo "[$(date '+%H:%M:%S')] $*" | tee -a "$REPORT"; }
+pass() { PASS=$((PASS+1)); log_line "PASS  $*"; }
+fail() { FAIL=$((FAIL+1)); log_line "FAIL  $*"; }
+run_step() {
+    STEP=$((STEP+1))
+    local desc="$1"; shift
+    log_line "--- [$STEP] $desc ---"
+    "$@"
+    local rc=$?
+    if [ $rc -eq 0 ]; then pass "$desc (rc=0)"
+    else fail "$desc (rc=$rc)"
+    fi
+    return $rc
+}
+
+# -------------------- 单实例锁 --------------------
+if [ -e "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+    echo "[ERROR] 已有 linux_test 实例在运行 (PID=$(cat "$PID_FILE"))，先结束它再启动" >&2
+    exit 3
+fi
+echo $$ >"$PID_FILE"
+trap 'rm -f "$PID_FILE"' EXIT
+
+mkdir -p "$LOG_DIR"
+: > "$REPORT"
+log_line "===== linux_test START  $(date)  ====="
+log_line "pwd=$(pwd)  PROG=$PROG_BIN  make_target=$PROG_TARGET"
+log_line "HTTP_PORT=$HTTP_PORT  HTTPS_PORT=$HTTPS_PORT  TOKEN_LEN=${#API_TOKEN}"
+
+# ================================================================
+# Phase 1. 环境检测
+# ================================================================
+check_cmd() {
+    local c="$1"
+    if command -v "$c" >/dev/null 2>&1; then
+        pass "dep: $c -> $(command -v "$c")"
+        return 0
+    else
+        fail "dep: $c MISSING"
+        return 1
+    fi
+}
+log_line "--- [phase1] 环境检测 ---"
+check_cmd gcc
+check_cmd make
+check_cmd python3
+check_cmd curl
+HAS_JQ=0; if command -v jq >/dev/null 2>&1; then HAS_JQ=1; pass "dep: jq (optional)"; fi
+
+# Python 模块
+PYOK=1
+python3 -c "import requests, aiohttp" 2>/dev/null
+if [ $? -ne 0 ]; then
+    log_line "WARN: python3 模块 requests/aiohttp 缺失，自动尝试 pip3 安装…"
+    # 经验 pip 过旧 → 选不到 aiohttp wheel → 回退 sdist → 缺 multidict 构建失败
+    # 所以先升级 pip/setuptools/wheel，再一次性装 requests + aiohttp + 它的构建期依赖
+    (
+        # 源码编译的 python3（/usr/local/bin/python3）常缺 pip 模块，先引导
+        python3 -m ensurepip --upgrade 2>/dev/null || true
+        python3 -m pip install --upgrade pip setuptools wheel 2>&1 | tail -3
+        python3 -m pip install --upgrade requests aiohttp multidict yarl \
+            2>&1 | tail -5
+    ) 2>&1 | tee -a "$REPORT" >/dev/null || true
+    if python3 -c "import requests, aiohttp" 2>/dev/null; then
+        pass "dep: python3 requests+aiohttp（自动安装成功）"
+    else
+        # 再试：不用 --user 的系统级安装（root 模式 / 无 venv 有效）
+        log_line "WARN: --user 方式未成功，再试系统级 pip install（root 或已 disable-EXTERNALLY-MANAGED）"
+        python3 -m pip install --upgrade \
+            --break-system-packages requests aiohttp multidict yarl \
+            2>&1 | tail -5 | tee -a "$REPORT" >/dev/null || true
+        if python3 -c "import requests, aiohttp" 2>/dev/null; then
+            pass "dep: python3 requests+aiohttp（系统级安装成功）"
+        else
+            fail "dep: python3 模块 requests/aiohttp 缺失，自动安装也失败 —— 请手动执行:  pip3 install requests aiohttp multidict yarl  （如提示 --break-system-packages，加该 flag）"
+            PYOK=0
+        fi
+    fi
+else
+    pass "dep: python3 requests+aiohttp"
+fi
+
+# ulimit nofile（需要能覆盖 1224+ 阶梯）
+NOFILE=$(ulimit -Sn 2>/dev/null || echo 0)
+log_line "ulimit soft nofile = $NOFILE"
+if [ "$NOFILE" != "unlimited" ] && [ "$NOFILE" -lt 4096 ] 2>/dev/null; then
+    log_line "WARN: ulimit -Sn=$NOFILE 偏低，尝试提升到 65536（需要权限）"
+    ulimit -n 65536 2>/dev/null \
+        && log_line "ulimit 提升成功 -> $(ulimit -Sn)" \
+        || fail "提升 ulimit 失败，FD 阶梯测试可能被内核拒绝连接"
+fi
+
+# 运行位置检测: vboxsf 共享文件夹会让每个全表扫描查询 ~1s, 事件循环被
+# 同步 DB 阻塞 -> 慢查询级别 (QUERY/FILTER/SEARCH/deep-page) 大量 30s 超时
+case "$(pwd)" in
+    /media/sf_*|/mnt/*sf_*)
+        log_line "WARN: 项目位于 VirtualBox 共享文件夹 ($(pwd)), vboxsf I/O 慢,"
+        log_line "      慢查询压测级别会因事件循环阻塞而超时 (环境限制, 非服务器 bug)。"
+        log_line "      要获得干净基线, 请把项目复制到 VM 本地磁盘 (ext4) 再运行。"
+        ;;
+esac
+
+# ================================================================
+# Phase 2. 重编译
+# ================================================================
+log_line "--- [phase2] 重编译 ---"
+run_step "make clean" make clean
+run_step "make $PROG_TARGET (Linux epoll build)" make "$PROG_TARGET"
+if [ ! -x "$PROG_BIN" ]; then
+    fail "二进制未生成: $PROG_BIN — 终止后续测试"
+    exit 10
+fi
+
+# 编译宏自检（确认启用了 epoll、没带 FD_SETSIZE hack（Linux 不需要））
+# 注意: mongoose 的 epoll 代码路径没有 "epoll" 字符串字面量, strings 查不到;
+# 正确做法是查动态符号表里的 epoll_* 未定义引用 (nm -D)
+EPOLL_OK=0
+if nm -D "$PROG_BIN" 2>/dev/null | grep -qi "epoll"; then
+    EPOLL_OK=1
+elif strings "$PROG_BIN" 2>/dev/null | grep -qi "epoll"; then
+    EPOLL_OK=1
+fi
+if [ "$EPOLL_OK" -eq 1 ]; then
+    pass "二进制 selfcheck: 含 epoll 符号（MG_ENABLE_EPOLL=1 生效）"
+else
+    fail "二进制 selfcheck: 未找到 epoll 符号，可能编译宏未生效"
+fi
+BUILD_LOG="${LOG_DIR}/linux_build.log"
+# 再显式重编译一次，把完整命令行写进报告留档
+( make "$PROG_TARGET" 2>&1 | tee "$BUILD_LOG" >/dev/null ) || true
+grep -E "MG_ENABLE_EPOLL|MG_ENABLE_POLL|DFD_SETSIZE" "$BUILD_LOG" | head -5 | while read -r line; do
+    log_line "  compile flags: $line"
+done
+
+# ================================================================
+# Phase 3. 重启服务器 + 冒烟
+# ================================================================
+log_line "--- [phase3] 重启服务器 ---"
+# 停旧进程（脚本启动的和意外残留的都杀）
+if [ -f "${SCRIPT_DIR}/.linux_server.pid" ]; then
+    SPID="$(cat "${SCRIPT_DIR}/.linux_server.pid" 2>/dev/null)"
+    if [ -n "$SPID" ] && kill -0 "$SPID" 2>/dev/null; then
+        kill "$SPID" 2>/dev/null; sleep 0.8
+        kill -9 "$SPID" 2>/dev/null
+        log_line "killed old server pid=$SPID"
+    fi
+fi
+# 兜底：按二进制名杀（避免匹配自己）
+for p in $(pgrep -f "${PROG_BIN}" 2>/dev/null); do
+    [ "$p" = "$$" ] && continue
+    kill "$p" 2>/dev/null
+done
+sleep 1
+
+: > "$SERVER_STDERR"
+nohup "$PROG_BIN" >/dev/null 2>>"$SERVER_STDERR" &
+SPID=$!
+echo "$SPID" > "${SCRIPT_DIR}/.linux_server.pid"
+log_line "server started pid=$SPID"
+sleep 2
+
+smoke_http() {
+    curl -fsS --max-time 10 "http://127.0.0.1:${HTTP_PORT}/api/mode/get" 2>/dev/null \
+        | grep -q "SQLite"
+}
+smoke_https() {
+    # 不用 curl --tlsv1.3: 部分发行版 curl 链接 NSS/GnuTLS, 客户端不支持 TLS1.3
+    # 会立即失败 (服务器日志里连连接都没有, 2026-08-30 实测)。统一用 python3。
+    HTTPS_PORT="$HTTPS_PORT" python3 -c "
+import ssl, urllib.request, os
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+r = urllib.request.urlopen('https://127.0.0.1:%s/api/mode/get' % os.environ['HTTPS_PORT'], context=ctx, timeout=10)
+body = r.read().decode()
+exit(0 if 'SQLite' in body else 1)
+" 2>/dev/null
+}
+# 最多等 15s 让服务器起来
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    kill -0 "$SPID" 2>/dev/null || { fail "server process died before smoke"; break; }
+    if smoke_http; then break; fi
+    sleep 1
+done
+run_step "smoke: HTTP /api/mode/get" smoke_http
+run_step "smoke: HTTPS /api/mode/get (TLS1.3)" smoke_https
+run_step "smoke: HTTP GET / (root page != empty)" bash -c '[ "$(curl -fsS --max-time 10 http://127.0.0.1:'"$HTTP_PORT"'/ 2>/dev/null | wc -c)" -gt 500 ]'
+
+# ================================================================
+# Phase 4. 记录 fd 基线
+# ================================================================
+log_line "--- [phase4] fd / proc 基线 ---"
+get_fd_count() {
+    local p="$1"
+    if [ -d "/proc/$p/fd" ]; then
+        ls -1 "/proc/$p/fd" 2>/dev/null | wc -l
+    else
+        echo -1
+    fi
+}
+FD_BEFORE="$(get_fd_count "$SPID")"
+log_line "server pid=$SPID  fd_count(before)=$FD_BEFORE"
+echo "$SPID" > "${SCRIPT_DIR}/.linux_server.pid"
+
+# ================================================================
+# Phase 5. FD 阶梯测试（test_fd_setsize.py）
+# ================================================================
+if [ "$PYOK" -eq 1 ]; then
+run_step "FD ladder test (1224 cumulative conns)" \
+    python3 "$TEST_DIR/test_fd_setsize.py" \
+        --host 127.0.0.1 --port "$HTTP_PORT" \
+        --token "$API_TOKEN" --hold 10 \
+        2>&1 | tee "${LOG_DIR}/fd_ladder_linux.log"
+FD_AFTER_LADDER="$(get_fd_count "$SPID")"
+log_line "fd_count(after ladder)=$FD_AFTER_LADDER"
+else
+    fail "SKIP: FD ladder test（python 模块 requests/aiohttp 未就绪）"
+    FD_AFTER_LADDER="-1"
+fi
+# 阶梯后冷却（让 close 走完，避免影响后续压测）
+sleep 6
+
+# ================================================================
+# Phase 6. 完整极限压测（_extreme_stress_detailed.py）
+# ================================================================
+if [ "$PYOK" -eq 1 ]; then
+run_step "Extreme stress (24 levels: load/save/query/filter/search/page/frontend/https)" \
+    python3 "$TEST_DIR/_extreme_stress_detailed.py" \
+        --token "$API_TOKEN" \
+        2>&1 | tee "${LOG_DIR}/detailed_stress_linux.log"
+
+# 关键慢查询级别自动解析评级（从日志中抽出 ok%）
+log_line "Key-level pass-rate summary:"
+for LABEL in \
+    "QUERY no-result 500x" \
+    "FILTER 5-dim combo 2000x" \
+    "SEARCH CJK long 500x" \
+    "MIXED filter+search+page 2000x" \
+    "FRONTEND 2000x" \
+    "SUSTAINED 60s load" \
+    "HTTPS login concurrent 100x"
+do
+    LINE=$(grep -F "[$LABEL]" "${LOG_DIR}/detailed_stress_linux.log" 2>/dev/null | tail -1)
+    if [ -n "$LINE" ]; then
+        PRCT=$(echo "$LINE" | grep -oE "\([0-9]+%\)" | head -1 | tr -d '()%')
+        log_line "  $LABEL  => $PRCT%   |   $LINE"
+        if [ -n "${PRCT:-}" ] && [ "$PRCT" -ge 95 ] 2>/dev/null; then
+            pass "rate ok >=95%: $LABEL ($PRCT%)"
+        else
+            fail "rate below 95%: $LABEL (${PRCT:-n/a}%)"
+        fi
+    else
+        log_line "  $LABEL  => (未出现在日志中，可能脚本早退出)"
+    fi
+done
+# 冷却
+sleep 8
+else
+    fail "SKIP: Extreme stress（python 模块 requests/aiohttp 未就绪）"
+fi
+
+# ================================================================
+# Phase 7. 密码哈希单元测试（编译 test_verify_password.c）
+# ================================================================
+log_line "--- [phase7] verify_password unit tests ---"
+UNIT_BIN="${TEST_DIR}/test_verify_password"
+( cd "$SCRIPT_DIR" && gcc -o "$UNIT_BIN" test/test_verify_password.c mongoose.c -I. -Wall -Wextra -Wno-unused-parameter -lpthread -ldl 2>>"${LOG_DIR}/unit_build.log" )
+if [ -x "$UNIT_BIN" ]; then
+    run_step "test_verify_password (49 用例, ALL PASSED 期望)" bash -c '"$0" | tee "$1" | tail -1; rc=${PIPESTATUS[0]}; grep -q "ALL PASSED" "$1" && [ "$rc" -eq 0 ]' \
+        "$UNIT_BIN" "${LOG_DIR}/unit_verify_password.log"
+    # 把最后一行摘要贴到报告
+    tail -3 "${LOG_DIR}/unit_verify_password.log" | while read -r line; do
+        log_line "  unit: $line"
+    done
+else
+    fail "编译单元测试失败，详见 ${LOG_DIR}/unit_build.log"
+fi
+
+# ================================================================
+# Phase 8. 最终 fd 对比 + 最终健康检查
+# ================================================================
+log_line "--- [phase8] 资源回收验证 ---"
+sleep 5
+FD_FINAL="$(get_fd_count "$SPID")"
+log_line "fd_count(final)=$FD_FINAL  (baseline=$FD_BEFORE)"
+DELTA=$((FD_FINAL - FD_BEFORE))
+log_line "fd delta (final - baseline)=$DELTA"
+if [ "$FD_FINAL" -ge 0 ] 2>/dev/null && [ "$DELTA" -le 50 ]; then
+    pass "fd 泄漏检查 <=50 (delta=$DELTA, baseline=$FD_BEFORE final=$FD_FINAL)"
+else
+    fail "fd 疑似泄漏 (delta=$DELTA >50, baseline=$FD_BEFORE final=$FD_FINAL)"
+fi
+
+# 健康探针：压测结束后 API 依然可用
+run_step "health: HTTP smoke post-stress" smoke_http
+run_step "health: HTTPS smoke post-stress" smoke_https
+
+# server 进程未崩
+if kill -0 "$SPID" 2>/dev/null; then
+    pass "server process alive (pid=$SPID)"
+else
+    fail "server process DIED during test (expected pid=$SPID)"
+fi
+
+# ================================================================
+# Phase 9. 汇总
+# ================================================================
+T1=$(date +%s)
+ELAPSED=$((T1-T0))
+log_line ""
+log_line "=========================================================="
+log_line " FINAL SUMMARY   elasped=${ELAPSED}s   PASS=$PASS  FAIL=$FAIL"
+log_line "=========================================================="
+log_line "报告文件:     $REPORT"
+log_line "FD 阶梯:      ${LOG_DIR}/fd_ladder_linux.log"
+log_line "极限压测:     ${LOG_DIR}/detailed_stress_linux.log"
+log_line "单元测试:     ${LOG_DIR}/unit_verify_password.log"
+log_line "服务器 stderr:${SERVER_STDERR}"
+
+if [ "$FAIL" -eq 0 ]; then
+    log_line "ALL PASS"
+    exit 0
+else
+    log_line "HAS FAILURES ($FAIL) — 请逐项查看 FAIL 并复核"
+    exit 1
+fi
