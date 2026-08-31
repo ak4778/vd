@@ -93,19 +93,19 @@ def fetch_all_pages(url, headers, parameter, page_size=PAGE_SIZE, start_time=Non
 # 震动类型后缀（可在此处增删）
 #   WVIB.VIBRATIONLFIL = 侧向震动, WVIB.VIBRATIONVFIL = 轴向震动, WNAC.WINDSPEED = 风速
 suffixes = [
-#    ('WVIB.VIBRATIONLFIL', 'fjmjsj_vibration_lateral.csv'),
-#    ('WVIB.VIBRATIONVFIL', 'fjmjsj_vibration_vertical.csv'),
-##    ('WNAC.WINDSPEED', 'fjmjsj_windspeed.csv'),
-#    ('WCNV.CURCONL1', 'fjmjsj_cur1.csv'),
-#    ('WCNV.CURCONL2', 'fjmjsj_cur2.csv'),
-#    ('WCNV.CURCONL3', 'fjmjsj_cur3.csv'),
-##    ('WGEN.GENSPD', 'fjmjsj_genspeed.csv'),
-#   ('WNAC.WINDDIRECTION', 'fjmjsj_winddirection.csv'),
-#    ('WTRM.TEMGEAOIL', 'fjmjsj_temgeaoil.csv'),
-#    ('WTRM.TEMGEAMSDE', 'fjmjsj_temgeamsde.csv'),
-#    ('WTRM.TEMGEAMSND', 'fjmjsj_temgeamsnd.csv'),
-#    ('WGEN.TEMGENDRIEND', 'fjmjsj_temgende.csv'),
-#    ('WGEN.TEMGENNONDE', 'fjmjsj_temgennode.csv'),
+    ('WVIB.VIBRATIONLFIL', 'fjmjsj_vibration_lateral.csv'),
+    ('WVIB.VIBRATIONVFIL', 'fjmjsj_vibration_vertical.csv'),
+#    ('WNAC.WINDSPEED', 'fjmjsj_windspeed.csv'),
+    ('WCNV.CURCONL1', 'fjmjsj_cur1.csv'),
+    ('WCNV.CURCONL2', 'fjmjsj_cur2.csv'),
+    ('WCNV.CURCONL3', 'fjmjsj_cur3.csv'),
+#    ('WGEN.GENSPD', 'fjmjsj_genspeed.csv'),
+   ('WNAC.WINDDIRECTION', 'fjmjsj_winddirection.csv'),
+    ('WTRM.TEMGEAOIL', 'fjmjsj_temgeaoil.csv'),
+    ('WTRM.TEMGEAMSDE', 'fjmjsj_temgeamsde.csv'),
+    ('WTRM.TEMGEAMSND', 'fjmjsj_temgeamsnd.csv'),
+    ('WGEN.TEMGENDRIEND', 'fjmjsj_temgende.csv'),
+    ('WGEN.TEMGENNONDE', 'fjmjsj_temgennode.csv'),
     ('WTRM.TEMMAINBEARING2', 'fjmjsj_temmainbearing2.csv'),
 ]
 
