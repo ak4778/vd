@@ -29,9 +29,9 @@ def request_with_retry(url, headers, payload, max_retries=MAX_RETRIES, interval=
             raise
 
 PAGE_SIZE = 5000  # 分页拉取时的每页条数
-START_TIME = "2026-08-22 00:00:00"  # 数据查询起始时间
-END_TIME = "2026-08-31 00:00:00"    # 数据查询结束时间
-OUTPUT_DIR = r"e:\data\d2"  # CSV 输出目录
+START_TIME = "2026-09-01 00:00:00"  # 数据查询起始时间
+END_TIME = "2026-09-08 00:00:00"    # 数据查询结束时间
+OUTPUT_DIR = r"e:\data\0907"  # CSV 输出目录
 
 
 def fetch_all_pages(url, headers, parameter, page_size=PAGE_SIZE, start_time=None, end_time=None):
@@ -95,11 +95,11 @@ def fetch_all_pages(url, headers, parameter, page_size=PAGE_SIZE, start_time=Non
 suffixes = [
     ('WVIB.VIBRATIONLFIL', 'fjmjsj_vibration_lateral.csv'),
     ('WVIB.VIBRATIONVFIL', 'fjmjsj_vibration_vertical.csv'),
-#    ('WNAC.WINDSPEED', 'fjmjsj_windspeed.csv'),
+##    ('WNAC.WINDSPEED', 'fjmjsj_windspeed.csv'),
     ('WCNV.CURCONL1', 'fjmjsj_cur1.csv'),
     ('WCNV.CURCONL2', 'fjmjsj_cur2.csv'),
     ('WCNV.CURCONL3', 'fjmjsj_cur3.csv'),
-#    ('WGEN.GENSPD', 'fjmjsj_genspeed.csv'),
+##    ('WGEN.GENSPD', 'fjmjsj_genspeed.csv'),
    ('WNAC.WINDDIRECTION', 'fjmjsj_winddirection.csv'),
     ('WTRM.TEMGEAOIL', 'fjmjsj_temgeaoil.csv'),
     ('WTRM.TEMGEAMSDE', 'fjmjsj_temgeamsde.csv'),
@@ -107,6 +107,12 @@ suffixes = [
     ('WGEN.TEMGENDRIEND', 'fjmjsj_temgende.csv'),
     ('WGEN.TEMGENNONDE', 'fjmjsj_temgennode.csv'),
     ('WTRM.TEMMAINBEARING2', 'fjmjsj_temmainbearing2.csv'),
+    ('WGEN.GenSenTmp1', 'fjmjsj_genSenTmp1.csv'),
+    ('WGEN.GenSenTmp2', 'fjmjsj_genSenTmp2.csv'),
+    ('WGEN.GenSenTmp3', 'fjmjsj_genSenTmp3.csv'),
+    ('WGEN.TemGenStaU', 'fjmjsj_TemGenStaU.csv'),
+    ('WGEN.TemGenStaV', 'fjmjsj_TemGenStaV.csv'),
+    ('WGEN.TemGenStaW', 'fjmjsj_TemGenStaW.csv')
 ]
 
 # pointValue 阈值过滤：只输出 pointValue > 阈值的记录（未列出的 suffix 不过滤）
@@ -119,6 +125,12 @@ thresholds = {
     'WGEN.TEMGENDRIEND': 80.0,
     'WGEN.TEMGENNONDE': 80.0,
     'WTRM.TEMMAINBEARING2': 65.0,
+    'WGEN.GenSenTmp1': 110.0,
+    'WGEN.GenSenTmp2': 110.0,
+    'WGEN.GenSenTmp3': 110.0,
+    'WGEN.TemGenStaU': 110.0,
+    'WGEN.TemGenStaV': 110.0,
+    'WGEN.TemGenStaW': 110.0
 }
 
 url = "http://10.65.78.65:18082/queryData"

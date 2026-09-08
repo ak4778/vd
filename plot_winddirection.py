@@ -18,10 +18,10 @@ plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Arial Unicode M
 plt.rcParams["axes.unicode_minus"] = False
 
 # ====================== 配置 ======================
-ANOMALY_FILE   = r"e:\data\d1\winddirection_anomalies.csv"
-SOURCE_DIR     = r"e:\data\d1"                       # 源数据文件夹
+ANOMALY_FILE   = r"e:\data\d3\winddirection_anomalies.csv"
+SOURCE_DIR     = r"e:\data\d3"                       # 源数据文件夹
 SOURCE_PATTERN = "fjmjsj_winddirection*.csv"      # 源文件名匹配模式
-OUTPUT_DIR     = r"e:\data\d1\anomaly_winddirection"
+OUTPUT_DIR     = r"e:\data\d3\anomaly_winddirection"
 EXTEND_RECORDS = 10   # 向前/向后拓展的记录数
 ANGLE_THRESHOLD = 90.0
 
