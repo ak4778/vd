@@ -93,26 +93,26 @@ def fetch_all_pages(url, headers, parameter, page_size=PAGE_SIZE, start_time=Non
 # 震动类型后缀（可在此处增删）
 #   WVIB.VIBRATIONLFIL = 侧向震动, WVIB.VIBRATIONVFIL = 轴向震动, WNAC.WINDSPEED = 风速
 suffixes = [
-    ('WVIB.VIBRATIONLFIL', 'fjmjsj_vibration_lateral.csv'),
-    ('WVIB.VIBRATIONVFIL', 'fjmjsj_vibration_vertical.csv'),
-##    ('WNAC.WINDSPEED', 'fjmjsj_windspeed.csv'),
-    ('WCNV.CURCONL1', 'fjmjsj_cur1.csv'),
-    ('WCNV.CURCONL2', 'fjmjsj_cur2.csv'),
-    ('WCNV.CURCONL3', 'fjmjsj_cur3.csv'),
-##    ('WGEN.GENSPD', 'fjmjsj_genspeed.csv'),
-   ('WNAC.WINDDIRECTION', 'fjmjsj_winddirection.csv'),
-    ('WTRM.TEMGEAOIL', 'fjmjsj_temgeaoil.csv'),
-    ('WTRM.TEMGEAMSDE', 'fjmjsj_temgeamsde.csv'),
-    ('WTRM.TEMGEAMSND', 'fjmjsj_temgeamsnd.csv'),
-    ('WGEN.TEMGENDRIEND', 'fjmjsj_temgende.csv'),
-    ('WGEN.TEMGENNONDE', 'fjmjsj_temgennode.csv'),
-    ('WTRM.TEMMAINBEARING2', 'fjmjsj_temmainbearing2.csv'),
-    ('WGEN.GenSenTmp1', 'fjmjsj_genSenTmp1.csv'),
-    ('WGEN.GenSenTmp2', 'fjmjsj_genSenTmp2.csv'),
-    ('WGEN.GenSenTmp3', 'fjmjsj_genSenTmp3.csv'),
-    ('WGEN.TemGenStaU', 'fjmjsj_TemGenStaU.csv'),
-    ('WGEN.TemGenStaV', 'fjmjsj_TemGenStaV.csv'),
-    ('WGEN.TemGenStaW', 'fjmjsj_TemGenStaW.csv')
+#    ('WVIB.VIBRATIONLFIL', 'fjmjsj_vibration_lateral.csv'),
+#    ('WVIB.VIBRATIONVFIL', 'fjmjsj_vibration_vertical.csv'),
+###    ('WNAC.WINDSPEED', 'fjmjsj_windspeed.csv'),
+#    ('WCNV.CURCONL1', 'fjmjsj_cur1.csv'),
+#    ('WCNV.CURCONL2', 'fjmjsj_cur2.csv'),
+#    ('WCNV.CURCONL3', 'fjmjsj_cur3.csv'),
+###    ('WGEN.GENSPD', 'fjmjsj_genspeed.csv'),
+#   ('WNAC.WINDDIRECTION', 'fjmjsj_winddirection.csv'),
+#    ('WTRM.TEMGEAOIL', 'fjmjsj_temgeaoil.csv'),
+#    ('WTRM.TEMGEAMSDE', 'fjmjsj_temgeamsde.csv'),
+#    ('WTRM.TEMGEAMSND', 'fjmjsj_temgeamsnd.csv'),
+#    ('WGEN.TEMGENDRIEND', 'fjmjsj_temgende.csv'),
+#    ('WGEN.TEMGENNONDE', 'fjmjsj_temgennode.csv'),
+#    ('WTRM.TEMMAINBEARING2', 'fjmjsj_temmainbearing2.csv'),
+    ('WGEN.GENSENTMP1', 'fjmjsj_genSenTmp1.csv'),
+    ('WGEN.GENSENTMP2', 'fjmjsj_genSenTmp2.csv'),
+    ('WGEN.GENSENTMP3', 'fjmjsj_genSenTmp3.csv'),
+    ('WGEN.TEMGENSTAU', 'fjmjsj_TemGenStaU.csv'),
+    ('WGEN.TEMGENSTAV', 'fjmjsj_TemGenStaV.csv'),
+    ('WGEN.TEMGENSTAW', 'fjmjsj_TemGenStaW.csv')
 ]
 
 # pointValue 阈值过滤：只输出 pointValue > 阈值的记录（未列出的 suffix 不过滤）
@@ -125,12 +125,12 @@ thresholds = {
     'WGEN.TEMGENDRIEND': 80.0,
     'WGEN.TEMGENNONDE': 80.0,
     'WTRM.TEMMAINBEARING2': 65.0,
-    'WGEN.GenSenTmp1': 110.0,
-    'WGEN.GenSenTmp2': 110.0,
-    'WGEN.GenSenTmp3': 110.0,
-    'WGEN.TemGenStaU': 110.0,
-    'WGEN.TemGenStaV': 110.0,
-    'WGEN.TemGenStaW': 110.0
+    'WGEN.GENSENTMP1': 110.0,
+    'WGEN.GENSENTMP2': 110.0,
+    'WGEN.GENSENTMP3': 110.0,
+    'WGEN.TEMGENSTAU': 110.0,
+    'WGEN.TEMGENSTAV': 110.0,
+    'WGEN.TEMGENSTAW': 110.0
 }
 
 url = "http://10.65.78.65:18082/queryData"
