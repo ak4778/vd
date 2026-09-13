@@ -476,7 +476,10 @@ static void nodes_batchset_thread(void *param) {
   free_work_request(wr);
 }
 
-#if !defined(CSV_MODE)
+#if defined(PG_MODE)
+#define DS_MODE "PostgreSQL"
+#define DS_MODE_TYPE 2
+#elif !defined(CSV_MODE)
 #define DS_MODE "SQLite"
 #define DS_MODE_TYPE 1
 #else

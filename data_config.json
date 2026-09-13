@@ -1,6 +1,7 @@
 {
     "csvFilePath": "leaf_nodes.csv",
     "sqliteFilePath": "device_dashboard.db",
+    "pgConnStr": "host=127.0.0.1 port=5432 dbname=device_dashboard user=postgres password=sqj connect_timeout=5",
     "apiToken": "m4h38NPRPB6CCZg6ZtQncinBcj5X4351Jd6PAOqd1v4wze4MNopW1CyC10Y5Ur6x",
     "httpPort": 7777,
     "httpsPort": 7443,

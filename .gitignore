@@ -4,6 +4,9 @@
 *.obj
 *.dSYM
 
+# libpq runtime DLLs copied by make (PG_MODE)
+lib*.dll
+
 # Node.js dependencies
 node_modules/
 
@@ -44,6 +47,7 @@ Thumbs.db
 
 # Makefile build-mode stamp
 .mode_*.win
+.mode_*
 
 # Windows null-device artifact (curl -o NUL etc.)
 NUL

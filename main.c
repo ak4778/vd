@@ -8,6 +8,11 @@
 #include "net.h"
 #include "data_source.h"
 
+#if !defined(_WIN32) && !defined(_WIN64)
+// strncasecmp() 在 glibc 下声明于 <strings.h>（GCC 14+ 缺它会报隐式声明错误）
+#include <strings.h>
+#endif
+
 // Custom log: human-readable timestamp instead of hex milliseconds
 // Format: "2026-08-15 08:49:19 2I main.c:80:main  Using SQLite..."
 // Optionally also writes to a log file (configured via logToFile/logFile in data_config.json)
@@ -121,6 +126,38 @@ static const char *get_path_from_config(const char *json_path, const char *defau
   return path_buf;
 }
 
+// PG 连接串用于日志时掩去 password 值（吸取 apiToken 日志泄露教训，
+// 不给新数据源引入泄露向量）。支持 key=value 形式的 password=xxx；
+// URI 形式 postgresql://user:pass@host 中的密码不在掩码范围（记录为已知限制）。
+static const char *mask_pg_password(const char *conninfo) {
+  static char buf[512];
+  buf[0] = '\0';
+  if (conninfo == NULL) return buf;
+  const char *key = "password=";
+  size_t keylen = strlen(key);
+  const char *p = conninfo;
+  while (*p != '\0') {
+    if (strncasecmp(p, key, keylen) == 0) {
+      // 找到 password= 的值段起点，替换为 ***，直到空白或串尾
+      size_t used = (size_t)(p - conninfo);
+      if (used + 4 >= sizeof(buf)) break;
+      memcpy(buf, conninfo, used);
+      memcpy(buf + used, "***", 3);
+      used += 3;
+      p += keylen;
+      while (*p != '\0' && *p != ' ' && *p != '\t') p++;
+      size_t rest = strlen(p);
+      if (used + rest < sizeof(buf)) {
+        memcpy(buf + used, p, rest + 1);
+      }
+      return buf;
+    }
+    p++;
+  }
+  snprintf(buf, sizeof(buf), "%s", conninfo);
+  return buf;
+}
+
 int main(void) {
   struct mg_mgr mgr;
 
@@ -180,7 +217,19 @@ int main(void) {
     }
   }
 
-#if !defined(CSV_MODE)
+#if defined(PG_MODE)
+  // Initialize PostgreSQL with connection string from config
+  // (empty/missing pgConnStr -> libpq falls back to standard PG* env vars)
+  const char *pg_conn = get_path_from_config("$.pgConnStr", "");
+  if (pg_conn == NULL || pg_conn[0] == '\0') {
+    fprintf(stderr, "pgConnStr is empty, libpq will use PG* environment variables\n");
+  }
+  if (ds_init(pg_conn) != 0) {
+    fprintf(stderr, "Failed to initialize PostgreSQL connection\n");
+    return 1;
+  }
+  MG_INFO(("Using PostgreSQL mode, conn: %s", mask_pg_password(pg_conn)));
+#elif !defined(CSV_MODE)
   // Initialize SQLite database with path from config
   const char *sqlite_path = get_path_from_config("$.sqliteFilePath", "device_dashboard.db");
   if (ds_init(sqlite_path) != 0) {

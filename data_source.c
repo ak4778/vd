@@ -1,9 +1,12 @@
 #include "data_source.h"
 
-#if !defined(CSV_MODE)
+#if !defined(CSV_MODE) && !defined(PG_MODE)
 extern const struct ds_driver sqlite_driver;
 #endif
 extern const struct ds_driver csv_driver;
+#if defined(PG_MODE)
+extern const struct ds_driver pg_driver;
+#endif
 
 static const struct ds_driver *s_active_driver = NULL;
 
@@ -11,6 +14,9 @@ static const struct ds_driver *select_driver(const char *path) {
 #if defined(CSV_MODE)
   (void)path;
   return &csv_driver;
+#elif defined(PG_MODE)
+  (void)path;
+  return &pg_driver;
 #else
   (void)path;
   return &sqlite_driver;
