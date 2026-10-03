@@ -61,6 +61,7 @@ insert_sql = '''
     INSERT INTO nodes
     (id, name, channelCode, isOnline, cameraType, operation, customOperation, P1, P3, P4)
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (id) DO NOTHING
 '''
 
 for node in nodes:
