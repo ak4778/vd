@@ -1,5 +1,6 @@
 import json
 import psycopg2
+from psycopg2.extras import execute_values
 
 # Merge upsert:
 # - each fixed column is overwritten only when a new value arrives (COALESCE
@@ -10,6 +11,21 @@ MERGE_SQL = """
 INSERT INTO wind_seconds_di
     (device_id, ts, gen_tem_driend, gen_tem_nonde, other_points)
 VALUES (%s, %s, %s, %s, %s::jsonb)
+ON CONFLICT (device_id, ts) DO UPDATE
+SET gen_tem_driend = COALESCE(EXCLUDED.gen_tem_driend, wind_seconds_di.gen_tem_driend),
+    gen_tem_nonde = COALESCE(EXCLUDED.gen_tem_nonde, wind_seconds_di.gen_tem_nonde),
+    other_points = COALESCE(wind_seconds_di.other_points, '{}'::jsonb)
+            || COALESCE(EXCLUDED.other_points, '{}'::jsonb)
+"""
+
+# 批量 upsert（execute_values 把多行注入 VALUES %s）。
+# 同一 (device_id, ts) 的多条消息必须先在 Python 侧按到达顺序归并成
+# 一行（见 merge_points）：PG 不允许单条 INSERT 的 ON CONFLICT DO
+# UPDATE 命中同一行两次。归并后键唯一，与逐条 ingest_one 语义一致。
+MERGE_SQL_BATCH = """
+INSERT INTO wind_seconds_di
+    (device_id, ts, gen_tem_driend, gen_tem_nonde, other_points)
+VALUES %s
 ON CONFLICT (device_id, ts) DO UPDATE
 SET gen_tem_driend = COALESCE(EXCLUDED.gen_tem_driend, wind_seconds_di.gen_tem_driend),
     gen_tem_nonde = COALESCE(EXCLUDED.gen_tem_nonde, wind_seconds_di.gen_tem_nonde),
@@ -121,24 +137,51 @@ def parse_message(msg):
     return device_id, msg['ts'], {column: msg['pointValue']}
 
 
+def merge_points(messages):
+    """把 (device_id, ts, points) 序列按到达顺序归并到 (device_id, ts) 上。
+
+    语义与逐条 ingest_one 完全一致：
+    - 固定列：后到的非 None 值覆盖；后到 None 不覆盖已有值；
+    - other_points：键值对按到达顺序合并，后到覆盖先到。
+    返回 [(device_id, ts, point_map)]，键唯一。
+    """
+    merged = {}
+    for dev, ts, points in messages:
+        point_map = points if isinstance(points, dict) else dict([points])
+        dst = merged.setdefault((dev, ts), {})
+        for k, v in point_map.items():
+            if k in FIXED_POINTS:
+                if v is not None or k not in dst:
+                    dst[k] = v
+            else:
+                dst[k] = v
+    return [(dev, ts, merged[(dev, ts)]) for dev, ts in merged]
+
+
 def ingest_raw(messages):
     """messages: iterable of raw dicts with tagName/pointValue/ts.
 
-    All messages are parsed and applied in one transaction; messages with
-    keys missing from TAG_MAP are skipped. Returns the number of messages
-    actually ingested (dropped ones are not counted).
+    全部解析后按 (device_id, ts) 归并，execute_values 批量 upsert
+    （同一事务）；TAG_MAP 之外的 key 丢弃。返回实际入库的消息条数
+    （丢弃的不计）。
     """
+    parsed = [p for p in (parse_message(m) for m in messages) if p is not None]
+    if not parsed:
+        return 0
+    rows = []
+    for dev, ts, point_map in merge_points(parsed):
+        other = {k: v for k, v in point_map.items() if k not in FIXED_POINTS}
+        rows.append((dev, ts,
+                     *(point_map.get(fp) for fp in FIXED_POINTS),
+                     json.dumps(other, ensure_ascii=False)))
     conn = connect()
     try:
         cur = conn.cursor()
-        n = 0
-        for msg in messages:
-            parsed = parse_message(msg)
-            if parsed is not None:
-                ingest_one(cur, *parsed)
-                n += 1
+        execute_values(cur, MERGE_SQL_BATCH, rows,
+                       template='(%s, %s, %s, %s, %s::jsonb)',
+                       page_size=1000)
         conn.commit()
-        return n
+        return len(parsed)
     except Exception:
         conn.rollback()
         raise

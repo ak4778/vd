@@ -10,7 +10,7 @@
    而不是从 now() 开始。只在入库成功后写文件（临时文件 + os.replace
    原子替换）；若崩溃在“入库成功、水位线未写”之间，下一轮重叠重拉，
    MERGE 幂等不会产生重复行。
-2. 每轮窗口半开区间 [last_ts - overlap, end)，默认回退 300s 重叠拉取，
+2. 每轮窗口半开区间 [last_ts - overlap, end)，默认回退 50s 重叠拉取，
    覆盖时钟漂移与迟到/补传数据。
 3. 每个 tag 查询按 pageSize 分页，翻页直到取完——窗口内数据量再大也
    不丢，只影响请求次数。
@@ -19,16 +19,25 @@
    避免一个覆盖几天的超大请求；未追平时本轮结束后立即进入下一轮
    （不 sleep 30s）。
 
-设备清单（type=1022）：
+拉取方式（FETCH_MODE，None 时启动交互选择）：
+    window = 整窗拉取：queryCriteria 只给 ts 范围，一次拉回窗口内所有
+             设备/测点（请求数与设备数无关；未映射测点入库前丢弃）
+    like   = 按测点后缀 like：每个 Point_Codes 后缀发一次
+             tag_name LIKE '%{后缀}' 查询（请求数 = 后缀数，不受设备数影响）
+    tag    = 按 tag 精准拉取：设备发现 x Point_Codes 逐 tag 等值查询
+             （请求数 = 设备数 x 后缀数，设备多时最慢）
+
+设备清单（type=1022，仅 tag 模式使用）：
     启动时按 regionCompanyName / stationName 黑名单过滤，得到场站下的
-    windDeviceId 列表；与 SUFFIXES 笛卡尔积拼成完整 tagName
-    （FJMJ1_{windDeviceId}{suffix}）作为逐 tag 查询目标。
+    windDeviceId 列表；与 Point_Codes 笛卡尔积拼成完整 tagName
+    （FJMJ1_{windDeviceId}{point_code}）作为逐 tag 查询目标。
     TARGETS 非空时跳过设备发现，直接使用给定的完整 tagName 列表。
 """
 import json
 import os
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 import requests
@@ -47,13 +56,18 @@ RETRY_INTERVAL = 5
 
 # ---------------- 拉取范围 ----------------
 # 测点后缀（可增删）；与设备 windDeviceId 笛卡尔积拼成完整 tagName
-SUFFIXES = [
+Point_Codes = [
     'WGEN.TEMGENDRIEND',     # 发电机驱动端温度 -> 固定列 gen_tem_driend
     'WGEN.TEMGENNONDRIEND',  # 发电机非驱动端温度 -> 固定列 gen_tem_nonde
     'WGEN.SPEED',            # 转速 -> other_points
 ]
 # 非空时跳过设备发现，直接使用这些完整 tagName（如 ['FJMJ1_XXXWGEN.SPEED']）
 TARGETS = []
+
+# ---------------- 拉取方式 ----------------
+# 'window'=整窗拉取  'like'=按测点后缀like  'tag'=按tag精准
+# None = 每次启动时交互选择
+FETCH_MODE = None
 
 # regionCompanyName 黑名单：命中直接忽略
 EXCLUDE_REGIONS = {
@@ -75,10 +89,11 @@ EXCLUDE_STATIONS = {
 }
 
 # ---------------- 窗口与轮询 ----------------
-OVERLAP_SECONDS = 300           # 每轮回退重叠，防迟到/钟漂
+OVERLAP_SECONDS = 50            # 每轮回退重叠，防迟到/钟漂
 INITIAL_LOOKBACK_SECONDS = 300  # 首次运行（无水位线文件）回看多久
 MAX_WINDOW_SECONDS = 3600       # 追历史时单窗上限，避免超大请求
-FETCH_INTERVAL_SECONDS = 3
+FETCH_INTERVAL_SECONDS = 1
+FETCH_WORKERS = 8               # 并发拉取 tag 的线程数
 #MOCK = False                    # True = 不请求真实接口，用模拟数据
 MOCK = True                     # True = 不请求真实接口，用模拟数据
 PRINT_INGESTED = True           # 打印每条实际入库的数据（device_id/ts/测点）
@@ -154,50 +169,66 @@ def discover_devices():
 
 
 def build_targets():
-    """TARGETS 非空时直接使用；否则设备发现 x SUFFIXES 拼完整 tagName。"""
+    """TARGETS 非空时直接使用；否则设备发现 x Point_Codes 拼完整 tagName。"""
     if MOCK or TARGETS:
         return list(TARGETS)
     devices = discover_devices()
-    return [f'FJMJ1_{dev}{suffix}' for dev in devices for suffix in SUFFIXES]
+    return [f'FJMJ1_{dev}{point_code}' for dev in devices for point_code in Point_Codes]
 
 
-def fetch_target(criteria, tag):
-    """按 tag_name + ts 范围查询一个 tag，翻页取全，返回 (items, total)。"""
-    qc = [{
-        'columnType': 'String',
-        'columnName': 'tag_name',
-        'condition': '=',
-        'parameter': tag,
-    }] + list(criteria)
+def criterion_eq_tag(tag):
+    """tag_name = 等值条件（按 tag 精准拉取）。"""
+    return {'columnType': 'String', 'columnName': 'tag_name',
+            'condition': '=', 'parameter': tag}
+
+
+def criterion_like_point_code(point_code):
+    """tag_name LIKE 模糊条件（按测点后缀拉取，% 为 SQL 通配符）。"""
+    return {'columnType': 'String', 'columnName': 'tag_name',
+            'condition': 'like', 'parameter': f'%{point_code}'}
+
+
+def fetch_target(criteria, tag_criterion=None):
+    """按 criteria(+可选 tag 条件) 查询并翻页取全，返回 (items, total)。
+
+    第 1 页按 PAGE_SIZE 请求并读取 total；总页数 >1 时其余页并发抓取
+    （整窗模式数据量大时收益明显）。
+    """
+    qc = ([tag_criterion] if tag_criterion is not None else []) \
+        + list(criteria)
     base_map = {
         'stb': DATA_STB,
         'queryCriteria': qc,
         'sortType': 'desc',
         'sortField': 'ts',
     }
-    # 先 pageSize=1 探测 total
-    rj = post_json({'type': 1029,
-                    'map': {**base_map, 'pageNum': 1, 'pageSize': 1}})
+    rj = post_json({'type': 1029, 'map': {
+        **base_map, 'pageNum': 1, 'pageSize': PAGE_SIZE}})
     total = rj.get('data', {}).get('total', 0) or 0
-    if total == 0:
-        return [], 0
-
-    # 再按 PAGE_SIZE 翻页直到取完
-    items = []
-    page_num = 1
-    while True:
-        rj = post_json({'type': 1029, 'map': {
-            **base_map, 'pageNum': page_num, 'pageSize': PAGE_SIZE}})
-        page = rj.get('data', {}).get('list', []) or []
-        items.extend(page)
-        if page_num * PAGE_SIZE >= total:
-            break
-        page_num += 1
+    items = list(rj.get('data', {}).get('list', []) or [])
+    n_pages = -(-total // PAGE_SIZE)  # ceil(total / PAGE_SIZE)
+    if n_pages > 1:
+        page_map = {}
+        with ThreadPoolExecutor(
+                max_workers=min(FETCH_WORKERS, n_pages - 1)) as pool:
+            futures = {
+                pool.submit(post_json, {'type': 1029, 'map': {
+                    **base_map, 'pageNum': p, 'pageSize': PAGE_SIZE}}): p
+                for p in range(2, n_pages + 1)}
+            for fut in as_completed(futures):
+                page_map[futures[fut]] = fut.result()
+        for p in range(2, n_pages + 1):  # 按页序拼接，保证顺序稳定
+            items.extend(page_map[p].get('data', {}).get('list', []) or [])
     return items, total
 
 
-def fetch_window(start, end, tags):
-    """对窗口 [start, end) 内所有 tag 逐个分页拉取，汇总原始消息。"""
+def fetch_window(start, end):
+    """按 FETCH_MODE 拉取窗口 [start, end) 内的原始消息，汇总返回。
+
+    window: 1 个查询；like: 每后缀 1 个查询并发；tag: 每 tag 1 个查询并发。
+    任一请求失败即整体抛异常：本轮不入库、水位线不推进，
+    下一轮整窗重拉（幂等）。
+    """
     if MOCK:
         return mock_window(start, end)
     criteria = [
@@ -207,10 +238,27 @@ def fetch_window(start, end, tags):
          'condition': '<', 'parameter': end},
     ]
     all_items = []
-    for tag in tags:
-        items, total = fetch_target(criteria, tag)
-        print(f'    {tag}: total={total}, fetched={len(items)}')
+
+    if FETCH_MODE == 'window':
+        items, total = fetch_target(criteria)
+        print(f'    整窗: total={total}, fetched={len(items)}')
         all_items.extend(items)
+        return all_items
+
+    if FETCH_MODE == 'like':
+        jobs = [(criterion_like_point_code(s), s) for s in Point_Codes]
+    else:  # tag
+        jobs = [(criterion_eq_tag(t), t) for t in build_targets()]
+    if not jobs:
+        return all_items
+    with ThreadPoolExecutor(max_workers=min(FETCH_WORKERS, len(jobs))) as pool:
+        futures = {pool.submit(fetch_target, criteria, jc): label
+                   for jc, label in jobs}
+        for fut in as_completed(futures):
+            label = futures[fut]
+            items, total = fut.result()
+            print(f'    {label}: total={total}, fetched={len(items)}')
+            all_items.extend(items)
     return all_items
 
 
@@ -231,7 +279,7 @@ def mock_window(start, end):
 
 # ---------------- 主循环 ----------------
 def tick(now=None):
-    """执行一轮「设备发现/取 targets -> 算窗口 -> 分页拉全 -> 入库 -> 落水位线」。
+    """执行一轮「算窗口 -> 按 FETCH_MODE 拉全 -> 入库 -> 落水位线」。
 
     返回 (start, end, fetched, ingested, caught_up)；失败时抛出异常，
     水位线文件不变，下一轮从同一位置重拉。
@@ -248,8 +296,7 @@ def tick(now=None):
     end = min(now, start + timedelta(seconds=MAX_WINDOW_SECONDS))
     start_s, end_s = start.strftime(TS_FMT), end.strftime(TS_FMT)
 
-    tags = build_targets()
-    raw = fetch_window(start_s, end_s, tags)
+    raw = fetch_window(start_s, end_s)
     if PRINT_INGESTED:
         printed = 0
         for msg in raw:
@@ -265,12 +312,36 @@ def tick(now=None):
     return start_s, end_s, len(raw), n, end >= now
 
 
+MODE_LABELS = {'window': '整窗拉取', 'like': '按测点后缀like', 'tag': '按tag精准'}
+
+
+def choose_mode():
+    """FETCH_MODE 已配置则直接使用；否则交互选择（回车默认 tag 精准）。"""
+    if FETCH_MODE in MODE_LABELS:
+        return FETCH_MODE
+    print('选择拉取方式: 1=整窗拉取  2=按测点后缀like  3=按tag精准'
+          '  (直接回车=3)')
+    choice = input('> ').strip()
+    return {'1': 'window', '2': 'like', '3': 'tag'}.get(choice, 'tag')
+
+
 def main():
+    global FETCH_MODE
+    FETCH_MODE = choose_mode()
     mode = '模拟' if MOCK else '真实接口'
-    scope = f'TARGETS={len(TARGETS)} 个tag' if TARGETS \
-        else f'设备发现 x {len(SUFFIXES)} 个测点'
-    print(f'开始拉取（{mode}，{scope}），每轮间隔 {FETCH_INTERVAL_SECONDS}s，'
-          f'重叠 {OVERLAP_SECONDS}s，水位线文件 {WATERMARK_FILE}，Ctrl+C 终止')
+    if FETCH_MODE == 'tag':
+        scope = f'TARGETS={len(TARGETS)} 个tag' if TARGETS \
+            else f'设备发现 x {len(Point_Codes)} 个测点'
+    elif FETCH_MODE == 'like':
+        scope = f'{len(Point_Codes)} 个后缀 like（设备数无关）'
+    else:
+        scope = '只按 ts 过滤一次拉全（设备数无关）'
+    wm = load_watermark()
+    wm_desc = wm if wm else f'无（首次回看 {INITIAL_LOOKBACK_SECONDS}s）'
+    print(f'开始拉取（{mode}，{MODE_LABELS[FETCH_MODE]}，{scope}），'
+          f'每轮间隔 {FETCH_INTERVAL_SECONDS}s，'
+          f'重叠 {OVERLAP_SECONDS}s，水位线 {wm_desc}（文件 {WATERMARK_FILE}），'
+          f'Ctrl+C 终止')
     while True:
         stamp = datetime.now().strftime(TS_FMT)
         try:
