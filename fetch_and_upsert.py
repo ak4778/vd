@@ -57,11 +57,13 @@ RETRY_INTERVAL = 5
 # ---------------- 拉取范围 ----------------
 # 测点后缀（可增删）；与设备 windDeviceId 笛卡尔积拼成完整 tagName
 Point_Codes = [
-    'WGEN.TEMGENDRIEND',     # 发电机驱动端温度 -> 固定列 gen_tem_driend
-    'WGEN.TEMGENNONDRIEND',  # 发电机非驱动端温度 -> 固定列 gen_tem_nonde
-    'WGEN.SPEED',            # 转速 -> other_points
+    'WGEN.TEMGENDRIEND',     # 发电机驱动端温度 -> 固定列 tem_gen_driend
+    'WGEN.TEMGENNONDRIEND',  # 发电机非驱动端温度 -> 固定列 tem_gen_nonde
+    'WTRM.TEMMAINBEARING2',  # 主轴承温度2 -> 固定列 tem_main_bearing
+    'WGEN.GENSPD',           # 发电机转速 -> other_points
+    'WNAC.WINDSPEED',        # 风速 -> other_points
 ]
-# 非空时跳过设备发现，直接使用这些完整 tagName（如 ['FJMJ1_XXXWGEN.SPEED']）
+# 非空时跳过设备发现，直接使用这些完整 tagName（如 ['FJMJ1_XXXWGEN.GENSPD']）
 TARGETS = []
 
 # ---------------- 拉取方式 ----------------
@@ -263,12 +265,11 @@ def fetch_window(start, end):
 
 
 def mock_window(start, end):
-    """离线模拟：3 设备 x 4 测点，ts 打窗口右边界（仅供联调测试）。"""
+    """离线模拟：3 设备 x (Point_Codes + 1 个未映射测点)，ts 打窗口右边界。"""
     devices = ['B524F6D0B8FF4B2DBC0C102FC4B032B9',
                'A111F6D0B8FF4B2DBC0C102FC4B032B8',
                'C222F6D0B8FF4B2DBC0C102FC4B032B7']
-    tags = ['WGEN.TEMGENDRIEND', 'WGEN.TEMGENNONDRIEND',
-            'WGEN.SPEED', 'WGEN.NOTMAPPED']
+    tags = list(Point_Codes) + ['WGEN.NOTMAPPED']
     return [{
         'pointValue': round(random.uniform(5, 60), 1),
         'description': '风机秒级数据',

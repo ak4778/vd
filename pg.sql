@@ -6,7 +6,7 @@ SHOW server_version; -- 2. 看有没有装 TimescaleDB 之类的分区扩展
 SELECT * FROM pg_available_extensions WHERE name = 'timescaledb' ;
 SELECT ts,
     device_id,
-    gen_tem_driend,
+    tem_gen_driend,
     other_points->> 'status' AS status,
     (other_points->> 'power_kw' ):: numeric AS power_kw 
 FROM wind_seconds_di wsd  
@@ -24,15 +24,15 @@ SELECT typname FROM pg_catalog.pg_type WHERE typnamespace = 'pg_catalog' ::regna
 SELECT device_id,
     to_char(ts AT TIME ZONE 'Asia/Shanghai' , 'YYYY-MM-DD HH24:MI:SS' ) AS ta,
 	ts,
-    gen_tem_driend,
+    tem_gen_driend,
     other_points FROM wind_seconds_di ORDER BY ts DESC ;
 select * from wind_seconds_di where device_id='gdfdc001';
 SELECT * FROM wind_seconds_di WHERE device_id = 'gdfdc001' AND ts = '2026-09-29 12:33:44' ;
 
-INSERT INTO wind_seconds_di (device_id, ts, gen_tem_driend) 
+INSERT INTO wind_seconds_di (device_id, ts, tem_gen_driend) 
 VALUES ( 'gdfdc001' , '2026-09-29 12:33:44' , 222.0 ) 
 ON CONFLICT (device_id, ts)
-DO UPDATE SET gen_tem_driend = EXCLUDED.gen_tem_driend;
+DO UPDATE SET tem_gen_driend = EXCLUDED.tem_gen_driend;
 SELECT * FROM wind_seconds_di WHERE device_id = 'gdfdc001' AND ts = '2026-09-29 12:33:44' ;
 INSERT INTO wind_seconds_di (device_id, ts, other_points) 
 VALUES ( 'gdfdc001' , '2026-09-29 12:33:44' , '{"speed": 21}' ::jsonb) 
@@ -40,11 +40,11 @@ ON CONFLICT (device_id, ts)
 DO UPDATE SET other_points = COALESCE (wind_seconds_di.other_points, '{}' ::jsonb) || EXCLUDED.other_points;
 
 
-INSERT INTO wind_seconds_di (device_id, ts, gen_tem_nonde, gen_tem_driend, other_points) 
+INSERT INTO wind_seconds_di (device_id, ts, tem_gen_nonde, tem_gen_driend, other_points) 
 VALUES ( 'gdfdc001' , '2026-09-29 12:33:44' ,666, 222 , '{"rotate": 33,"age":55}' ::jsonb) 
 ON CONFLICT (device_id, ts) 
-DO UPDATE SET gen_tem_driend = COALESCE (EXCLUDED.gen_tem_driend, wind_seconds_di.gen_tem_driend),
-    gen_tem_nonde = COALESCE (EXCLUDED.gen_tem_nonde, wind_seconds_di.gen_tem_nonde),
+DO UPDATE SET tem_gen_driend = COALESCE (EXCLUDED.tem_gen_driend, wind_seconds_di.tem_gen_driend),
+    tem_gen_nonde = COALESCE (EXCLUDED.tem_gen_nonde, wind_seconds_di.tem_gen_nonde),
     other_points = COALESCE (wind_seconds_di.other_points, '{}' ::jsonb) || COALESCE (EXCLUDED.other_points, '{}' ::jsonb);
 SELECT * FROM wind_seconds_di WHERE device_id = 'gdfdc001' AND ts = '2026-09-29 12:33:44' ;
 --SELECT pg_size_pretty(pg_database_size('device_dashboard')) AS db_size;

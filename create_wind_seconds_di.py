@@ -12,8 +12,9 @@ cur.execute("""
 CREATE TABLE wind_seconds_di (
     device_id       text             NOT NULL,
     ts              timestamptz      NOT NULL,
-    gen_tem_driend    double precision,
-    gen_tem_nonde     double precision,
+    tem_gen_driend    double precision,
+    tem_gen_nonde     double precision,
+    tem_main_bearing  double precision,
     other_points      jsonb,
     PRIMARY KEY (device_id, ts)
 )

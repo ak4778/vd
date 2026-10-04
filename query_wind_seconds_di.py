@@ -9,7 +9,7 @@ sql = """
 SELECT
     ts,
     device_id,
-    gen_tem_driend,
+    tem_gen_driend,
     other_points->>'status'              AS status,
     (other_points->>'power_kw')::numeric AS power_kw
 FROM wind_seconds_di
@@ -20,7 +20,7 @@ ORDER BY power_kw DESC, device_id ASC, ts DESC
 cur.execute(sql)
 rows = cur.fetchall()
 
-headers = ['ts', 'device_id', 'gen_tem_driend', 'status', 'power_kw']
+headers = ['ts', 'device_id', 'tem_gen_driend', 'status', 'power_kw']
 widths = [19, 9, 14, 8, 9]
 print(' | '.join(h.ljust(w) for h, w in zip(headers, widths)))
 print('-+-'.join('-' * w for w in widths))

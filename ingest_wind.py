@@ -9,11 +9,12 @@ from psycopg2.extras import execute_values
 #   existing keys are overwritten, keys absent from this message stay untouched.
 MERGE_SQL = """
 INSERT INTO wind_seconds_di
-    (device_id, ts, gen_tem_driend, gen_tem_nonde, other_points)
-VALUES (%s, %s, %s, %s, %s::jsonb)
+    (device_id, ts, tem_gen_driend, tem_gen_nonde, tem_main_bearing, other_points)
+VALUES (%s, %s, %s, %s, %s, %s::jsonb)
 ON CONFLICT (device_id, ts) DO UPDATE
-SET gen_tem_driend = COALESCE(EXCLUDED.gen_tem_driend, wind_seconds_di.gen_tem_driend),
-    gen_tem_nonde = COALESCE(EXCLUDED.gen_tem_nonde, wind_seconds_di.gen_tem_nonde),
+SET tem_gen_driend = COALESCE(EXCLUDED.tem_gen_driend, wind_seconds_di.tem_gen_driend),
+    tem_gen_nonde = COALESCE(EXCLUDED.tem_gen_nonde, wind_seconds_di.tem_gen_nonde),
+    tem_main_bearing = COALESCE(EXCLUDED.tem_main_bearing, wind_seconds_di.tem_main_bearing),
     other_points = COALESCE(wind_seconds_di.other_points, '{}'::jsonb)
             || COALESCE(EXCLUDED.other_points, '{}'::jsonb)
 """
@@ -24,11 +25,12 @@ SET gen_tem_driend = COALESCE(EXCLUDED.gen_tem_driend, wind_seconds_di.gen_tem_d
 # UPDATE 命中同一行两次。归并后键唯一，与逐条 ingest_one 语义一致。
 MERGE_SQL_BATCH = """
 INSERT INTO wind_seconds_di
-    (device_id, ts, gen_tem_driend, gen_tem_nonde, other_points)
+    (device_id, ts, tem_gen_driend, tem_gen_nonde, tem_main_bearing, other_points)
 VALUES %s
 ON CONFLICT (device_id, ts) DO UPDATE
-SET gen_tem_driend = COALESCE(EXCLUDED.gen_tem_driend, wind_seconds_di.gen_tem_driend),
-    gen_tem_nonde = COALESCE(EXCLUDED.gen_tem_nonde, wind_seconds_di.gen_tem_nonde),
+SET tem_gen_driend = COALESCE(EXCLUDED.tem_gen_driend, wind_seconds_di.tem_gen_driend),
+    tem_gen_nonde = COALESCE(EXCLUDED.tem_gen_nonde, wind_seconds_di.tem_gen_nonde),
+    tem_main_bearing = COALESCE(EXCLUDED.tem_main_bearing, wind_seconds_di.tem_main_bearing),
     other_points = COALESCE(wind_seconds_di.other_points, '{}'::jsonb)
             || COALESCE(EXCLUDED.other_points, '{}'::jsonb)
 """
@@ -36,7 +38,7 @@ SET gen_tem_driend = COALESCE(EXCLUDED.gen_tem_driend, wind_seconds_di.gen_tem_d
 # Points stored in fixed columns; every other point goes to other_points.
 # To add another fixed column: add the column to the table and append its
 # name here (and to the column list in MERGE_SQL).
-FIXED_POINTS = ('gen_tem_driend', 'gen_tem_nonde')
+FIXED_POINTS = ('tem_gen_driend', 'tem_gen_nonde', 'tem_main_bearing')
 
 
 def connect():
@@ -49,7 +51,7 @@ def ingest_one(cur, device_id, ts, points):
 
     points accepts either:
       - a dict of points in one message, e.g.
-        {'gen_tem_driend': 333, 'gen_tem_nonde': 320, 'rotate': 33}
+        {'tem_gen_driend': 333, 'tem_gen_nonde': 320, 'rotate': 33}
       - a single (point_name, value) pair for backward compatibility, e.g.
         ('rotate', 33)
     Fixed points go to their columns; every other point goes to other_points.
@@ -107,9 +109,11 @@ TAG_PREFIX_LEN = 6  # characters skipped at the start of tagName
 # To promote another point to a fixed column later: add the column to the
 # table, FIXED_POINTS and MERGE_SQL, then set its mapping here.
 TAG_MAP = {
-    'WGEN.TEMGENDRIEND': 'gen_tem_driend',
-    'WGEN.TEMGENNONDRIEND': 'gen_tem_nonde',  # non-drive end temp; verify real tag name
-    'WGEN.SPEED': None,
+    'WGEN.TEMGENDRIEND': 'tem_gen_driend',
+    'WGEN.TEMGENNONDRIEND': 'tem_gen_nonde',  # non-drive end temp; verify real tag name
+    'WTRM.TEMMAINBEARING2': 'tem_main_bearing',  # 主轴承温度2
+    'WGEN.GENSPD': None,
+    'WNAC.WINDSPEED': None,
 }
 
 
@@ -178,7 +182,7 @@ def ingest_raw(messages):
     try:
         cur = conn.cursor()
         execute_values(cur, MERGE_SQL_BATCH, rows,
-                       template='(%s, %s, %s, %s, %s::jsonb)',
+                       template='(%s, %s, %s, %s, %s, %s::jsonb)',
                        page_size=1000)
         conn.commit()
         return len(parsed)
@@ -203,8 +207,8 @@ if __name__ == '__main__':
     # One message carrying multiple points (fixed + other points).
     messages = [
         (dev, ts, {'power_kw': 1200}),
-        (dev, ts, {'gen_tem_driend': 62.5}),
-        (dev, ts, {'gen_tem_nonde': 60.1}),
+        (dev, ts, {'tem_gen_driend': 62.5}),
+        (dev, ts, {'tem_gen_nonde': 60.1}),
         (dev, ts, {'wind_speed': 9.4}),
         (dev, ts, {'power_kw': 1350}),  # retransmission: value updated only
     ]
@@ -213,7 +217,7 @@ if __name__ == '__main__':
         conn = connect()
         cur = conn.cursor()
         cur.execute(
-            'SELECT gen_tem_driend, gen_tem_nonde, other_points '
+            'SELECT tem_gen_driend, tem_gen_nonde, other_points '
             'FROM wind_seconds_di '
             'WHERE device_id=%s AND ts=%s', (dev, ts))
         row = cur.fetchone()
@@ -227,26 +231,26 @@ if __name__ == '__main__':
 
     # Multi-point dict in a single message.
     ingest_batch([(dev, ts, {
-        'gen_tem_driend': 70.0, 'gen_tem_nonde': 68.0,
+        'tem_gen_driend': 70.0, 'tem_gen_nonde': 68.0,
         'rotate': 33, 'status': 'running'})])
     conn = connect(); cur = conn.cursor()
     cur.execute(
-        'SELECT gen_tem_driend, gen_tem_nonde, other_points '
+        'SELECT tem_gen_driend, tem_gen_nonde, other_points '
         'FROM wind_seconds_di '
         'WHERE device_id=%s AND ts=%s', (dev, ts))
     print('after one multi-point message:', cur.fetchone())
     cur.close(); conn.close()
 
     # Raw tag-format messages (real collector format), one per rule:
-    # 1. TEMGENDRIEND -> fixed column gen_tem_driend
-    # 2. SPEED -> None -> other_points
+    # 1. TEMGENDRIEND -> fixed column tem_gen_driend
+    # 2. GENSPD -> None -> other_points
     # 3. NOTMAPPED -> not in TAG_MAP -> message dropped
     raw_messages = [
         {"pointValue": 46.6, "description": "风机秒级数据",
          "tagName": "FJMJ1_B524F6D0B8FF4B2DBC0C102FC4B032B9WGEN.TEMGENDRIEND",
          "ts": "2026-09-30 13:57:20"},
         {"pointValue": 8.2, "description": "风机秒级数据",
-         "tagName": "FJMJ1_B524F6D0B8FF4B2DBC0C102FC4B032B9WGEN.SPEED",
+         "tagName": "FJMJ1_B524F6D0B8FF4B2DBC0C102FC4B032B9WGEN.GENSPD",
          "ts": "2026-09-30 13:57:20"},
         {"pointValue": 1.0, "description": "风机秒级数据",
          "tagName": "FJMJ1_B524F6D0B8FF4B2DBC0C102FC4B032B9WGEN.NOTMAPPED",
@@ -258,7 +262,7 @@ if __name__ == '__main__':
         ingest_raw([raw])
         conn = connect(); cur = conn.cursor()
         cur.execute(
-            'SELECT device_id, ts, gen_tem_driend, gen_tem_nonde, '
+            'SELECT device_id, ts, tem_gen_driend, tem_gen_nonde, '
             'other_points FROM wind_seconds_di '
             'WHERE device_id=%s AND ts=%s',
             (raw_dev, raw_ts))
