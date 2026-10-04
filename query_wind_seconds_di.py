@@ -10,11 +10,11 @@ SELECT
     ts,
     device_id,
     gen_tem_driend,
-    extra->>'status'              AS status,
-    (extra->>'power_kw')::numeric AS power_kw
+    other_points->>'status'              AS status,
+    (other_points->>'power_kw')::numeric AS power_kw
 FROM wind_seconds_di
-WHERE extra->>'status' = 'running'
-  AND (extra->>'power_kw')::numeric > 1000
+WHERE other_points->>'status' = 'running'
+  AND (other_points->>'power_kw')::numeric > 1000
 ORDER BY power_kw DESC, device_id ASC, ts DESC
 """
 cur.execute(sql)

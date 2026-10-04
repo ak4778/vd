@@ -4,20 +4,20 @@ import psycopg2
 # Merge upsert:
 # - each fixed column is overwritten only when a new value arrives (COALESCE
 #   keeps the old value when this message lacks it).
-# - every other point is merged into extra: new keys are appended, existing
-#   keys are overwritten, keys absent from this message stay untouched.
+# - every other point is merged into other_points: new keys are appended,
+#   existing keys are overwritten, keys absent from this message stay untouched.
 MERGE_SQL = """
 INSERT INTO wind_seconds_di
-    (device_id, ts, gen_tem_driend, gen_tem_nonde, extra)
+    (device_id, ts, gen_tem_driend, gen_tem_nonde, other_points)
 VALUES (%s, %s, %s, %s, %s::jsonb)
 ON CONFLICT (device_id, ts) DO UPDATE
 SET gen_tem_driend = COALESCE(EXCLUDED.gen_tem_driend, wind_seconds_di.gen_tem_driend),
     gen_tem_nonde = COALESCE(EXCLUDED.gen_tem_nonde, wind_seconds_di.gen_tem_nonde),
-    extra = COALESCE(wind_seconds_di.extra, '{}'::jsonb)
-            || COALESCE(EXCLUDED.extra, '{}'::jsonb)
+    other_points = COALESCE(wind_seconds_di.other_points, '{}'::jsonb)
+            || COALESCE(EXCLUDED.other_points, '{}'::jsonb)
 """
 
-# Points stored in fixed columns; every other point goes to extra.
+# Points stored in fixed columns; every other point goes to other_points.
 # To add another fixed column: add the column to the table and append its
 # name here (and to the column list in MERGE_SQL).
 FIXED_POINTS = ('gen_tem_driend', 'gen_tem_nonde')
@@ -36,7 +36,7 @@ def ingest_one(cur, device_id, ts, points):
         {'gen_tem_driend': 333, 'gen_tem_nonde': 320, 'rotate': 33}
       - a single (point_name, value) pair for backward compatibility, e.g.
         ('rotate', 33)
-    Fixed points go to their columns; every other point goes to extra.
+    Fixed points go to their columns; every other point goes to other_points.
     """
     if isinstance(points, dict):
         point_map = points
@@ -44,9 +44,10 @@ def ingest_one(cur, device_id, ts, points):
         point_name, value = points
         point_map = {point_name: value}
     fixed_vals = [point_map.get(fp) for fp in FIXED_POINTS]
-    extra = {k: v for k, v in point_map.items() if k not in FIXED_POINTS}
+    other_points = {k: v for k, v in point_map.items() if k not in FIXED_POINTS}
     cur.execute(MERGE_SQL,
-                (device_id, ts, *fixed_vals, json.dumps(extra, ensure_ascii=False)))
+                (device_id, ts, *fixed_vals,
+                 json.dumps(other_points, ensure_ascii=False)))
 
 
 def ingest_batch(messages):
@@ -85,7 +86,7 @@ TAG_PREFIX_LEN = 6  # characters skipped at the start of tagName
 
 # Parsed tagName key -> fixed column mapping.
 #   - key maps to a column name -> value goes into that fixed column
-#   - key maps to None          -> value goes into extra
+#   - key maps to None          -> value goes into other_points
 #   - key not in the map        -> the message is ignored (not inserted)
 # To promote another point to a fixed column later: add the column to the
 # table, FIXED_POINTS and MERGE_SQL, then set its mapping here.
@@ -156,7 +157,7 @@ if __name__ == '__main__':
     cur.close()
     conn.close()
 
-    # One message carrying multiple points (fixed + extra).
+    # One message carrying multiple points (fixed + other points).
     messages = [
         (dev, ts, {'power_kw': 1200}),
         (dev, ts, {'gen_tem_driend': 62.5}),
@@ -169,10 +170,11 @@ if __name__ == '__main__':
         conn = connect()
         cur = conn.cursor()
         cur.execute(
-            'SELECT gen_tem_driend, gen_tem_nonde, extra FROM wind_seconds_di '
+            'SELECT gen_tem_driend, gen_tem_nonde, other_points '
+            'FROM wind_seconds_di '
             'WHERE device_id=%s AND ts=%s', (dev, ts))
         row = cur.fetchone()
-        print(f'after {m[2]}: de={row[0]} nde={row[1]} extra={row[2]}')
+        print(f'after {m[2]}: de={row[0]} nde={row[1]} other_points={row[2]}')
         cur.execute(
             'SELECT count(*) FROM wind_seconds_di WHERE device_id=%s AND ts=%s',
             (dev, ts))
@@ -186,14 +188,15 @@ if __name__ == '__main__':
         'rotate': 33, 'status': 'running'})])
     conn = connect(); cur = conn.cursor()
     cur.execute(
-        'SELECT gen_tem_driend, gen_tem_nonde, extra FROM wind_seconds_di '
+        'SELECT gen_tem_driend, gen_tem_nonde, other_points '
+        'FROM wind_seconds_di '
         'WHERE device_id=%s AND ts=%s', (dev, ts))
     print('after one multi-point message:', cur.fetchone())
     cur.close(); conn.close()
 
     # Raw tag-format messages (real collector format), one per rule:
     # 1. TEMGENDRIEND -> fixed column gen_tem_driend
-    # 2. SPEED -> None -> extra
+    # 2. SPEED -> None -> other_points
     # 3. NOTMAPPED -> not in TAG_MAP -> message dropped
     raw_messages = [
         {"pointValue": 46.6, "description": "风机秒级数据",
@@ -212,8 +215,9 @@ if __name__ == '__main__':
         ingest_raw([raw])
         conn = connect(); cur = conn.cursor()
         cur.execute(
-            'SELECT device_id, ts, gen_tem_driend, gen_tem_nonde, extra '
-            'FROM wind_seconds_di WHERE device_id=%s AND ts=%s',
+            'SELECT device_id, ts, gen_tem_driend, gen_tem_nonde, '
+            'other_points FROM wind_seconds_di '
+            'WHERE device_id=%s AND ts=%s',
             (raw_dev, raw_ts))
         print(f'after ...{raw["tagName"][-15:]}:', cur.fetchone())
         cur.close(); conn.close()

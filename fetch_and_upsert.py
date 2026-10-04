@@ -50,7 +50,7 @@ RETRY_INTERVAL = 5
 SUFFIXES = [
     'WGEN.TEMGENDRIEND',     # 发电机驱动端温度 -> 固定列 gen_tem_driend
     'WGEN.TEMGENNONDRIEND',  # 发电机非驱动端温度 -> 固定列 gen_tem_nonde
-    'WGEN.SPEED',            # 转速 -> extra
+    'WGEN.SPEED',            # 转速 -> other_points
 ]
 # 非空时跳过设备发现，直接使用这些完整 tagName（如 ['FJMJ1_XXXWGEN.SPEED']）
 TARGETS = []
@@ -78,7 +78,7 @@ EXCLUDE_STATIONS = {
 OVERLAP_SECONDS = 300           # 每轮回退重叠，防迟到/钟漂
 INITIAL_LOOKBACK_SECONDS = 300  # 首次运行（无水位线文件）回看多久
 MAX_WINDOW_SECONDS = 3600       # 追历史时单窗上限，避免超大请求
-FETCH_INTERVAL_SECONDS = 30
+FETCH_INTERVAL_SECONDS = 3
 #MOCK = False                    # True = 不请求真实接口，用模拟数据
 MOCK = True                     # True = 不请求真实接口，用模拟数据
 PRINT_INGESTED = True           # 打印每条实际入库的数据（device_id/ts/测点）
