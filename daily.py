@@ -108,7 +108,7 @@ REFERER = ('http://10.170.243.41/webroot/decision/view/report?viewlet='
            '%25E6%259C%25BA%25E7%25BB%2584%25E8%25BF%2590%25E8%25A1%258C%25E6%2597%25A5%25E6%25B1%2587%25E6%2599%25BB%25E8%25A1%25A8_GD.cpt')
 CONSTITUENT = '4094f09bb4b2443a926bad9840c42841'
 CONSTITUENTNAME = '国电电力'
-SESSION_ID = 'EAB035E6381D2295490A948BA6BE1C34'
+SESSION_ID = '386897a1-e5f9-4e3d-88d8-c027f8f9086d' 
 
 
 
@@ -630,3 +630,4 @@ if __name__ == '__main__':
         sys.exit(3)
     finally:
         print_stats()
+    json_to_csv()
