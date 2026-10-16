@@ -123,7 +123,7 @@ TAG_MAP = {
     'WTRM.TEMGEAOIL': 'tem_gea_oil',  # 齿轮箱油池温度
     'WTRM.TEMGEAMSDE': 'tem_gea_msde',  # 齿轮箱高速轴驱动端温度
     'WTRM.TEMGEAMSND': 'tem_gea_msnd',  # 齿轮箱高速轴非驱动端温度
-    'WGEN.GENSPD': None,            # 发电机转速 -> other_points
+ #   'WGEN.GENSPD': None,            # 发电机转速 -> other_points
     #'WNAC.WINDSPEED': None,         # 机舱风速 -> other_points
 }
 

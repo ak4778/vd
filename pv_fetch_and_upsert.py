@@ -182,6 +182,7 @@ COLLECT_WINDOWS = [
     (dtime(14, 0, 0), dtime(16, 0, 0)),
 ]
 IDLE_SLEEP_SECONDS = 60                    # 非采集时段的轮询间隔
+IDLE_HEARTBEAT_SECONDS = 600               # 空闲期每多少秒输出一次心跳（证明进程活着，且提示下一时段）
 WINDOW_FLUSH_SECONDS = MAX_WINDOW_SECONDS   # 时段结束后收尾补采的宽限秒数
 
 MOCK = False
@@ -478,6 +479,16 @@ def _schedule_desc():
                      for s, e in COLLECT_WINDOWS)
 
 
+def _next_segment(now):
+    """返回严格晚于 now 的下一个采集时段起点，跨天则取次日首段。"""
+    today = now.date()
+    for s, _e in COLLECT_WINDOWS:
+        t = datetime.combine(today, s)
+        if t > now:
+            return t
+    return datetime.combine(today + timedelta(days=1), COLLECT_WINDOWS[0][0])
+
+
 def _active_window(now):
     """返回 now 所处的采集时段 [open, close)（close 已 +1s，排他）；无则 None。
 
@@ -561,6 +572,7 @@ def main():
         log.warning('分区维护失败（不影响采集）: %r', e)
     last_integrity = time.time()
     idle = None  # None=未知, True=空闲中, False=采集时段内
+    idle_cycles = 0  # 空闲循环累计轮数，用于周期性心跳
     while True:
         now = datetime.now()
         active, _wo, _wc = collect_state(now)
@@ -568,11 +580,19 @@ def main():
             if idle is not True:
                 log.info('非采集时段（每天 [%s]），空闲等待', _schedule_desc())
                 idle = True
+                idle_cycles = 0
+            else:
+                idle_cycles += 1
+                if idle_cycles * IDLE_SLEEP_SECONDS >= IDLE_HEARTBEAT_SECONDS:
+                    log.info('空闲中，下一时段 %s',
+                             _next_segment(now).strftime('%m-%d %H:%M:%S'))
+                    idle_cycles = 0
             time.sleep(IDLE_SLEEP_SECONDS)
             continue
         if idle is not False:
             log.info('进入采集时段（每天 [%s]），恢复采集', _schedule_desc())
             idle = False
+            idle_cycles = 0
             try:
                 ensure_partitions()
             except Exception as e:
