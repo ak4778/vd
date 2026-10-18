@@ -1033,6 +1033,146 @@ static struct user *find_user_by_creds(const char *name, const char *pw) {
   return NULL;
 }
 
+// ---- 告警实时推送（wind_alarm 增量轮询 + WebSocket 广播，仅 PG 模式） ----
+// 数据流：1s 定时器从 wind_alarm 增量拉取（id 游标）-> 追加进内存快照缓存 ->
+// 广播给所有标记 'A' 的 WS 连接；新连接先发 hello + 快照（旧->新），后续增量推送。
+// 事件循环单线程访问缓存/游标，worker 线程不触碰，无需额外加锁；
+// ds_get_new_alarms 内部经 pg 全局 mutex 与 nodes 查询串行化。
+#define ALARM_POLL_MS        1000  // 轮询周期
+#define ALARM_POLL_LIMIT     100   // 单轮最多拉取行数（主键索引扫描，毫秒级）
+#define ALARM_CACHE_MAX      200   // 快照缓存容量（新连接重放最近 200 条）
+#define ALARM_JSON_ROW_MAX   768   // 单行 JSON 预算（含转义膨胀，超长截断）
+
+static struct ds_alarm s_alarm_cache[ALARM_CACHE_MAX];
+static int s_alarm_cache_count = 0;             // 有效行数（旧 -> 新）
+static unsigned long long s_alarm_last_id = 0;  // 已拉取的最大事件 id（游标）
+static int s_alarm_poll_enabled = 0;            // web_init 时探测一次
+
+static int is_alarm_watcher(struct mg_connection *c) {
+  return c->data[0] == 'A' && c->is_websocket;
+}
+
+static int have_alarm_watchers(struct mg_mgr *mgr) {
+  int count = 0;
+  for (struct mg_connection *c = mgr->conns; c != NULL; c = c->next) {
+    if (is_alarm_watcher(c)) count++;
+  }
+  return count;
+}
+
+// 带截断保护的格式化追加：返回新 pos；空间不足时停在 cap（JSON 残缺仅影响
+// 单条消息，预算内不会发生）。仅用于字面量/数字等可预测长度的片段。
+static int alarm_append(char *out, int pos, int cap, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int room = cap - pos;
+  int n = vsnprintf(out + pos, room > 0 ? (size_t) room : 0, fmt, ap);
+  va_end(ap);
+  if (n < 0) return pos;
+  if (n >= room) return cap;  // 截断
+  return pos + n;
+}
+
+// 单行告警 JSON（字段顺序与前端展示一致）
+static int alarm_row_json(char *out, int pos, int cap, const struct ds_alarm *r) {
+  pos = alarm_append(out, pos, cap,
+                     "{\"id\":%llu,\"event\":\"%s\",\"event_time\":\"%s\","
+                     "\"data_ts\":\"%s\",\"device_id\":\"",
+                     r->id, r->event, r->event_time, r->data_ts);
+  pos = json_escape_append(out, pos, cap, r->device_id);
+  pos = alarm_append(out, pos, cap, "\",\"device_name\":\"");
+  pos = json_escape_append(out, pos, cap, r->device_name);
+  pos = alarm_append(out, pos, cap, "\",\"point_code\":\"");
+  pos = json_escape_append(out, pos, cap, r->point_code);
+  pos = alarm_append(out, pos, cap, "\",\"point_name\":\"");
+  pos = json_escape_append(out, pos, cap, r->point_name);
+  pos = alarm_append(out, pos, cap, "\",\"rule_code\":\"");
+  pos = json_escape_append(out, pos, cap, r->rule_code);
+  pos = alarm_append(out, pos, cap, "\",\"alarm_type\":\"");
+  pos = json_escape_append(out, pos, cap, r->alarm_type);
+  pos = alarm_append(out, pos, cap, "\",\"temperature\":%.2f,\"alarm_value\":%.2f,\"detail\":\"",
+                     r->temperature, r->alarm_value);
+  pos = json_escape_append(out, pos, cap, r->detail);
+  pos = alarm_append(out, pos, cap, "\"}");
+  return pos;
+}
+
+static void alarm_send_hello(struct mg_connection *c) {
+  char buf[96];
+  int n = snprintf(buf, sizeof(buf), "{\"type\":\"hello\",\"supported\":%s}",
+                   s_alarm_poll_enabled ? "true" : "false");
+  if (n > 0) mg_ws_send(c, buf, (size_t) n, WEBSOCKET_OP_TEXT);
+}
+
+// 快照：把缓存整体发给新连接（旧 -> 新，单帧）。缓存 <= 200 行 x 768B 预算。
+static void alarm_send_snapshot(struct mg_connection *c) {
+  int cap = ALARM_CACHE_MAX * ALARM_JSON_ROW_MAX + 256;
+  char *buf = (char *) malloc((size_t) cap);
+  if (buf == NULL) return;
+  int pos = alarm_append(buf, 0, cap, "{\"type\":\"snapshot\",\"items\":[");
+  for (int i = 0; i < s_alarm_cache_count; i++) {
+    if (i > 0) pos = alarm_append(buf, pos, cap, ",");
+    pos = alarm_row_json(buf, pos, cap, &s_alarm_cache[i]);
+  }
+  pos = alarm_append(buf, pos, cap, "]}");
+  if (pos > 0 && pos < cap) {
+    mg_ws_send(c, buf, (size_t) pos, WEBSOCKET_OP_TEXT);
+  }
+  free(buf);
+}
+
+// 1s 定时器：增量拉取 + 缓存追加 + 广播
+static void alarm_poll(struct mg_mgr *mgr) {
+  if (!s_alarm_poll_enabled) return;
+
+  struct ds_alarm rows[ALARM_POLL_LIMIT];
+  int n = ds_get_new_alarms(s_alarm_last_id, rows, ALARM_POLL_LIMIT);
+  MG_DEBUG(("alarm_poll tick last=%llu n=%d watchers=%d", s_alarm_last_id, n,
+            have_alarm_watchers(mgr)));
+  if (n <= 0) return;
+
+  // 追加进快照缓存（满则丢最老），游标推进到最后一条
+  for (int i = 0; i < n; i++) {
+    if (s_alarm_cache_count == ALARM_CACHE_MAX) {
+      memmove(&s_alarm_cache[0], &s_alarm_cache[1],
+              sizeof(struct ds_alarm) * (size_t) (ALARM_CACHE_MAX - 1));
+      s_alarm_cache_count--;
+    }
+    s_alarm_cache[s_alarm_cache_count++] = rows[i];
+    s_alarm_last_id = rows[i].id;
+  }
+
+  // 广播前先确认有 watcher，避免无谓的 JSON 构建
+  struct mg_connection *c;
+  bool have_watcher = false;
+  for (c = mgr->conns; c != NULL; c = c->next) {
+    if (is_alarm_watcher(c)) { have_watcher = true; break; }
+  }
+  if (!have_watcher) return;
+
+  int cap = n * ALARM_JSON_ROW_MAX + 128;
+  char *buf = (char *) malloc((size_t) cap);
+  if (buf == NULL) return;
+  int pos = alarm_append(buf, 0, cap, "{\"type\":\"alarm\",\"items\":[");
+  for (int i = 0; i < n; i++) {
+    if (i > 0) pos = alarm_append(buf, pos, cap, ",");
+    pos = alarm_row_json(buf, pos, cap, &rows[i]);
+  }
+  pos = alarm_append(buf, pos, cap, "]}");
+  if (pos > 0 && pos < cap) {
+    for (c = mgr->conns; c != NULL; c = c->next) {
+      if (is_alarm_watcher(c)) {
+        mg_ws_send(c, buf, (size_t) pos, WEBSOCKET_OP_TEXT);
+      }
+    }
+  }
+  free(buf);
+}
+
+static void alarm_poll_timer(void *arg) {
+  alarm_poll((struct mg_mgr *) arg);
+}
+
 static void handle_login(struct mg_connection *c, struct mg_http_message *hm,
                          struct user *u) {
   // Lifted to function scope so we can scrub them on every return path.
@@ -1120,6 +1260,14 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
                 c->id, c->tls, c->is_tls, c->is_tls_hs);
       }
     }
+  } else if (ev == MG_EV_WS_OPEN) {
+    // WS 握手完成（mg_ws_upgrade 内同步触发）：按连接标记分发
+    MG_DEBUG(("%lu WS_OPEN data0=%c ws=%d", c->id, c->data[0], c->is_websocket));
+    if (c->data[0] == 'A') {
+      alarm_send_hello(c);
+      if (s_alarm_poll_enabled) alarm_send_snapshot(c);
+      MG_DEBUG(("%lu alarm hello+snapshot queued, send.len=%zu", c->id, c->send.len));
+    }
   } else if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
     struct user *u = authenticate(hm);
@@ -1161,6 +1309,16 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
     } else if (mg_match(hm->uri, mg_str("/api/#"), NULL) && u == NULL) {
       mg_http_reply(c, 403, s_json_header, "{\"status\":\"false\",\"message\":\"Not Authorised\"}");
       // ---- Protected routes below (guaranteed u != NULL for /api/*) ----
+    } else if (mg_match(hm->uri, mg_str("/api/alarms/ws"), NULL)) {
+      // 告警实时推送订阅：认证通过后升级为 WebSocket。升级成功同步触发
+      // MG_EV_WS_OPEN（发送 hello + 快照），后续由 alarm_poll 1s 广播增量。
+      // c->data[0]='A' 标记订阅连接；连接断开自动从 mgr->conns 消失，无需清理。
+      if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
+        mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");
+      } else {
+        c->data[0] = 'A';
+        mg_ws_upgrade(c, hm, NULL);
+      }
     } else if (mg_match(hm->uri, mg_str("/api/nodes/queryCategory"), NULL)) {
       if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
         mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");
@@ -1213,6 +1371,15 @@ void web_init(struct mg_mgr *mgr) {
 
   MG_INFO(("Web server starting in %s mode", DS_MODE));
   mg_timer_add(mgr, 20, MG_TIMER_REPEAT, dispatch_results, mgr);
+
+  // 告警推送：一次性探测（PG 连接 + wind_alarm 表存在性，结果缓存于驱动内）
+  s_alarm_poll_enabled = (ds_alarm_supported() == 1);
+  if (s_alarm_poll_enabled) {
+    MG_INFO(("Alarm push enabled (wind_alarm incremental polling every %dms)", ALARM_POLL_MS));
+  } else {
+    MG_INFO(("Alarm push disabled (PG mode with wind_alarm table required)"));
+  }
+  mg_timer_add(mgr, ALARM_POLL_MS, MG_TIMER_REPEAT, alarm_poll_timer, mgr);
 
   char http_url[64];
   char https_url[64];

@@ -506,6 +506,99 @@ fail:
   return -1;
 }
 
+// ---- 告警事件流水增量查询（wind_alarm，告警 WS 推送专用） ----
+// 表由 monitor_fj_state.py 建表并写入，本模块只读。
+static int s_alarm_table_ok = -1;  // -1 未探测 / 0 表不存在 / 1 表存在
+
+int pg_alarm_supported(void) {
+  pg_mutex_lock();
+  if (s_conn == NULL) {
+    pg_mutex_unlock();
+    return 0;
+  }
+  if (s_alarm_table_ok < 0) {
+    // 一次性探测表是否存在（monitor_fj_state.py 未启动时表尚未建）
+    PGresult *res =
+        PQexec(s_conn, "SELECT 1 FROM to_regclass('public.wind_alarm')");
+    s_alarm_table_ok =
+        (res != NULL && PQresultStatus(res) == PGRES_TUPLES_OK &&
+         PQntuples(res) == 1);
+    PQclear(res);
+    if (!s_alarm_table_ok) {
+      fprintf(stderr, "wind_alarm table not found - alarm push disabled\n");
+    }
+  }
+  int ok = s_alarm_table_ok;
+  pg_mutex_unlock();
+  return ok;
+}
+
+static void alarm_set_str(char *dst, size_t cap, PGresult *res, int row,
+                          int col) {
+  // libpq 对 NULL 返回空串，与 get_nodes 的 NULL->"" 兜底语义一致
+  snprintf(dst, cap, "%s", PQgetvalue(res, row, col));
+}
+
+// 拉取 id > after_id 的新告警事件（按 id 升序，最多 max_rows 行）。
+// 返回实际行数；连接不可用或查询失败返回 -1。
+int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
+                      int max_rows) {
+  if (s_conn == NULL || rows == NULL || max_rows <= 0) return -1;
+  pg_mutex_lock();
+  if (s_conn == NULL) {
+    pg_mutex_unlock();
+    return -1;
+  }
+
+  // 主键范围扫描，单轮上限由调用方控制（100 行），避免一次拉爆
+  char idbuf[32], limbuf[16];
+  snprintf(idbuf, sizeof(idbuf), "%llu", after_id);
+  snprintf(limbuf, sizeof(limbuf), "%d", max_rows);
+  const char *vals[2] = {idbuf, limbuf};
+
+  static const char *SQL =
+      "SELECT id, event,"
+      " to_char(event_time, 'YYYY-MM-DD HH24:MI:SS'),"
+      " COALESCE(to_char(data_ts, 'YYYY-MM-DD HH24:MI:SS'), ''),"
+      " device_id, COALESCE(device_name, ''),"
+      " point_code, COALESCE(point_name, ''),"
+      " rule_code, COALESCE(alarm_type, ''),"
+      " COALESCE(temperature, 0), COALESCE(alarm_value, 0),"
+      " COALESCE(detail, '')"
+      " FROM wind_alarm WHERE id > $1 ORDER BY id ASC LIMIT $2";
+
+  PGresult *res = PQexecParams(s_conn, SQL, 2, NULL, vals, NULL, NULL, 0);
+  if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
+    fprintf(stderr, "PG alarm query error: %s\n", PQerrorMessage(s_conn));
+    PQclear(res);
+    pg_mutex_unlock();
+    return -1;
+  }
+
+  int n = PQntuples(res);
+  if (n > max_rows) n = max_rows;
+  for (int i = 0; i < n; i++) {
+    struct ds_alarm *r = &rows[i];
+    memset(r, 0, sizeof(*r));
+    r->id = strtoull(PQgetvalue(res, i, 0), NULL, 10);
+    alarm_set_str(r->event, sizeof(r->event), res, i, 1);
+    alarm_set_str(r->event_time, sizeof(r->event_time), res, i, 2);
+    alarm_set_str(r->data_ts, sizeof(r->data_ts), res, i, 3);
+    alarm_set_str(r->device_id, sizeof(r->device_id), res, i, 4);
+    alarm_set_str(r->device_name, sizeof(r->device_name), res, i, 5);
+    alarm_set_str(r->point_code, sizeof(r->point_code), res, i, 6);
+    alarm_set_str(r->point_name, sizeof(r->point_name), res, i, 7);
+    alarm_set_str(r->rule_code, sizeof(r->rule_code), res, i, 8);
+    alarm_set_str(r->alarm_type, sizeof(r->alarm_type), res, i, 9);
+    r->temperature = atof(PQgetvalue(res, i, 10));
+    r->alarm_value = atof(PQgetvalue(res, i, 11));
+    alarm_set_str(r->detail, sizeof(r->detail), res, i, 12);
+  }
+  PQclear(res);
+  pg_mutex_unlock();
+  return n;
+}
+
 const struct ds_driver pg_driver = {
     "pg",
     pg_init,

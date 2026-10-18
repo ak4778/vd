@@ -43,12 +43,13 @@ function Header({logout, user, setShowSidebar, showSidebar, dbMode, dbAvailable}
 <//>`;
 };
 
-function Sidebar({url, show}) {
-  const NavLink = ({title, icon, href, url}) => html`
+function Sidebar({url, show, alarmUnread}) {
+  const NavLink = ({title, icon, href, url, badge}) => html`
   <div>
-    <a href="#${href}" class="${href == url ? 'bg-slate-50 text-blue-600 group' : 'text-gray-700 hover:text-blue-600 hover:bg-gray-50 group'} flex gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold">
+    <a href="#${href}" class="${href == url ? 'bg-slate-50 text-blue-600 group' : 'text-gray-700 hover:text-blue-600 hover:bg-gray-50 group'} flex gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold relative">
       <${icon} class="w-6 h-6"/>
       ${title}
+      ${badge > 0 && html`<span class="absolute right-2 top-1/2 -translate-y-1/2 min-w-[1.35rem] px-1 py-0.5 rounded-full bg-red-500 text-white text-xs font-bold text-center leading-4">${badge > 99 ? '99+' : badge}<//>`}
     <///>
   <//>`;
   return html`
@@ -59,10 +60,11 @@ function Sidebar({url, show}) {
             ${show && 'translate-x-0'} right-auto bottom-0">
   <div class="flex flex-col m-4 gap-y-6">
     <div class="flex h-10 shrink-0 items-center gap-x-4 font-bold text-xl text-slate-500">
-      <${Logo} class="h-full"/> GD 
+      <${Logo} class="h-full"/> GD
     <//>
-    <div class="flex flex-1 flex-col">
+    <div class="flex flex-1 flex-col gap-y-1">
       <${NavLink} title="视频设备" icon=${Icons.camera} href="/events" url=${url} />
+      <${NavLink} title="实时告警" icon=${Icons.exclamationTriangle} href="/alarms" url=${url} badge=${url === '/alarms' ? 0 : alarmUnread} />
     <//>
   <//>
 <//>`;
@@ -712,6 +714,76 @@ return html`
 <//>`;
 };
 
+// ---- 实时告警页（数据来自 /api/alarms/ws 推送，App 持有 state） ----
+// NOTE: AlarmRow 定义在模块作用域，原因见上方 Td/Node 的注释（Preact diffing）。
+const ALARM_CAP = 500;  // 前端最多保留的告警条数（超出丢弃最旧）
+
+const AlarmRow = ({a}) => {
+  const isAlarm = a.event === 'ALARM';
+  return html`
+  <tr class="hover:bg-slate-50">
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.event_time}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4">
+      <span class="px-2 py-0.5 rounded text-xs font-bold ${isAlarm ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}">${a.event}<//>
+    <//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm">
+      <span class="text-slate-800">${a.device_name || a.device_id}<//>
+      ${a.device_name && html`<span class="text-slate-400 ml-1 text-xs">(${a.device_id})<//>`}
+    <//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm">
+      <span class="text-slate-800">${a.point_name || a.point_code}<//>
+      ${a.point_name && html`<span class="text-slate-400 ml-1 text-xs">(${a.point_code})<//>`}
+    <//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.rule_code}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.temperature != null && a.temperature !== 0 ? a.temperature.toFixed(1) : '-'}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600">${a.detail || ''}<//>
+  <//>`;
+};
+
+// 模块作用域表格头（稳定 vnode）
+const alarmColumns = [
+  {label: '时间', width: '150px'},
+  {label: '事件', width: '90px'},
+  {label: '设备', width: '220px'},
+  {label: '测点', width: '200px'},
+  {label: '规则', width: '110px'},
+  {label: '温度(°C)', width: '90px'},
+  {label: '详情', width: ''},
+];
+
+function Alarms({items, wsOk}) {
+  const latest = items.length > 0 ? items[0].event_time : '';
+  return html`
+  <div class="flex-1 min-h-0 flex flex-col p-2">
+    <div class="flex items-center gap-3 py-2 flex-wrap">
+      <div class="text-lg font-bold text-slate-700">实时告警</div>
+      <span class="flex items-center gap-1.5 text-sm ${wsOk ? 'text-green-600' : 'text-red-500'}">
+        <span class="w-2 h-2 rounded-full ${wsOk ? 'bg-green-500' : 'bg-red-500'} ${wsOk ? '' : 'animate-pulse'}"><//>
+        ${wsOk ? '已连接' : '重连中...'}
+      <//>
+      <span class="text-sm text-slate-500">共 ${items.length} 条</span>
+      ${latest && html`<span class="text-sm text-slate-400">最新: ${latest}<//>`}
+    <//>
+    <div class="flex-1 min-h-0 overflow-auto scrollbar-force bg-white">
+      <table class="border-separate border-spacing-0 bg-white" style="table-layout: fixed; width: 100%;">
+        <thead>
+          <tr>
+            ${alarmColumns.map(c => html`
+              <th scope="col" class="sticky top-0 z-10 border-b border-slate-300 bg-white py-1.5 px-4 text-left text-sm font-semibold text-slate-900" style=${c.width ? `width:${c.width}` : ''}>${c.label}<//>
+            `)}
+          <//>
+        <//>
+        <tbody>
+          ${items.length === 0 ? html`<tr><td colspan="7" class="text-center py-8 text-gray-500">
+            ${wsOk ? '暂无告警，等待新事件...' : '未连接告警服务，等待重连...'}
+          <//></tr>` :
+          items.map(a => h(AlarmRow, {key: a.id, a}))}
+        <//>
+      <//>
+    <//>
+  <//>`;
+}
+
 const App = function({}) {
   const [loading, setLoading] = useState(true);
   const [url, setUrl] = useState('/');
@@ -719,11 +791,73 @@ const App = function({}) {
   const [showSidebar, setShowSidebar] = useState(true);
   const [dbMode, setDbMode] = useState('');
   const [dbAvailable, setDbAvailable] = useState(true);
+  // 告警推送状态：items 新->旧，unread 仅统计非 /alarms 页收到的新 ALARM 事件
+  const [alarmItems, setAlarmItems] = useState([]);
+  const [alarmUnread, setAlarmUnread] = useState(0);
+  const [alarmWsOk, setAlarmWsOk] = useState(false);
+
+  const urlRef = useRef(url);
+  urlRef.current = url;
 
   const logout = () => fetchWithTimeout('api/logout', { method: 'POST', credentials: 'include' }).then(r => setUser('')).catch(() => setUser(''));
   const login = r => !r.ok ? setLoading(false) && setUser(null) : r.json()
       .then(r => setUser(r.user))
       .finally(r => setLoading(false));
+
+  // hash 路由：#/events / #/alarms（Sidebar NavLink 的 href 即锚点）
+  useEffect(() => {
+    const onHash = () => setUrl(location.hash.slice(1) || '/');
+    window.addEventListener('hashchange', onHash);
+    onHash();
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  // 进入告警页清零未读徽标
+  useEffect(() => {
+    if (url === '/alarms') setAlarmUnread(0);
+  }, [url]);
+
+  // 告警 WS：登录后建连；断线 2s 重连；登出关闭。
+  // 快照(旧->新)倒序入 state；live 增量(旧->新)同样倒序前插。
+  useEffect(() => {
+    if (!user) return undefined;
+    let ws = null;
+    let timer = null;
+    let disposed = false;
+    const connect = () => {
+      if (disposed) return;
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${proto}//${location.host}/api/alarms/ws`);
+      ws.onopen = () => setAlarmWsOk(true);
+      ws.onmessage = ev => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch (e) { return; }
+        if (msg.type === 'snapshot') {
+          setAlarmItems([...(msg.items || [])].reverse().slice(0, ALARM_CAP));
+        } else if (msg.type === 'alarm') {
+          const fresh = msg.items || [];
+          if (fresh.length === 0) return;
+          setAlarmItems(prev => [...fresh].reverse().concat(prev).slice(0, ALARM_CAP));
+          if (urlRef.current !== '/alarms') {
+            const n = fresh.filter(x => x.event === 'ALARM').length;
+            if (n > 0) setAlarmUnread(u => u + n);
+          }
+        }
+      };
+      ws.onclose = () => {
+        setAlarmWsOk(false);
+        if (!disposed) timer = setTimeout(connect, 2000);
+      };
+      ws.onerror = () => {};
+    };
+    connect();
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+      if (ws) ws.close();
+      setAlarmWsOk(false);
+    };
+  }, [user]);
 
   useEffect(() => {
     fetchWithTimeout('api/login', { method: 'POST', credentials: 'include' }).then(login).catch(() => { setLoading(false); setUser(null); });
@@ -746,10 +880,10 @@ const App = function({}) {
 
   return html`
 <div class="h-screen bg-slate-100 flex flex-col overflow-hidden">
-  <${Sidebar} url=${url} show=${showSidebar} />
+  <${Sidebar} url=${url} show=${showSidebar} alarmUnread=${alarmUnread} />
   <${Header} logout=${logout} user=${user} showSidebar=${showSidebar} setShowSidebar=${setShowSidebar} dbMode=${dbMode} dbAvailable=${dbAvailable} />
   <div class="flex-1 min-h-0 ${showSidebar && 'pl-40'} transition-all duration-300 transform flex flex-col">
-    <${Events} />
+    ${url === '/alarms' ? html`<${Alarms} items=${alarmItems} wsOk=${alarmWsOk} />` : html`<${Events} />`}
   <//>
 <//>`;
 };

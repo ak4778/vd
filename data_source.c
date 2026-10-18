@@ -51,6 +51,33 @@ int ds_is_available(void) {
   return s_active_driver->is_available();
 }
 
+// ---- 告警事件流水查询：不进驱动 vtable（仅 PG 有此能力，避免改三处驱动） ----
+#if defined(PG_MODE)
+int pg_alarm_supported(void);
+int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
+                      int max_rows);
+#endif
+
+int ds_alarm_supported(void) {
+#if defined(PG_MODE)
+  return pg_alarm_supported();
+#else
+  return 0;
+#endif
+}
+
+int ds_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
+                      int max_rows) {
+#if defined(PG_MODE)
+  return pg_get_new_alarms(after_id, rows, max_rows);
+#else
+  (void) after_id;
+  (void) rows;
+  (void) max_rows;
+  return -1;
+#endif
+}
+
 const struct ds_driver *ds_get_driver(void) {
   return s_active_driver;
 }
