@@ -56,6 +56,7 @@ static char *get_config_buf(void);
 static int get_max_page_size(void);
 static int get_default_page_size(void);
 static void load_users_from_config(const char *cfg_buf);
+static void alarm_dispatch_results(struct mg_mgr *mgr);
 
 struct work_request {
   struct mg_mgr *mgr;
@@ -653,6 +654,9 @@ static void dispatch_results(void *arg) {
     free(r);
     r = next;
   }
+
+  // 消费告警轮询 worker 线程的查询结果（见告警区块）
+  alarm_dispatch_results(mgr);
 }
 
 static char *g_cfg_buf = NULL;
@@ -1034,10 +1038,13 @@ static struct user *find_user_by_creds(const char *name, const char *pw) {
 }
 
 // ---- 告警实时推送（wind_alarm 增量轮询 + WebSocket 广播，仅 PG 模式） ----
-// 数据流：1s 定时器从 wind_alarm 增量拉取（id 游标）-> 追加进内存快照缓存 ->
-// 广播给所有标记 'A' 的 WS 连接；新连接先发 hello + 快照（旧->新），后续增量推送。
-// 事件循环单线程访问缓存/游标，worker 线程不触碰，无需额外加锁；
-// ds_get_new_alarms 内部经 pg 全局 mutex 与 nodes 查询串行化。
+// 数据流：1s 定时器投递查询任务 -> worker 线程阻塞查库（ds_get_new_alarms，
+// 内部经 pg 全局 mutex 与 nodes 查询串行化）-> 结果挂 s_alarm_results 链表
+// （复用 results 临界区）-> 事件循环的 dispatch_results（20ms）消费：游标
+// 推进、追加内存快照缓存、广播给所有标记 'A' 的 WS 连接；新连接先发
+// hello + 快照（旧->新），后续增量推送。
+// 与 /api/nodes/get 同一异步模式：DB 抖动/慢查询只阻塞 worker 线程，
+// 事件循环不受影响；s_alarm_query_inflight 防止上轮未回时任务堆积。
 #define ALARM_POLL_MS        1000  // 轮询周期
 #define ALARM_POLL_LIMIT     100   // 单轮最多拉取行数（主键索引扫描，毫秒级）
 #define ALARM_CACHE_MAX      200   // 快照缓存容量（新连接重放最近 200 条）
@@ -1121,16 +1128,34 @@ static void alarm_send_snapshot(struct mg_connection *c) {
   free(buf);
 }
 
-// 1s 定时器：增量拉取 + 缓存追加 + 广播
-static void alarm_poll(struct mg_mgr *mgr) {
-  if (!s_alarm_poll_enabled) return;
-
+// 1s 定时器：投递查询任务（查询本身在 worker 线程执行，见 alarm_query_thread）
+static struct alarm_work {
+  struct mg_mgr *mgr;
+  unsigned long long last_id;              // 查询起点游标（投递时快照）
   struct ds_alarm rows[ALARM_POLL_LIMIT];
-  int n = ds_get_new_alarms(s_alarm_last_id, rows, ALARM_POLL_LIMIT);
-  MG_DEBUG(("alarm_poll tick last=%llu n=%d watchers=%d", s_alarm_last_id, n,
-            have_alarm_watchers(mgr)));
-  if (n <= 0) return;
+  int n;                                   // worker 填：行数，<0 查询错误
+  struct alarm_work *next;
+} *s_alarm_results_head = NULL, *s_alarm_results_tail = NULL;
+static int s_alarm_query_inflight = 0;     // 仅事件循环线程读写
 
+// worker 线程：阻塞查库，结果挂链表（复用 results 临界区保护）
+static void alarm_query_thread(void *param) {
+  struct alarm_work *w = (struct alarm_work *) param;
+  w->n = ds_get_new_alarms(w->last_id, w->rows, ALARM_POLL_LIMIT);
+  w->next = NULL;
+  results_lock();
+  if (s_alarm_results_tail != NULL) {
+    s_alarm_results_tail->next = w;
+    s_alarm_results_tail = w;
+  } else {
+    s_alarm_results_head = s_alarm_results_tail = w;
+  }
+  results_unlock();
+}
+
+// 事件循环线程：游标推进 + 快照缓存追加 + 广播
+static void alarm_handle_rows(struct mg_mgr *mgr, const struct ds_alarm *rows,
+                              int n) {
   // 追加进快照缓存（满则丢最老），游标推进到最后一条
   for (int i = 0; i < n; i++) {
     if (s_alarm_cache_count == ALARM_CACHE_MAX) {
@@ -1170,7 +1195,37 @@ static void alarm_poll(struct mg_mgr *mgr) {
 }
 
 static void alarm_poll_timer(void *arg) {
-  alarm_poll((struct mg_mgr *) arg);
+  struct mg_mgr *mgr = (struct mg_mgr *) arg;
+  if (!s_alarm_poll_enabled) return;
+  if (s_alarm_query_inflight) return;  // 上轮未回（DB 慢），跳过本轮
+  struct alarm_work *w = (struct alarm_work *) calloc(1, sizeof(*w));
+  if (w == NULL) return;
+  w->mgr = mgr;
+  w->last_id = s_alarm_last_id;
+  s_alarm_query_inflight = 1;
+  start_thread(alarm_query_thread, w);
+}
+
+// 事件循环线程：由 dispatch_results 每 20ms 调用，消费 worker 查回的结果
+static void alarm_dispatch_results(struct mg_mgr *mgr) {
+  results_lock();
+  struct alarm_work *w = s_alarm_results_head;
+  s_alarm_results_head = s_alarm_results_tail = NULL;
+  results_unlock();
+
+  while (w != NULL) {
+    struct alarm_work *wnext = w->next;
+    s_alarm_query_inflight = 0;  // 事件循环独占写，允许下一轮投递
+    MG_DEBUG(("alarm result n=%d watchers=%d", w->n,
+              have_alarm_watchers(mgr)));
+    if (w->n > 0) {
+      alarm_handle_rows(mgr, w->rows, w->n);
+    } else if (w->n < 0) {
+      MG_ERROR(("alarm poll query failed, cursor kept at %llu", w->last_id));
+    }
+    free(w);
+    w = wnext;
+  }
 }
 
 static void handle_login(struct mg_connection *c, struct mg_http_message *hm,

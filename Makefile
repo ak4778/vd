@@ -20,10 +20,13 @@ CFLAGS += -DMG_ENABLE_CUSTOM_LOG=1
 # URL-encoded CJK keyword; oversized lines chunk-flush, nothing is lost.
 CFLAGS += -DLOG_LINE_BUF_SIZE=2048
 
-# Database mode: SQLite (default), CSV, or PostgreSQL
-# To use SQLite (default): make
-# To use CSV: make CSV_MODE=1
-# To use PostgreSQL: make PG_MODE=1  (PG_HOME overrides the libpq install dir)
+# Database mode: PostgreSQL (default), CSV, or SQLite
+# Default: make            (PostgreSQL)
+# To use CSV:    make CSV_MODE=1
+# To use SQLite: make PG_MODE=0
+ifneq ($(CSV_MODE),1)
+  PG_MODE ?= 1
+endif
 ifeq ($(CSV_MODE),1)
   CFLAGS += -DCSV_MODE
   SOURCES += csv_driver.c
