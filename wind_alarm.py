@@ -7,7 +7,7 @@
 设备白名单：本地 wind_device 表即监控白名单，只拉取表内风机（含元数据，不走 1022 接口）。
 数据来源（DATA_SOURCE 切换）：
   - 'db'（默认）：本地 PG wind_seconds_di 表（wind_fetch_and_upsert.py 采集入库），
-    两个监控测点对应固定列 tem_gen_driend / tem_gen_nonde；device_id 入库时统一小写。
+    两个监控测点对应固定列 tem_gen_driend / tem_gen_nonde；device_id 入库时统一大写。
   - 'api'：queryData HTTP 接口（1029 查询），设备×测点并发拉取。
 两种来源都归一为 [{'ts': str, 'pointValue': float}, ...] 喂同一套滑窗与告警引擎。
 
@@ -23,7 +23,7 @@
     stationName, windDeviceId, windDeviceName, pointCode, pointName, temperature,
     temp_rate, range_1h, range_20s, alarm_type, alarm_value
     ② 同时 INSERT 到 PG 表 wind_alarm（事件流水：ALARM/RECOVER 各一行，
-    含 event_time 写入时刻、data_ts 触发数据点时刻、rule_code、明细数值）；
+    含 event_time 写入时刻、ts 触发数据点时刻、rule_code、明细数值）；
     PG 写失败仅记日志，不影响 CSV 与监控主循环。启动时从该表最后事件回放
     活跃告警与冷却起点，重启不重复告警。
   - 超温原始点：追加写 EXCEED_CSV（utf-8-sig），8列含 pointCode
@@ -31,6 +31,7 @@
 
 import csv
 import json
+import logging
 import os
 import sys
 import time
@@ -40,6 +41,7 @@ import requests
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
 # 让 Windows 控制台中文输出尽量不报错
 try:
@@ -78,7 +80,7 @@ def make_tag(wid, pc):
     """按设备 id + 测点后缀拼接 tagName，与 wind_fetch_and_upsert.py 一致。"""
     return f"FJMJ1_{wid.upper()}{POINT_CONFIG[pc]['suffix']}"
 
-OUTPUT_DIR = r"e:\data\0929"
+OUTPUT_DIR = r"."
 ALARM_CSV = os.path.join(OUTPUT_DIR, "alarm_temgende.csv")
 EXCEED_CSV = os.path.join(OUTPUT_DIR, "fjmjsj_temgende_exceed.csv")  # 超温原始数据文件(>85/<=-50/>=850)
 
@@ -121,9 +123,25 @@ ALARM_TYPE_MAP = {
 
 TS_FMT = "%Y-%m-%d %H:%M:%S"
 
+# 日志轮转：单文件 100MB，保留最近 5 份历史（当前文件 + 5 份旧文件，磁盘上限约 600MB）
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'wind_alarm.log')
+LOG_MAX_BYTES = 100 * 1024 * 1024
+LOG_BACKUP_COUNT = 5
+
+_logger = logging.getLogger('wind_alarm')
+_logger.setLevel(logging.INFO)
+_logger.propagate = False
+if not _logger.handlers:
+    _fh = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES,
+                              backupCount=LOG_BACKUP_COUNT, encoding='utf-8')
+    _fh.setFormatter(logging.Formatter('%(message)s'))
+    _logger.addHandler(_fh)
+
 
 def log(msg):
-    print(f"[{datetime.now().strftime(TS_FMT)}] {msg}", flush=True)
+    line = f"[{datetime.now().strftime(TS_FMT)}] {msg}"
+    print(line, flush=True)
+    _logger.info(line)
 
 
 # ============================== 网络拉取 ==============================
@@ -196,7 +214,7 @@ CREATE TABLE IF NOT EXISTS {TABLE_ALARM} (
     id                   bigserial PRIMARY KEY,
     event                text NOT NULL,          -- ALARM / RECOVER
     event_time           timestamptz NOT NULL DEFAULT now(),  -- 记录写入时刻
-    data_ts              timestamptz,            -- 触发数据点时刻（stats['ts']）
+    ts                   timestamptz,            -- 触发数据点时刻（stats['ts']）
     region_company_name  text,
     station_name         text,
     device_id            text NOT NULL,
@@ -357,7 +375,7 @@ class AlarmEngine:
 
     _INSERT_SQL = f"""
         INSERT INTO {TABLE_ALARM} (
-            event, data_ts, region_company_name, station_name,
+            event, ts, region_company_name, station_name,
             device_id, device_name, point_code, point_name, rule_code, alarm_type,
             temperature, temp_rate, range_1h, range_20s, alarm_value, detail)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -426,7 +444,7 @@ class AlarmEngine:
         ]
         self.writer.writerow(row)
         self.fp.flush()
-        # PG 流水（event_time 用库默认 now()；data_ts 取触发数据点时刻）
+        # PG 流水（event_time 用库默认 now()；ts 取触发数据点时刻）
         self._write_pg(event, wid, pc, rule_code, d, pc_cfg, s,
                        temp, rate, r1h, r20s, alarm_val, detail)
         color = '\033[91m' if event == 'ALARM' else '\033[92m'
@@ -446,14 +464,14 @@ class AlarmEngine:
     def _write_pg(self, event, wid, pc, rule_code, d, pc_cfg, s,
                   temp, rate, r1h, r20s, alarm_val, detail):
         """追加一行告警事件；任何失败仅记日志，不影响 CSV 与主循环。"""
-        data_ts = None
+        ts = None
         if s.get('ts'):
             try:
-                data_ts = datetime.strptime(s['ts'], TS_FMT)
+                ts = datetime.strptime(s['ts'], TS_FMT)
             except (TypeError, ValueError):
-                data_ts = None
+                ts = None
         params = (
-            event, data_ts,
+            event, ts,
             d.get('region') or None, d.get('station') or None,
             wid, d.get('name') or None,
             pc, pc_cfg.get('name') or None,
@@ -678,13 +696,13 @@ def fetch_one(dev, pc, start_str, end_str=None):
         return dev['wid'], pc, [], e
 
 
-def fetch_round_db(conn, start_dt, end_dt, wid_lower, lower2wid):
+def fetch_round_db(conn, start_dt, end_dt, wid_upper, upper2wid):
     """db 模式：一条 SQL 拉窗口内全部白名单设备的两个温度固定列。
 
     相比 api 模式的「设备×测点」N*2 个请求，这里只有一次查询；宽表行
     (device_id, ts, tem_gen_driend, tem_gen_nonde) 在 Python 侧按非 NULL
     列 unpivot 成与接口一致的 {'ts', 'pointValue'} 列表。
-    device_id 入库统一小写，经 lower2wid 映射回 wind_device 白名单原始 id。
+    device_id 入库统一大写，经 upper2wid 映射回 wind_device 白名单原始 id。
     返回 {(wid_原始, pc): [{'ts','pointValue'}, ...]}（无数据的 key 不出现）。
     """
     cols = [POINT_CONFIG[pc]['column'] for pc in POINT_CODES]  # 内部配置，无注入面
@@ -698,9 +716,9 @@ def fetch_round_db(conn, start_dt, end_dt, wid_lower, lower2wid):
     grouped = {}
     cur = conn.cursor()
     try:
-        cur.execute(sql, (start_dt, end_dt, wid_lower))
-        for dev_lower, ts, *values in cur:
-            wid = lower2wid.get(dev_lower)
+        cur.execute(sql, (start_dt, end_dt, wid_upper))
+        for dev_upper, ts, *values in cur:
+            wid = upper2wid.get(dev_upper)
             if wid is None:
                 continue
             ts_str = ts.strftime(TS_FMT)
@@ -718,9 +736,10 @@ def run():
     devices = discover_devices()
     ensure_alarm_table()                 # 幂等建 wind_alarm（PG 本就是白名单依赖）
     dev_map = {d['wid']: d for d in devices}
-    # wind_seconds_di.device_id 入库统一小写，查询用小写、结果映射回白名单原始 id
-    lower2wid = {d['wid'].lower(): d['wid'] for d in devices}
-    wid_lower = list(lower2wid)
+    # wind_seconds_di.device_id 入库统一大写（采集侧 parse_tag 转大写），
+    # 查询用大写、结果映射回白名单原始 id
+    upper2wid = {d['wid'].upper(): d['wid'] for d in devices}
+    wid_upper = list(upper2wid)
     # 每台风机 × 每个测点 独立滑窗
     buffers = {(d['wid'], pc): SlidingBuffer() for d in devices for pc in POINT_CODES}
     engine = AlarmEngine(ALARM_CSV, dev_map)
@@ -765,20 +784,30 @@ def run():
         start_dt = datetime.fromtimestamp(start_epoch)
         end_dt = (datetime.fromtimestamp(end_epoch)
                   if end_epoch is not None else datetime.now())
+        # 连接缺失（上轮重连失败）或已关闭：先重建，失败则本轮空过，不崩进程
+        if pg_conn is None or pg_conn.closed:
+            try:
+                pg_conn = connect()
+            except Exception as e:
+                log(f"PG 重连失败，本轮跳过（下轮重试）: {e}")
+                return {}, 1
         try:
-            return fetch_round_db(pg_conn, start_dt, end_dt, wid_lower, lower2wid), 0
+            return fetch_round_db(pg_conn, start_dt, end_dt, wid_upper, upper2wid), 0
         except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
-            # 连接失效：关掉旧连接重连，本轮空过，下轮自动恢复
-            log(f"PG 连接异常，重连后下轮重试: {e}")
+            # 连接失效：关掉旧连接置空，本轮空过，下轮重建（重连失败不崩进程）
+            log(f"PG 连接异常，下轮重连重试: {e}")
             try:
                 pg_conn.close()
             except Exception:
                 pass
-            pg_conn = connect()
+            pg_conn = None
             return {}, 1
         except Exception as e:
             log(f"PG 查询失败，本轮跳过（保留上一轮滑窗）: {e}")
-            pg_conn.rollback()
+            try:
+                pg_conn.rollback()
+            except Exception:
+                pass
             return {}, 1
 
     try:

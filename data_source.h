@@ -46,7 +46,7 @@ struct ds_alarm {
   unsigned long long id;   // 事件流水号（bigserial 主键，增量游标）
   char event[16];          // ALARM / RECOVER
   char event_time[24];     // 记录写入时刻 YYYY-MM-DD HH:MM:SS
-  char data_ts[24];        // 触发数据点时刻（可为空串）
+  char ts[24];             // 触发数据点时刻（可为空串）
   char device_id[64];
   char device_name[128];
   char point_code[64];

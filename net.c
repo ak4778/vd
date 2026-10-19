@@ -1084,8 +1084,8 @@ static int alarm_append(char *out, int pos, int cap, const char *fmt, ...) {
 static int alarm_row_json(char *out, int pos, int cap, const struct ds_alarm *r) {
   pos = alarm_append(out, pos, cap,
                      "{\"id\":%llu,\"event\":\"%s\",\"event_time\":\"%s\","
-                     "\"data_ts\":\"%s\",\"device_id\":\"",
-                     r->id, r->event, r->event_time, r->data_ts);
+                     "\"ts\":\"%s\",\"device_id\":\"",
+                     r->id, r->event, r->event_time, r->ts);
   pos = json_escape_append(out, pos, cap, r->device_id);
   pos = alarm_append(out, pos, cap, "\",\"device_name\":\"");
   pos = json_escape_append(out, pos, cap, r->device_name);

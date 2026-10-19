@@ -559,7 +559,7 @@ int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
   static const char *SQL =
       "SELECT id, event,"
       " to_char(event_time, 'YYYY-MM-DD HH24:MI:SS'),"
-      " COALESCE(to_char(data_ts, 'YYYY-MM-DD HH24:MI:SS'), ''),"
+      " COALESCE(to_char(ts, 'YYYY-MM-DD HH24:MI:SS'), ''),"
       " device_id, COALESCE(device_name, ''),"
       " point_code, COALESCE(point_name, ''),"
       " rule_code, COALESCE(alarm_type, ''),"
@@ -583,7 +583,7 @@ int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
     r->id = strtoull(PQgetvalue(res, i, 0), NULL, 10);
     alarm_set_str(r->event, sizeof(r->event), res, i, 1);
     alarm_set_str(r->event_time, sizeof(r->event_time), res, i, 2);
-    alarm_set_str(r->data_ts, sizeof(r->data_ts), res, i, 3);
+    alarm_set_str(r->ts, sizeof(r->ts), res, i, 3);
     alarm_set_str(r->device_id, sizeof(r->device_id), res, i, 4);
     alarm_set_str(r->device_name, sizeof(r->device_name), res, i, 5);
     alarm_set_str(r->point_code, sizeof(r->point_code), res, i, 6);
