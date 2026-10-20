@@ -120,25 +120,25 @@ export function Login({loginFn, logoIcon, title, tipText}) {
     return fetch('api/login', {method: 'POST', headers, credentials: 'include'}).then(loginFn).finally(r => setPass(''));
   };
   return html`
-<div class="h-full flex items-center justify-center bg-slate-200">
-  <form class="border rounded bg-white w-96 p-5" onsubmit=${onsubmit}>
+<div class="h-full flex items-center justify-center bg-slate-200 ind-shell">
+  <form class="border rounded bg-white w-96 p-5 ind-panel ind-text" onsubmit=${onsubmit}>
     <div class="my-5 py-2 flex items-center justify-center gap-x-4">
       <${logoIcon} class="h-12 stroke-cyan-600 stroke-1" />
       <h1 class="font-bold text-xl">${title || 'Login'}<//>
     <//>
     <div class="my-3">
-      <label class="block text-sm mb-1 dark:text-white">Username</label>
+      <label class="block text-sm mb-1 dark:text-white ind-text">Username</label>
       <input type="text" autocomplete="current-user" required
-        class="font-normal bg-white rounded border border-gray-300 w-full 
+        class="font-normal bg-white rounded border border-gray-300 w-full ind-input
         flex-1 py-0.5 px-2 text-gray-900 placeholder:text-gray-400
         focus:outline-none sm:text-sm sm:leading-6 disabled:cursor-not-allowed
         disabled:bg-gray-100 disabled:text-gray-500"
         oninput=${ev => setUser(ev.target.value)} value=${user}  />
     <//>
     <div class="my-3">
-      <label class="block text-sm mb-1 dark:text-white">Password</label>
+      <label class="block text-sm mb-1 dark:text-white ind-text">Password</label>
       <input type="password" autocomplete="current-password" required
-        class="font-normal bg-white rounded border border-gray-300 w-full flex-1 py-0.5 px-2 text-gray-900 placeholder:text-gray-400 focus:outline-none sm:text-sm sm:leading-6 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500"
+        class="font-normal bg-white rounded border border-gray-300 w-full flex-1 py-0.5 px-2 text-gray-900 placeholder:text-gray-400 focus:outline-none sm:text-sm sm:leading-6 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500 ind-input"
         oninput=${ev => setPass(ev.target.value)}
         value=${pass} />
     <//>
@@ -146,7 +146,7 @@ export function Login({loginFn, logoIcon, title, tipText}) {
       <button type="submit" class="hidden" aria-hidden="true" tabindex="-1"></button>
       <${Button} title="Sign In" icon=${Icons.logout} onclick=${onsubmit} cls="flex w-full justify-center" />
     <//>
-    <div class="mt-5 text-slate-400 text-xs">${tipText}<//>
+    ${tipText && html`<div class="mt-5 text-slate-400 text-xs ind-dim">${tipText}<//>`}
   <//>
 <//>`;
 };
@@ -268,41 +268,41 @@ export function Pagination({ totalItems, itemsPerPage, currentPage, setPageFn, c
   const PageItem = ({ page, isActive }) => (
     html`<a
       onClick=${() => setPageFn(page)}
-      class="${itemcls} ${isActive ? `${colors} text-white` : 'cursor-pointer text-gray-700 ring-1 ring-inset ring-gray-300 hover:bg-gray-50'}"
+      class="${itemcls} ${isActive ? `${colors} text-white` : 'cursor-pointer text-gray-700 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 ind-text ind-pageitem'}"
     >
       ${page}
     </a>`
   );
 
   return html`
-    <div class="flex items-center justify-between bg-white px-3 py-2">
+    <div class="flex items-center justify-between bg-white px-3 py-2 ind-shell">
       <div class="sm:flex sm:flex-1 sm:items-center sm:justify-between space-x-4 whitespace-nowrap select-none">
-          <p class="text-sm text-slate-500 font-medium">
-            showing <span class="font-bold text-slate-700">${(currentPage - 1) * itemsPerPage + 1}</span> - <span class="font-medium">${Math.min(currentPage * itemsPerPage, totalItems)}</span> of ${whiteSpace}
-            <span class="font-bold text-slate-700">${totalItems}</span> results
+          <p class="text-sm text-slate-500 font-medium ind-dim">
+            showing <span class="font-bold text-slate-700 ind-text">${(currentPage - 1) * itemsPerPage + 1}</span> - <span class="font-medium">${Math.min(currentPage * itemsPerPage, totalItems)}</span> of ${whiteSpace}
+            <span class="font-bold text-slate-700 ind-text">${totalItems}</span> results
           </p>
         <div class="flex items-center gap-3">
-          <nav class="isolate inline-flex -space-x-px rounded-md" aria-label="Pagination">
+          <nav class="isolate inline-flex -space-x-px rounded-md ind-nav" aria-label="Pagination">
             <a
               onClick=${() => setPageFn(Math.max(currentPage - 1, 1))}
-              class="relative inline-flex px-3 items-center text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 ${currentPage != 1 ? 'cursor-pointer' : ''} focus:z-20 focus:outline-offset-0">
+              class="relative inline-flex px-3 items-center text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 ind-dim ind-pageitem ${currentPage != 1 ? 'cursor-pointer' : ''} focus:z-20 focus:outline-offset-0">
               ${lessThanSymbol}
             </a>
 
             <${PageItem} page=${1} isActive=${currentPage === 1} />
-            ${currentPage > maxPageRange + 2 ? html`<span class="${itemcls} ring-1 ring-inset ring-gray-300 text-slate-300">...</span>` : ''}
+            ${currentPage > maxPageRange + 2 ? html`<span class="${itemcls} ring-1 ring-inset ring-gray-300 text-slate-300 ind-dim">...</span>` : ''}
             ${Array.from({length: Math.min(totalPages, maxPageRange * 2 + 1)}, (_, i) => Math.max(2, currentPage - maxPageRange) + i).map(page => page > 1 && page < totalPages && html`<${PageItem} page=${page} isActive=${currentPage === page} />`)}
-            ${currentPage < totalPages - (maxPageRange + 1) ? html`<span class="${itemcls} ring-1 ring-inset ring-gray-300 text-slate-300">...</span>` : ''}
+            ${currentPage < totalPages - (maxPageRange + 1) ? html`<span class="${itemcls} ring-1 ring-inset ring-gray-300 text-slate-300 ind-dim">...</span>` : ''}
             ${totalPages > 1 ? html`<${PageItem} page=${totalPages} isActive=${currentPage === totalPages} />` : ''}
 
             <a
               onClick=${() => setPageFn(Math.min(currentPage + 1, totalPages))}
-              class="relative inline-flex px-3 items-center text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 ${currentPage != totalPages ? 'cursor-pointer' : ''} focus:z-20 focus:outline-offset-0">
+              class="relative inline-flex px-3 items-center text-gray-400 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 ind-dim ind-pageitem ${currentPage != totalPages ? 'cursor-pointer' : ''} focus:z-20 focus:outline-offset-0">
               ${greaterThanSymbol}
             </a>
           </nav>
           <div class="flex items-center gap-1">
-            <span class="text-sm text-slate-500">跳转到</span>
+            <span class="text-sm text-slate-500 ind-dim">跳转到</span>
             <input
               type="number"
               min="1"
@@ -311,9 +311,9 @@ export function Pagination({ totalItems, itemsPerPage, currentPage, setPageFn, c
               oninput=${(e) => setJumpPage(e.target.value)}
               onkeypress=${handleKeyPress}
               placeholder="${currentPage}"
-              class="w-16 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 no-spin"
+              class="w-16 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 no-spin ind-input"
             />
-            <span class="text-sm text-slate-500">页</span>
+            <span class="text-sm text-slate-500 ind-dim">页</span>
             <button
               onClick=${handleJump}
               class="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"

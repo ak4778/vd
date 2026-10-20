@@ -1,12 +1,16 @@
 <!DOCTYPE html>
-<html lang="en" class="h-full bg-white">
+<html lang="en" class="h-full">
   <head>
     <title></title>
     <meta charset="utf-8" />
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke-width='1.5' stroke='currentColor'> <path stroke-linecap='round' stroke-linejoin='round' d='M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0' /> </svg>" />
-    <link href="https://rsms.me/inter/inter.css" rel="stylesheet" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke-width='1.5' stroke='currentColor'> <path stroke-linecap='round' stroke-linejoin='round' d='M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0M3.124 7.5A8.969 8.969 0 015.292 3m13.416 0a8.969 8.969 0 012.168 4.5" /> </svg>" />
+    <script>
+      // 主题初始化：默认工业深色；曾明确切换为经典(classic)则不加 ind-theme
+      try { if (localStorage.getItem('theme') !== 'classic') document.documentElement.classList.add('ind-theme'); }
+      catch (e) { document.documentElement.classList.add('ind-theme'); }
+    </script>
     <style>
       input[type="number"]::-webkit-outer-spin-button,
       input[type="number"]::-webkit-inner-spin-button {
@@ -33,6 +37,97 @@
         scrollbar-width: thin;
         scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
       }
+      /* ===== 工业监控客户端深色主题（html.ind-theme 时生效，可切回经典浅色） ===== */
+      html.ind-theme, html.ind-theme body { background: #0a1929; }
+      .ind-theme .ind-shell { background: transparent; }
+      .ind-theme .ind-panel {
+        background: #0f2236;
+        border: 1px solid #1e3a5f;
+        border-radius: 4px;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+      }
+      /* 面板内分隔线（覆盖 divide-gray-200 / border-gray-200 的浅色线） */
+      .ind-theme .ind-panel > :not([hidden]) ~ :not([hidden]) { border-color: #1e3a5f; }
+      .ind-theme .ind-toolbar { border-color: #1e3a5f; }
+      .ind-theme .ind-titlebar {
+        background: linear-gradient(180deg, #1d4e89 0%, #16396b 100%);
+        border-bottom: 1px solid #2a5a9a;
+        color: #eaf3ff;
+        font-weight: 600;
+        font-size: 13px;
+        letter-spacing: 1px;
+        padding: 5px 12px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        border-radius: 3px 3px 0 0;
+        white-space: nowrap;
+      }
+      .ind-theme .ind-header { background: #0c1e30; border-color: #1e3a5f; }
+      .ind-theme .ind-sidebar { background: #0c1e30; border-color: #1e3a5f; }
+      .ind-theme .ind-navlink { color: #c9d8e8; }
+      .ind-theme .ind-navlink:hover { background: rgba(58, 123, 213, 0.15); }
+      .ind-theme .ind-navlink-active { background: #17365a; color: #7fb3ff; }
+      .ind-theme .ind-btn {
+        background: linear-gradient(180deg, #3a7bd5 0%, #2b62b5 100%);
+        color: #fff;
+        border: 1px solid #2b62b5;
+        border-radius: 3px;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      .ind-theme .ind-btn:hover { background: linear-gradient(180deg, #4a8ae5 0%, #3672c5 100%); }
+      .ind-theme .ind-btn:disabled { background: #37475c; color: #93a7bd; border-color: #445a75; cursor: not-allowed; }
+      .ind-theme .ind-input {
+        background: #0d2033;
+        border: 1px solid #2a4a73;
+        color: #d5e4f4;
+        border-radius: 3px;
+      }
+      .ind-theme .ind-input::placeholder { color: #6d88a3; }
+      .ind-theme .ind-input:focus { outline: none; border-color: #3a7bd5; }
+      .ind-theme select.ind-input option { background: #0d2033; color: #d5e4f4; }
+      .ind-theme .ind-text { color: #c9d8e8; }
+      .ind-theme .ind-dim { color: #8aa2ba; }
+      .ind-theme .ind-ok { color: #4ade80; }
+      .ind-theme .ind-bad { color: #f87171; }
+      /* 状态灯（工业风格发光圆点） */
+      .ind-theme .lamp {
+        display: inline-block;
+        width: 13px;
+        height: 13px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      .ind-theme .lamp-green {
+        background: radial-gradient(circle at 35% 35%, #7bf7a8, #16a34a 70%);
+        box-shadow: 0 0 6px 1px rgba(34, 197, 94, 0.8);
+      }
+      .ind-theme .lamp-red {
+        background: radial-gradient(circle at 35% 35%, #ffb199, #dc2626 70%);
+        box-shadow: 0 0 6px 1px rgba(239, 68, 68, 0.8);
+        animation: lamp-blink 1s step-start infinite;
+      }
+      @keyframes lamp-blink { 50% { opacity: 0.55; } }
+      /* 深色页内嵌浅色表格容器（工业客户端风格） */
+      .ind-theme .ind-lightbox { background: #eef4fa; border: 1px solid #2a4a73; border-radius: 0 0 3px 3px; }
+      .ind-theme .ind-th { background-color: #eaf2fb; }
+      /* 分页控件：深色下的环线颜色与悬停 */
+      .ind-theme .ind-nav .ring-1 { --tw-ring-color: #2a4a73; }
+      .ind-theme .ind-pageitem:hover { background: #17365a; }
+      /* 实时告警表：工业模式下整表深色（经典模式仍是浅色表格） */
+      .ind-theme .ind-darktable { background: #0f2236; border-color: #1e3a5f; }
+      .ind-theme .ind-dark-th { background: #17365a; color: #d5e4f4; border-color: #2a4a73; }
+      .ind-theme .ind-dark-row:hover { background: #17365a; }
+      .ind-theme .ind-dark-row td { color: #c9d8e8; border-color: #1e3a5f; }
+      .ind-theme .ind-dark-row td .text-slate-800 { color: #eaf3ff; }
+      .ind-theme .ind-dark-row td .text-slate-400 { color: #7d95ad; }
+      .ind-theme .ind-dark-row td .ind-badge-alarm { background: rgba(220, 38, 38, 0.18); color: #f87171; }
+      .ind-theme .ind-dark-row td .ind-badge-recover { background: rgba(22, 163, 74, 0.18); color: #4ade80; }
+      .ind-theme .ind-darktable .text-gray-500 { color: #8aa2ba; }
+      .ind-theme .ind-darktable::-webkit-scrollbar-thumb { background-color: rgba(255, 255, 255, 0.25); }
+      /* Logo 描边在深色背景上用浅蓝（覆盖 SVG 内嵌的 stroke:#000） */
+      .ind-theme svg .ll-cls-1 { stroke: #7fb3ff; }
     </style>
   </head>
   <body class="h-full"></body>

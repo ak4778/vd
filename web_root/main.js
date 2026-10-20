@@ -18,11 +18,11 @@ function fetchWithTimeout(url, options = {}) {
 
 const Logo = props => html`<svg class=${props.class} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12.87 12.85"><defs><style>.ll-cls-1{fill:none;stroke:#000;stroke-miterlimit:10;stroke-width:0.5px;}</style></defs><g id="Layer_2" data-name="Layer 2"><g id="Layer_1-2" data-name="Layer 1"><path class="ll-cls-1" d="M12.62,1.82V8.91A1.58,1.58,0,0,1,11,10.48H4a1.44,1.44,0,0,1-1-.37A.69.69,0,0,1,2.84,10l-.1-.12a.81.81,0,0,1-.15-.48V5.57a.87.87,0,0,1,.86-.86H4.73V7.28a.86.86,0,0,0,.86.85H9.42a.85.85,0,0,0,.85-.85V3.45A.86.86,0,0,0,10.13,3,.76.76,0,0,0,10,2.84a.29.29,0,0,0-.12-.1,1.49,1.49,0,0,0-1-.37H2.39V1.82A1.57,1.57,0,0,1,4,.25H11A1.57,1.57,0,0,1,12.62,1.82Z"/><path class="ll-cls-1" d="M10.48,10.48V11A1.58,1.58,0,0,1,8.9,12.6H1.82A1.57,1.57,0,0,1,.25,11V3.94A1.57,1.57,0,0,1,1.82,2.37H8.9a1.49,1.49,0,0,1,1,.37l.12.1a.76.76,0,0,1,.11.14.86.86,0,0,1,.14.47V7.28a.85.85,0,0,1-.85.85H8.13V5.57a.86.86,0,0,0-.85-.86H3.45a.87.87,0,0,0-.86.86V9.4a.81.81,0,0,0,.15.48l.1.12a.69.69,0,0,0,.13.11,1.44,1.44,0,0,0,1,.37Z"/></g></g></svg>`;
 
-function Header({logout, user, setShowSidebar, showSidebar, dbMode, dbAvailable}) {
+function Header({logout, user, setShowSidebar, showSidebar, dbMode, dbAvailable, theme, toggleTheme}) {
   const modeColor = !dbAvailable ? 'text-gray-500' : (dbMode === 'SQLite' ? 'text-green-600' : 'text-blue-600');
   const modeBadge = !dbAvailable ? 'bg-gray-100' : (dbMode === 'SQLite' ? 'bg-green-100' : 'bg-blue-100');
   return html`
-<div class="bg-white sticky top-0 z-[48] xw-full border-b py-2 ${showSidebar && 'pl-40'} transition-all duration-300 transform">
+<div class="bg-white ind-header sticky top-0 z-[48] xw-full border-b py-2 ${showSidebar && 'pl-40'} transition-all duration-300 transform">
   <div class="px-2 w-full py-0 my-0 flex items-center">
     <button type="button" onclick=${ev => setShowSidebar(v => !v)} class="text-slate-400">
       <${Icons.bars3} class="h-6" />
@@ -36,6 +36,8 @@ function Header({logout, user, setShowSidebar, showSidebar, dbMode, dbAvailable}
           <span class="px-2 py-0.5 rounded text-xs font-medium ${modeBadge}">${dbMode}模式</span>
         <//>
         <div class="hidden lg:block lg:h-4 lg:w-px lg:bg-gray-200" aria-hidden="true"><//>
+        <${Button} title=${theme === 'ind' ? '经典风格' : '工业风格'} icon=${theme === 'ind' ? Icons.desktop : Icons.bolt} onclick=${toggleTheme} />
+        <div class="hidden lg:block lg:h-4 lg:w-px lg:bg-gray-200" aria-hidden="true"><//>
         <${Button} title="Logout" icon=${Icons.logout} onclick=${logout} />
       <//>
     <//>
@@ -46,7 +48,7 @@ function Header({logout, user, setShowSidebar, showSidebar, dbMode, dbAvailable}
 function Sidebar({url, show, alarmUnread}) {
   const NavLink = ({title, icon, href, url, badge}) => html`
   <div>
-    <a href="#${href}" class="${href == url ? 'bg-slate-50 text-blue-600 group' : 'text-gray-700 hover:text-blue-600 hover:bg-gray-50 group'} flex gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold relative">
+    <a href="#${href}" class="${href == url ? 'bg-slate-50 text-blue-600 group ind-navlink ind-navlink-active' : 'text-gray-700 hover:text-blue-600 hover:bg-gray-50 group ind-navlink'} flex gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold relative">
       <${icon} class="w-6 h-6"/>
       ${title}
       ${badge > 0 && html`<span class="absolute right-2 top-1/2 -translate-y-1/2 min-w-[1.35rem] px-1 py-0.5 rounded-full bg-red-500 text-white text-xs font-bold text-center leading-4">${badge > 99 ? '99+' : badge}<//>`}
@@ -56,10 +58,10 @@ function Sidebar({url, show, alarmUnread}) {
 <div class="bg-violet-100 hs-overlay hs-overlay-open:translate-x-0
             -translate-x-full transition-all duration-300 transform
             fixed top-0 left-0 bottom-0 z-[60] w-40 bg-white border-r
-            border-gray-200 overflow-y-auto scrollbar-y
+            border-gray-200 overflow-y-auto scrollbar-y ind-sidebar
             ${show && 'translate-x-0'} right-auto bottom-0">
   <div class="flex flex-col m-4 gap-y-6">
-    <div class="flex h-10 shrink-0 items-center gap-x-4 font-bold text-xl text-slate-500">
+    <div class="flex h-10 shrink-0 items-center gap-x-4 font-bold text-xl text-slate-500 ind-dim">
       <${Logo} class="h-full"/> GD
     <//>
     <div class="flex flex-1 flex-col gap-y-1">
@@ -287,7 +289,7 @@ function Events({}) {
       : props.width || 80;
     if (props.fieldKey === 'isOnline') {
       return html`
-        <th scope="col" class="sticky top-0 z-10 border-b border-slate-300 bg-white bg-opacity-75 py-1.5 px-4 text-left text-sm font-semibold text-slate-900 backdrop-blur backdrop-filter relative" style="width:${colWidth}px">
+        <th scope="col" class="sticky top-0 z-10 border-b border-slate-300 bg-white bg-opacity-75 ind-th py-1.5 px-4 text-left text-sm font-semibold text-slate-900 backdrop-blur backdrop-filter relative" style="width:${colWidth}px">
           <div class="relative">
             <button onClick=${() => { setShowOnlineDropdown(!showOnlineDropdown); setShowCameraDropdown(false); setShowOperationDropdown(false); }} class="flex items-center">
               <span>${props.title}</span>
@@ -314,7 +316,7 @@ function Events({}) {
     }
     if (props.fieldKey === 'cameraType') {
       return html`
-        <th scope="col" class="sticky top-0 z-10 border-b border-slate-300 bg-white bg-opacity-75 py-1.5 px-4 text-left text-sm font-semibold text-slate-900 backdrop-blur backdrop-filter relative" style="width:${colWidth}px">
+        <th scope="col" class="sticky top-0 z-10 border-b border-slate-300 bg-white bg-opacity-75 ind-th py-1.5 px-4 text-left text-sm font-semibold text-slate-900 backdrop-blur backdrop-filter relative" style="width:${colWidth}px">
           <div class="relative">
             <button onClick=${() => { setShowCameraDropdown(!showCameraDropdown); setShowOnlineDropdown(false); setShowOperationDropdown(false); }} class="flex items-center">
               <span>${props.title}</span>
@@ -345,7 +347,7 @@ function Events({}) {
     }
     if (props.fieldKey === 'operation') {
       return html`
-        <th scope="col" class="sticky top-0 z-10 border-b border-slate-300 bg-white bg-opacity-75 py-1.5 px-4 text-left text-sm font-semibold text-slate-900 backdrop-blur backdrop-filter relative" style="width:${colWidth}px">
+        <th scope="col" class="sticky top-0 z-10 border-b border-slate-300 bg-white bg-opacity-75 ind-th py-1.5 px-4 text-left text-sm font-semibold text-slate-900 backdrop-blur backdrop-filter relative" style="width:${colWidth}px">
           <div class="relative">
             <button onClick=${() => { setShowOperationDropdown(!showOperationDropdown); setShowOnlineDropdown(false); setShowCameraDropdown(false); }} class="flex items-center">
               <span>${props.title}</span>
@@ -383,7 +385,7 @@ function Events({}) {
       `;
     }
     return html`
-      <th scope="col" class="sticky top-0 z-10 border-b border-slate-300 bg-white bg-opacity-75 py-1.5 px-4 text-left text-sm font-semibold text-slate-900 backdrop-blur backdrop-filter relative" style="width:${colWidth}px">
+      <th scope="col" class="sticky top-0 z-10 border-b border-slate-300 bg-white bg-opacity-75 ind-th py-1.5 px-4 text-left text-sm font-semibold text-slate-900 backdrop-blur backdrop-filter relative" style="width:${colWidth}px">
         ${props.title}
         <div class="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-400 z-20" onmousedown=${(e) => startResize(e, props.fieldKey, colWidth)}></div>
       </th>
@@ -608,18 +610,19 @@ function Events({}) {
   };
 
 return html`
-<div class="m-4 divide-y divide-gray-200 rounded bg-white flex flex-col flex-1 min-h-0">
-  <div class="font-semibold flex items-center text-gray-600 px-3 justify-between whitespace-nowrap border-b border-gray-200 py-2 flex-shrink-0">
-    <div class="font-semibold flex items-center text-gray-600">
+<div class="m-4 ind-panel divide-y divide-gray-200 rounded bg-white flex flex-col flex-1 min-h-0">
+  <div class="ind-titlebar">设备通道(${totalItems})</div>
+  <div class="font-semibold flex items-center text-gray-600 ind-dim px-3 justify-between whitespace-nowrap border-b border-gray-200 ind-toolbar py-2 flex-shrink-0">
+    <div class="font-semibold flex items-center text-gray-600 ind-dim">
       <div class="relative mr-4 flex items-center">
         <input
           type="text"
           value=${searchKeyword}
           oninput=${(e) => setSearchKeyword(e.target.value)}
           placeholder="搜索通道名称或公司名称..."
-          class="w-96 px-3 py-1.5 pl-10 ${searchKeyword ? 'pr-10' : 'pr-3'} border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          class="w-96 px-3 py-1.5 pl-10 ${searchKeyword ? 'pr-10' : 'pr-3'} border border-gray-300 rounded text-sm ind-input focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
         />
-        <svg class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <svg class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 ind-dim" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="11" cy="11" r="8"/>
           <path d="M21 21l-4.35-4.35"/>
         </svg>
@@ -627,7 +630,7 @@ return html`
           <button
             type="button"
             onclick=${() => setSearchKeyword('')}
-            class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded"
+            class="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded ind-dim"
           >
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M18 6L6 18M6 6l12 12"/>
@@ -635,14 +638,13 @@ return html`
           </button>
         `}
       </div>
-      <div class="mr-4">设备通道(${totalItems})</div>
       ${selectedNodes.length > 0 && html`
         <div class="flex items-center gap-2 mr-4">
           <span class="text-sm text-blue-600">已选择 ${selectedNodes.length} 行</span>
           <select 
             value=${batchField} 
             onchange=${(e) => { setBatchField(e.target.value); setBatchValue(''); }}
-            class="px-2 py-1 border border-gray-300 rounded text-sm">
+            class="px-2 py-1 border border-gray-300 rounded text-sm ind-input">
             <option value="">请选择类型</option>
             <option value="operation">操作</option>
             <option value="customOperation">自定义</option>
@@ -651,7 +653,7 @@ return html`
             <select 
               value=${batchValue} 
               onchange=${(e) => setBatchValue(e.target.value)}
-              class="px-2 py-1 border border-gray-300 rounded text-sm">
+              class="px-2 py-1 border border-gray-300 rounded text-sm ind-input">
               <option value="">请选择值</option>
               <option value="1">重点区域</option>
               <option value="2">高风险作业</option>
@@ -664,13 +666,13 @@ return html`
               value=${batchValue} 
               oninput=${(e) => setBatchValue(e.target.value)}
               placeholder="请输入自定义内容"
-              class="px-2 py-1 border border-gray-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              class="px-2 py-1 border border-gray-300 rounded text-sm ind-input focus:outline-none focus:ring-2 focus:ring-blue-500"
               style="width:180px" />
           `}
           <button 
             onclick=${applyBatchEdit}
             disabled=${!batchValue}
-            class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed">批量应用</button>
+            class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed ind-btn">批量应用</button>
         </div>
       `}
       <button 
@@ -685,11 +687,11 @@ return html`
     </div>
     <${Pagination} currentPage=${page} setPageFn=${handlePageChange} totalItems=${totalItems} itemsPerPage=${itemsPerPage} />
   <//>
-  <div class="flex-1 min-h-0 overflow-auto scrollbar-force bg-white">
+  <div class="flex-1 min-h-0 overflow-auto scrollbar-force bg-white ind-lightbox">
     <table class="border-separate border-spacing-0 bg-white" style="table-layout: auto; width: 100%;">
       <thead>
         <tr>
-          <th scope="col" class="sticky top-0 z-10 border-b border-slate-300 bg-white bg-opacity-75 py-1.5 px-4 text-left text-sm font-semibold text-slate-900 backdrop-blur backdrop-filter" style="width:40px">
+          <th scope="col" class="sticky top-0 z-10 border-b border-slate-300 bg-white bg-opacity-75 ind-th py-1.5 px-4 text-left text-sm font-semibold text-slate-900 backdrop-blur backdrop-filter" style="width:40px">
             <input type="checkbox" checked=${nodes.length > 0 && selectedNodes.length === nodes.length} onclick=${toggleSelectAll} class="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500" />
           </th>
           ${fields.map(f => html`<${Th} title=${f.label} width=${f.width} fieldKey=${f.key} />`)}
@@ -721,10 +723,10 @@ const ALARM_CAP = 500;  // 前端最多保留的告警条数（超出丢弃最�
 const AlarmRow = ({a}) => {
   const isAlarm = a.event === 'ALARM';
   return html`
-  <tr class="hover:bg-slate-50">
+  <tr class="hover:bg-slate-50 ind-dark-row">
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.ts}<//>
     <td class="border-b border-slate-200 py-1.5 px-4">
-      <span class="px-2 py-0.5 rounded text-xs font-bold ${isAlarm ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}">${a.event}<//>
+      <span class="px-2 py-0.5 rounded text-xs font-bold ${isAlarm ? 'bg-red-100 text-red-700 ind-badge-alarm' : 'bg-green-100 text-green-700 ind-badge-recover'}">${a.event}<//>
     <//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 overflow-hidden text-ellipsis whitespace-nowrap" title=${a.region_company_name || ''}>${a.region_company_name || ''}<//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 overflow-hidden text-ellipsis whitespace-nowrap" title=${a.station_name || ''}>${a.station_name || ''}<//>
@@ -769,21 +771,22 @@ function Alarms({items, wsOk}) {
   const latest = items.length > 0 ? items[0].ts : '';
   return html`
   <div class="flex-1 min-h-0 flex flex-col p-2">
-    <div class="flex items-center gap-3 py-2 flex-wrap">
-      <div class="text-lg font-bold text-slate-700">实时告警</div>
-      <span class="flex items-center gap-1.5 text-sm ${wsOk ? 'text-green-600' : 'text-red-500'}">
-        <span class="w-2 h-2 rounded-full ${wsOk ? 'bg-green-500' : 'bg-red-500'} ${wsOk ? '' : 'animate-pulse'}"><//>
+    <div class="ind-panel flex-1 min-h-0 flex flex-col">
+    <div class="ind-titlebar">
+      <span class="text-lg font-bold text-slate-700 ind-text">实时告警</span>
+      <span class="flex items-center gap-1.5 text-sm ${wsOk ? 'text-green-600 ind-ok' : 'text-red-500 ind-bad'}">
+        <span class="lamp ${wsOk ? 'lamp-green' : 'lamp-red'}"><//>
         ${wsOk ? '已连接' : '重连中...'}
       <//>
-      <span class="text-sm text-slate-500">共 ${items.length} 条</span>
-      ${latest && html`<span class="text-sm text-slate-400">最新: ${latest}<//>`}
+      <span class="text-sm ind-dim">共 ${items.length} 条</span>
+      ${latest && html`<span class="text-sm ind-dim">最新: ${latest}<//>`}
     <//>
-    <div class="flex-1 min-h-0 overflow-auto scrollbar-force bg-white">
-      <table class="border-separate border-spacing-0 bg-white" style="table-layout: fixed; width: 100%;">
+    <div class="flex-1 min-h-0 overflow-auto scrollbar-force bg-white ind-lightbox ind-darktable">
+      <table class="border-separate border-spacing-0 bg-white ind-darktable" style="table-layout: fixed; width: 100%;">
         <thead>
           <tr>
             ${alarmColumns.map(c => html`
-              <th scope="col" class="sticky top-0 z-10 border-b border-slate-300 bg-white py-1.5 px-4 text-left text-sm font-semibold text-slate-900" style=${c.width ? `width:${c.width}` : ''}>${c.label}<//>
+              <th scope="col" class="sticky top-0 z-10 border-b border-slate-300 bg-white bg-opacity-75 ind-dark-th py-1.5 px-4 text-left text-sm font-semibold text-slate-900" style=${c.width ? `width:${c.width}` : ''}>${c.label}<//>
             `)}
           <//>
         <//>
@@ -795,8 +798,9 @@ function Alarms({items, wsOk}) {
         <//>
       <//>
     <//>
+    <//>
   <//>`;
-}
+};
 
 const App = function({}) {
   const [loading, setLoading] = useState(true);
@@ -809,11 +813,19 @@ const App = function({}) {
   const [alarmItems, setAlarmItems] = useState([]);
   const [alarmUnread, setAlarmUnread] = useState(0);
   const [alarmWsOk, setAlarmWsOk] = useState(false);
+  // 主题：ind=工业深色 / classic=经典浅色，持久化在 localStorage.theme（初始值由 index.html 头部脚本写到 html class）
+  const [theme, setTheme] = useState(() => document.documentElement.classList.contains('ind-theme') ? 'ind' : 'classic');
 
   const urlRef = useRef(url);
   urlRef.current = url;
 
   const logout = () => fetchWithTimeout('api/logout', { method: 'POST', credentials: 'include' }).then(r => setUser('')).catch(() => setUser(''));
+  const toggleTheme = () => setTheme(prev => {
+    const next = prev === 'ind' ? 'classic' : 'ind';
+    document.documentElement.classList.toggle('ind-theme', next === 'ind');
+    try { localStorage.setItem('theme', next); } catch (e) {}
+    return next;
+  });
   const login = r => !r.ok ? setLoading(false) && setUser(null) : r.json()
       .then(r => setUser(r.user))
       .finally(r => setLoading(false));
@@ -889,13 +901,12 @@ const App = function({}) {
 
   if (loading) return '';  // Show blank page on initial load
   if (!user) return html`<${Login} loginFn=${login} logoIcon=${Logo}
-    title="Device Dashboard Login" 
-    tipText="To login, use: admin/admin, user1/user1, user2/user2" />`; // If not logged in, show login screen
+    title="Device Dashboard Login" />`; // If not logged in, show login screen
 
   return html`
-<div class="h-screen bg-slate-100 flex flex-col overflow-hidden">
+<div class="h-screen bg-slate-100 ind-shell flex flex-col overflow-hidden">
   <${Sidebar} url=${url} show=${showSidebar} alarmUnread=${alarmUnread} />
-  <${Header} logout=${logout} user=${user} showSidebar=${showSidebar} setShowSidebar=${setShowSidebar} dbMode=${dbMode} dbAvailable=${dbAvailable} />
+  <${Header} logout=${logout} user=${user} showSidebar=${showSidebar} setShowSidebar=${setShowSidebar} dbMode=${dbMode} dbAvailable=${dbAvailable} theme=${theme} toggleTheme=${toggleTheme} />
   <div class="flex-1 min-h-0 ${showSidebar && 'pl-40'} transition-all duration-300 transform flex flex-col">
     ${url === '/alarms' ? html`<${Alarms} items=${alarmItems} wsOk=${alarmWsOk} />` : html`<${Events} />`}
   <//>
