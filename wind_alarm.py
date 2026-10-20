@@ -790,6 +790,7 @@ def run():
         if pg_conn is None or pg_conn.closed:
             try:
                 pg_conn = connect()
+                pg_conn.autocommit = True   # 重连同启动时一致：只读 SELECT，避免长事务阻碍 autovacuum
             except Exception as e:
                 log(f"PG 重连失败，本轮跳过（下轮重试）: {e}")
                 return {}, 1
