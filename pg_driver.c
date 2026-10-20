@@ -558,13 +558,14 @@ int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
 
   static const char *SQL =
       "SELECT id, event,"
-      " to_char(event_time, 'YYYY-MM-DD HH24:MI:SS'),"
       " COALESCE(to_char(ts, 'YYYY-MM-DD HH24:MI:SS'), ''),"
+      " COALESCE(region_company_name, ''), COALESCE(station_name, ''),"
       " device_id, COALESCE(device_name, ''),"
       " point_code, COALESCE(point_name, ''),"
       " rule_code, COALESCE(alarm_type, ''),"
-      " COALESCE(temperature, 0), COALESCE(alarm_value, 0),"
-      " COALESCE(detail, '')"
+      " COALESCE(temperature, 0), COALESCE(temp_rate, 0),"
+      " COALESCE(range_1h, 0), COALESCE(range_20s, 0),"
+      " COALESCE(alarm_value, 0), COALESCE(detail, '')"
       " FROM wind_alarm WHERE id > $1 ORDER BY id ASC LIMIT $2";
 
   PGresult *res = PQexecParams(s_conn, SQL, 2, NULL, vals, NULL, NULL, 0);
@@ -582,17 +583,21 @@ int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
     memset(r, 0, sizeof(*r));
     r->id = strtoull(PQgetvalue(res, i, 0), NULL, 10);
     alarm_set_str(r->event, sizeof(r->event), res, i, 1);
-    alarm_set_str(r->event_time, sizeof(r->event_time), res, i, 2);
-    alarm_set_str(r->ts, sizeof(r->ts), res, i, 3);
-    alarm_set_str(r->device_id, sizeof(r->device_id), res, i, 4);
-    alarm_set_str(r->device_name, sizeof(r->device_name), res, i, 5);
-    alarm_set_str(r->point_code, sizeof(r->point_code), res, i, 6);
-    alarm_set_str(r->point_name, sizeof(r->point_name), res, i, 7);
-    alarm_set_str(r->rule_code, sizeof(r->rule_code), res, i, 8);
-    alarm_set_str(r->alarm_type, sizeof(r->alarm_type), res, i, 9);
-    r->temperature = atof(PQgetvalue(res, i, 10));
-    r->alarm_value = atof(PQgetvalue(res, i, 11));
-    alarm_set_str(r->detail, sizeof(r->detail), res, i, 12);
+    alarm_set_str(r->ts, sizeof(r->ts), res, i, 2);
+    alarm_set_str(r->region_company_name, sizeof(r->region_company_name), res, i, 3);
+    alarm_set_str(r->station_name, sizeof(r->station_name), res, i, 4);
+    alarm_set_str(r->device_id, sizeof(r->device_id), res, i, 5);
+    alarm_set_str(r->device_name, sizeof(r->device_name), res, i, 6);
+    alarm_set_str(r->point_code, sizeof(r->point_code), res, i, 7);
+    alarm_set_str(r->point_name, sizeof(r->point_name), res, i, 8);
+    alarm_set_str(r->rule_code, sizeof(r->rule_code), res, i, 9);
+    alarm_set_str(r->alarm_type, sizeof(r->alarm_type), res, i, 10);
+    r->temperature = atof(PQgetvalue(res, i, 11));
+    r->temp_rate = atof(PQgetvalue(res, i, 12));
+    r->range_1h = atof(PQgetvalue(res, i, 13));
+    r->range_20s = atof(PQgetvalue(res, i, 14));
+    r->alarm_value = atof(PQgetvalue(res, i, 15));
+    alarm_set_str(r->detail, sizeof(r->detail), res, i, 16);
   }
   PQclear(res);
   pg_mutex_unlock();

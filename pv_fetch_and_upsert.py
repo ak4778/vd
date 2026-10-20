@@ -5,7 +5,7 @@
 不丢数据机制（每秒产生多少条无需预知）：
 1. 水位线文件 pv_watermark.json：记录上一轮成功入库的窗口右边界；进程重启
    从水位线继续。只在入库成功后写文件（临时文件 + os.replace 原子替换）。
-2. 每轮窗口半开区间 [last_ts - overlap, end)，默认回退 50s 重叠拉取。
+2. 每轮窗口半开区间 [last_ts - overlap, end)，回退 OVERLAP_SECONDS 重叠拉取。
 3. 每个 like 模式查询按 pageSize 分页，翻页直到取完。
 4. 拉取/入库失败则不写水位线，下一轮从原位重拉。
 5. 停机很久后恢复时，单窗被限制在 MAX_WINDOW_SECONDS，逐窗快速追平。
@@ -166,12 +166,15 @@ def ingest_messages(messages, wl=None):
         conn.close()
 
 # ---------------- 窗口与轮询 ----------------
-OVERLAP_SECONDS = 20
+OVERLAP_SECONDS = 300
+# 重叠 5 分钟：上游按设备分批发布（同一秒的数据可能先到一部分），
+# 每轮重拉近 5 分钟，晚到的设备行在后续轮次被补齐（upsert 幂等）。
 INITIAL_LOOKBACK_SECONDS = 300
 MAX_WINDOW_SECONDS = 120
 FETCH_INTERVAL_SECONDS = 30
 FETCH_WORKERS = 4
 FUTURE_FILTER_SECONDS = 30 * 60
+_empty_streak = 0                           # 连续「拉取 0 条」的轮数（仅用于告警计数）
 
 # ---------------- 采集时段（每天仅此时段采集，其余时间空闲；支持多段） ----------------
 # 每段为 (开始, 结束)，两端整点均含（结束整点那一秒也采集）。
@@ -546,6 +549,20 @@ def tick(now=None):
 
     raw = fetch_and_ingest_window(start_s, end_s)
     fetched, ingested = raw
+    global _empty_streak
+    if fetched == 0:
+        _empty_streak += 1
+        if now < win_close:
+            # 上游发布有 30~80 分钟延迟：时段未结束时拉到 0 条只说明数据尚未发布。
+            # 水位线绝不推进，原地等待下一轮重拉同一窗口，数据发布后自愈式追平；
+            # 只有时段结束后才放行——宁可整窗停滞也不静默丢数据。
+            log.warning('本轮拉取 0 条（上游尚未发布或源端断供），水位线不推进，'
+                        '原地等待重拉（已连续 %s 轮空拉取）: [%s, %s)',
+                        _empty_streak, start_s, end_s)
+            return start_s, end_s, fetched, ingested, True
+        log.warning('采集时段已结束仍连续 %s 轮拉取 0 条，[%s, %s) 数据缺失，请事后回补',
+                    _empty_streak, start_s, end_s)
+    _empty_streak = 0
     save_watermark(end_s)
     return start_s, end_s, fetched, ingested, end >= now
 

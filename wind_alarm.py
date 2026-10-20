@@ -23,7 +23,7 @@
     stationName, windDeviceId, windDeviceName, pointCode, pointName, temperature,
     temp_rate, range_1h, range_20s, alarm_type, alarm_value
     ② 同时 INSERT 到 PG 表 wind_alarm（事件流水：ALARM/RECOVER 各一行，
-    含 event_time 写入时刻、ts 触发数据点时刻、rule_code、明细数值）；
+    含 ts 触发数据点时刻、rule_code、明细数值）；
     PG 写失败仅记日志，不影响 CSV 与监控主循环。启动时从该表最后事件回放
     活跃告警与冷却起点，重启不重复告警。
   - 超温原始点：追加写 EXCEED_CSV（utf-8-sig），8列含 pointCode
@@ -213,7 +213,6 @@ DDL_ALARM = f"""
 CREATE TABLE IF NOT EXISTS {TABLE_ALARM} (
     id                   bigserial PRIMARY KEY,
     event                text NOT NULL,          -- ALARM / RECOVER
-    event_time           timestamptz NOT NULL DEFAULT now(),  -- 记录写入时刻
     ts                   timestamptz,            -- 触发数据点时刻（stats['ts']）
     region_company_name  text,
     station_name         text,
@@ -240,10 +239,12 @@ def ensure_alarm_table():
     try:
         cur = conn.cursor()
         cur.execute(DDL_ALARM)
+        # 旧表可能残留 event_time 列：统一改用时序 ts，这里幂等清理
+        cur.execute(f'ALTER TABLE {TABLE_ALARM} DROP COLUMN IF EXISTS event_time')
         cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{TABLE_ALARM}_device_ts '
-                    f'ON {TABLE_ALARM} (device_id, event_time DESC)')
+                    f'ON {TABLE_ALARM} (device_id, ts DESC)')
         cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{TABLE_ALARM}_rule_ts '
-                    f'ON {TABLE_ALARM} (rule_code, event_time DESC)')
+                    f'ON {TABLE_ALARM} (rule_code, ts DESC)')
         cur.close()
         log(f'PG 告警表 {TABLE_ALARM} 已就绪')
     finally:
@@ -444,7 +445,7 @@ class AlarmEngine:
         ]
         self.writer.writerow(row)
         self.fp.flush()
-        # PG 流水（event_time 用库默认 now()；ts 取触发数据点时刻）
+        # PG 流水（ts 取触发数据点时刻）
         self._write_pg(event, wid, pc, rule_code, d, pc_cfg, s,
                        temp, rate, r1h, r20s, alarm_val, detail)
         color = '\033[91m' if event == 'ALARM' else '\033[92m'
@@ -514,11 +515,11 @@ class AlarmEngine:
             cur = self._get_pg().cursor()
             cur.execute("""
                 SELECT DISTINCT ON (device_id, point_code, rule_code)
-                       device_id, point_code, rule_code, event, event_time
+                       device_id, point_code, rule_code, event, ts
                 FROM wind_alarm
                 WHERE device_id = ANY(%s) AND point_code = ANY(%s)
                 ORDER BY device_id, point_code, rule_code,
-                         event_time DESC, id DESC
+                         ts DESC NULLS LAST, id DESC
             """, (wid_list, list(POINT_CODES)))
             rows = cur.fetchall()
             cur.close()
@@ -533,7 +534,8 @@ class AlarmEngine:
         with self.lock:
             for wid, pc, code, event, etime in rows:
                 key = (wid, pc, code)
-                self.last_alarm[key] = etime.timestamp()  # timestamptz 直接转 epoch
+                # ts 即触发数据点时刻；为 NULL 时退化为当前时刻，保证冷却起点连续
+                self.last_alarm[key] = etime.timestamp() if etime else time.time()
                 if event == 'ALARM':
                     self.active[key] = True
                     n_active += 1

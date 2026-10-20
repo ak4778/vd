@@ -722,20 +722,27 @@ const AlarmRow = ({a}) => {
   const isAlarm = a.event === 'ALARM';
   return html`
   <tr class="hover:bg-slate-50">
-    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.event_time}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.ts}<//>
     <td class="border-b border-slate-200 py-1.5 px-4">
       <span class="px-2 py-0.5 rounded text-xs font-bold ${isAlarm ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}">${a.event}<//>
     <//>
-    <td class="border-b border-slate-200 py-1.5 px-4 text-sm">
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 overflow-hidden text-ellipsis whitespace-nowrap" title=${a.region_company_name || ''}>${a.region_company_name || ''}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 overflow-hidden text-ellipsis whitespace-nowrap" title=${a.station_name || ''}>${a.station_name || ''}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm overflow-hidden text-ellipsis whitespace-nowrap" title=${a.device_name ? `${a.device_name}(${a.device_id})` : a.device_id}>
       <span class="text-slate-800">${a.device_name || a.device_id}<//>
       ${a.device_name && html`<span class="text-slate-400 ml-1 text-xs">(${a.device_id})<//>`}
     <//>
-    <td class="border-b border-slate-200 py-1.5 px-4 text-sm">
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm overflow-hidden text-ellipsis whitespace-nowrap" title=${a.point_name ? `${a.point_name}(${a.point_code})` : a.point_code}>
       <span class="text-slate-800">${a.point_name || a.point_code}<//>
       ${a.point_name && html`<span class="text-slate-400 ml-1 text-xs">(${a.point_code})<//>`}
     <//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.rule_code}<//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.temperature != null && a.temperature !== 0 ? a.temperature.toFixed(1) : '-'}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.temp_rate != null && a.temp_rate !== 0 ? a.temp_rate.toFixed(4) : '-'}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.range_1h != null && a.range_1h !== 0 ? a.range_1h.toFixed(2) : '-'}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.range_20s != null && a.range_20s !== 0 ? a.range_20s.toFixed(2) : '-'}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.alarm_type || ''}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.alarm_value != null && a.alarm_value !== 0 ? a.alarm_value.toFixed(2) : '-'}<//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600">${a.detail || ''}<//>
   <//>`;
 };
@@ -744,15 +751,22 @@ const AlarmRow = ({a}) => {
 const alarmColumns = [
   {label: '时间', width: '150px'},
   {label: '事件', width: '90px'},
+  {label: '公司', width: '160px'},
+  {label: '场站', width: '140px'},
   {label: '设备', width: '220px'},
   {label: '测点', width: '200px'},
   {label: '规则', width: '110px'},
   {label: '温度(°C)', width: '90px'},
+  {label: '温升速率', width: '100px'},
+  {label: '1h极差', width: '90px'},
+  {label: '20s极差', width: '90px'},
+  {label: '告警类型', width: '110px'},
+  {label: '告警值', width: '90px'},
   {label: '详情', width: ''},
 ];
 
 function Alarms({items, wsOk}) {
-  const latest = items.length > 0 ? items[0].event_time : '';
+  const latest = items.length > 0 ? items[0].ts : '';
   return html`
   <div class="flex-1 min-h-0 flex flex-col p-2">
     <div class="flex items-center gap-3 py-2 flex-wrap">
@@ -774,7 +788,7 @@ function Alarms({items, wsOk}) {
           <//>
         <//>
         <tbody>
-          ${items.length === 0 ? html`<tr><td colspan="7" class="text-center py-8 text-gray-500">
+          ${items.length === 0 ? html`<tr><td colspan="14" class="text-center py-8 text-gray-500">
             ${wsOk ? '暂无告警，等待新事件...' : '未连接告警服务，等待重连...'}
           <//></tr>` :
           items.map(a => h(AlarmRow, {key: a.id, a}))}

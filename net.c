@@ -1083,9 +1083,13 @@ static int alarm_append(char *out, int pos, int cap, const char *fmt, ...) {
 // 单行告警 JSON（字段顺序与前端展示一致）
 static int alarm_row_json(char *out, int pos, int cap, const struct ds_alarm *r) {
   pos = alarm_append(out, pos, cap,
-                     "{\"id\":%llu,\"event\":\"%s\",\"event_time\":\"%s\","
-                     "\"ts\":\"%s\",\"device_id\":\"",
-                     r->id, r->event, r->event_time, r->ts);
+                     "{\"id\":%llu,\"event\":\"%s\","
+                     "\"ts\":\"%s\",\"region_company_name\":\"",
+                     r->id, r->event, r->ts);
+  pos = json_escape_append(out, pos, cap, r->region_company_name);
+  pos = alarm_append(out, pos, cap, "\",\"station_name\":\"");
+  pos = json_escape_append(out, pos, cap, r->station_name);
+  pos = alarm_append(out, pos, cap, "\",\"device_id\":\"");
   pos = json_escape_append(out, pos, cap, r->device_id);
   pos = alarm_append(out, pos, cap, "\",\"device_name\":\"");
   pos = json_escape_append(out, pos, cap, r->device_name);
@@ -1095,10 +1099,13 @@ static int alarm_row_json(char *out, int pos, int cap, const struct ds_alarm *r)
   pos = json_escape_append(out, pos, cap, r->point_name);
   pos = alarm_append(out, pos, cap, "\",\"rule_code\":\"");
   pos = json_escape_append(out, pos, cap, r->rule_code);
-  pos = alarm_append(out, pos, cap, "\",\"alarm_type\":\"");
+  pos = alarm_append(out, pos, cap,
+                     "\",\"temperature\":%.2f,\"temp_rate\":%.4f,"
+                     "\"range_1h\":%.2f,\"range_20s\":%.2f,\"alarm_type\":\"",
+                     r->temperature, r->temp_rate, r->range_1h, r->range_20s);
   pos = json_escape_append(out, pos, cap, r->alarm_type);
-  pos = alarm_append(out, pos, cap, "\",\"temperature\":%.2f,\"alarm_value\":%.2f,\"detail\":\"",
-                     r->temperature, r->alarm_value);
+  pos = alarm_append(out, pos, cap, "\",\"alarm_value\":%.2f,\"detail\":\"",
+                     r->alarm_value);
   pos = json_escape_append(out, pos, cap, r->detail);
   pos = alarm_append(out, pos, cap, "\"}");
   return pos;
