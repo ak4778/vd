@@ -643,33 +643,51 @@ def _first_block_of_day(day):
     return _align_block(datetime.combine(day, COLLECT_WINDOWS[0][0]))
 
 
-def _next_block_in_window(block):
-    """block 的下一块；若不在任何采集时段内，跳到下一个时段起点（可跨天）。"""
-    nxt = block + timedelta(seconds=REFETCH_BLOCK_SECONDS)
-    for d in (nxt.date(), nxt.date() + timedelta(days=1)):
-        for open_t, close_t in COLLECT_WINDOWS:
-            open_ = datetime.combine(d, open_t)
-            close = datetime.combine(d, close_t)
-            if close <= nxt:
-                continue
-            return max(nxt, open_)
-    return nxt
+def _block_in_collect_window(block_start):
+    """block 起点是否落在当天某个采集时段内（含端点）。"""
+    d = block_start.date()
+    for open_t, close_t in COLLECT_WINDOWS:
+        open_ = datetime.combine(d, open_t)
+        close = datetime.combine(d, close_t)
+        if open_ <= block_start < close:
+            return True
+    return False
+
+
+def _advance_to_first_block(cur):
+    """把游标推进到「当天下一个合法采集时段的对齐块起点」。
+    若当前已超出当天最后一个时段，跳到明天第一块。
+    """
+    d = cur.date()
+    # 先试今天
+    for open_t, _close_t in COLLECT_WINDOWS:
+        open_ = datetime.combine(d, open_t)
+        aligned = _align_block(open_)
+        if aligned >= cur:
+            return aligned
+    # 今天所有时段都已过，跳到明天首块
+    return _first_block_of_day(d + timedelta(days=1))
 
 
 def refetch_step(now):
     """空闲期执行一步延迟回补：每轮最多拉一个块。
 
     整块必须早于 now-REFETCH_DELAYS[i] 才算「已过发布稳定期」。
+    回补块严格限在 COLLECT_WINDOWS 内——时段之外的 ts 即使上游接口有残留
+    数据也不入库，与实时采集口径一致。
     成功或无需拉取后推进游标并落盘；异常时游标不动，下次空闲重试。
     返回是否执行了拉取。
     """
     global FETCH_WORKERS
     cursors = load_refetch_state()
-    today_first = _first_block_of_day(now.date())
     for i, delay in enumerate(REFETCH_DELAYS):
         cur = cursors[i]
         if cur is None or cur.date() < now.date():
-            cur = cursors[i] = today_first   # 首次运行/跨天：从当天首块开始
+            cur = cursors[i] = _first_block_of_day(now.date())
+        # 若 block 起点已超出当天所有采集时段，跳到明天
+        if not _block_in_collect_window(cur):
+            cur = cursors[i] = _advance_to_first_block(cur)
+            continue
         block_end = cur + timedelta(seconds=REFETCH_BLOCK_SECONDS)
         if block_end > _align_block(now - timedelta(seconds=delay)):
             continue                         # 该块尚未过发布稳定期
@@ -686,7 +704,11 @@ def refetch_step(now):
             return False
         finally:
             FETCH_WORKERS = saved_workers
-        cursors[i] = _next_block_in_window(cur)
+        # 下一块：先 +10min，若起点已超出当天最后时段，跳到明天首块
+        nxt = cur + timedelta(seconds=REFETCH_BLOCK_SECONDS)
+        if not _block_in_collect_window(nxt):
+            nxt = _first_block_of_day(nxt.date() + timedelta(days=1))
+        cursors[i] = nxt
         save_refetch_state(cursors)
         return True
     save_refetch_state(cursors)
