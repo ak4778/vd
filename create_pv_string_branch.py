@@ -65,7 +65,7 @@ def ensure_partition(day):
     name = 'pv_string_branch_' + start.strftime('%Y%m%d')
     cur.execute(
         f'CREATE TABLE IF NOT EXISTS {name} PARTITION OF pv_string_branch '
-        'FOR VALUES FROM (%s) TO (%s)', (start, end))
+        'FOR VALUES FROM (%s) TO (%s) WITH (fillfactor=90)', (start, end))
 
 
 today = datetime.now(TZ).date()

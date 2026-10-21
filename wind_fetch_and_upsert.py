@@ -449,6 +449,17 @@ def filter_by_whitelist(items):
 
 # ---------------- 分区维护（30 天保留） ----------------
 RETENTION_DAYS = 30
+# 分区 fillfactor：留 10% 页内空间，让重复 upsert 的 UPDATE 尽量走 HOT
+# （不新增索引条目），显著降低表与索引膨胀。
+FILLFACTOR = 90
+
+# ---------------- 历史分区空间回收 ----------------
+# upsert 会把同一行反复 UPDATE，autovacuum 只回收可复用空间、不缩小文件，
+# 所以每天凌晨对「昨天」的分区做一次 VACUUM FULL，把空间真正还给磁盘。
+VACUUM_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 'wind_vacuum_state.json')
+VACUUM_HOUR_RANGE = (2, 5)      # 仅在 02:00-04:59 执行，避开采集时段
+VACUUM_LOCK_TIMEOUT = '10s'     # 拿不到排他锁就跳过，下一个空闲周期重试
 
 
 def ensure_partitions(future_days=7):
@@ -493,7 +504,8 @@ def ensure_partitions(future_days=7):
             name = PARTITION_PREFIX + start.strftime('%Y%m%d')
             cur.execute(
                 f'CREATE TABLE IF NOT EXISTS {name} PARTITION OF '
-                f'{TABLE_DATA} FOR VALUES FROM (%s) TO (%s)',
+                f'{TABLE_DATA} FOR VALUES FROM (%s) TO (%s) '
+                f'WITH (fillfactor={FILLFACTOR})',
                 (start, end))
             created += name not in existing
         cur.close()
@@ -503,6 +515,61 @@ def ensure_partitions(future_days=7):
                      sorted(dropped)[0], sorted(dropped)[-1])
         log.info('分区检查: 新建 %s 个，保留自 %s，已确保至 %s',
                  created, keep_from, today + timedelta(days=future_days))
+    finally:
+        conn.close()
+
+
+def load_vacuum_state():
+    try:
+        with open(VACUUM_STATE_FILE, encoding='utf-8') as f:
+            return json.load(f).get('last_vacuumed')
+    except Exception:
+        return None
+
+
+def save_vacuum_state(day_s):
+    tmp = VACUUM_STATE_FILE + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump({'last_vacuumed': day_s}, f, ensure_ascii=False)
+    os.replace(tmp, VACUUM_STATE_FILE)
+
+
+def vacuum_yesterday_partition(now):
+    """每天凌晨对「昨天」的分区执行一次 VACUUM FULL（幂等，按日期记状态）。
+
+    历史分区已停止写入，排他锁不影响采集；成功后才落状态，失败则下个空闲
+    周期自动重试。
+    """
+    if not (VACUUM_HOUR_RANGE[0] <= now.hour < VACUUM_HOUR_RANGE[1]):
+        return
+    tz = timezone(timedelta(hours=8))
+    day_s = (now.replace(tzinfo=tz).date() - timedelta(days=1)).strftime('%Y%m%d')
+    if load_vacuum_state() == day_s:
+        return
+    name = PARTITION_PREFIX + day_s
+    conn = connect()
+    conn.autocommit = True
+    try:
+        cur = conn.cursor()
+        cur.execute("""SELECT 1 FROM pg_inherits
+                       WHERE inhrelid = to_regclass(%s)::oid""", (name,))
+        if cur.fetchone() is None:
+            log.info('历史分区 %s 不存在，跳过 VACUUM FULL', name)
+            save_vacuum_state(day_s)
+            return
+        cur.execute(f"SET lock_timeout = '{VACUUM_LOCK_TIMEOUT}'")
+        cur.execute('SET statement_timeout = 0')
+        cur.execute(f'ALTER TABLE {name} RESET (fillfactor)')
+        cur.execute(f"SELECT pg_size_pretty(pg_total_relation_size('{name}'))")
+        before = cur.fetchone()[0]
+        t0 = time.time()
+        log.info('开始 VACUUM FULL %s（当前 %s）', name, before)
+        cur.execute(f'VACUUM (FULL, ANALYZE) {name}')
+        cur.execute(f"SELECT pg_size_pretty(pg_total_relation_size('{name}'))")
+        after = cur.fetchone()[0]
+        log.info('VACUUM FULL %s 完成: %s -> %s，耗时 %.0fs',
+                 name, before, after, time.time() - t0)
+        save_vacuum_state(day_s)
     finally:
         conn.close()
 
@@ -777,6 +844,10 @@ def main():
                 integrity_check()
             except Exception as e:
                 log.warning('完整性自检失败（下个周期重试）: %r', e)
+        try:
+            vacuum_yesterday_partition(datetime.now())
+        except Exception as e:
+            log.warning('历史分区 VACUUM FULL 失败（下个空闲周期重试）: %r', e)
         if caught_up:
             time.sleep(FETCH_INTERVAL_SECONDS)
 

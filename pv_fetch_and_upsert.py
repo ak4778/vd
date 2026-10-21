@@ -41,6 +41,9 @@ log = logging.getLogger('pv_fetch')
 TABLE_DATA = 'pv_string_branch'             # 秒级数据明细表（按 ts 日分区，长表）
 TABLE_DEVICE = 'pv_station_invert'           # 白名单台账表（逆变器清单）
 PARTITION_PREFIX = TABLE_DATA + '_'
+# 分区 fillfactor：留 10% 页内空间，让重复 upsert 的 UPDATE 尽量走 HOT
+# （不新增索引条目），显著降低表与索引膨胀。
+FILLFACTOR = 90
 
 # ---------------- 接口配置 ----------------
 API_URL = 'http://10.65.78.65:18082/queryData'
@@ -55,11 +58,11 @@ RETRY_INTERVAL = 5
 # 测点 LIKE 模式列表（不含 GFMJ1_ 前缀），接口 parameter = GFMJ1_%{pattern}
 # 每个 pattern 中的字面前缀（% 之前的部分）用于 parse_tag 定位 inverter_id
 #
-# 拆成 28 个精确组串号（不用单通配 STRING_BRANCH%_A）：
+# 拆成 16 个精确组串号（不用单通配 STRING_BRANCH%_A）：
 # 单通配模式下一个请求匹配全部 14037 台逆变器的所有组串，响应体过大，
-# 早上数据高峰期触发 API 大响应断连/ReadTimeout；拆分后单请求响应小 28 倍，
+# 早上数据高峰期触发 API 大响应断连/ReadTimeout；拆分后单请求响应小 16 倍，
 # 与 wind_fetch 的 19 后缀分散模式一致。
-POINT_PATTERNS = [f'STRING_BRANCH{i}_A' for i in range(1, 29)]  # 组串电流 1~28（16路以后数据稀疏）
+POINT_PATTERNS = [f'STRING_BRANCH{i}_A' for i in range(1, 17)]  # 组串电流 1~16（17+ 接口无数据返回）
 # 从 patterns 自动提取测点前缀（% 之前的字面部分），用于 tagName 解析
 POINT_PREFIXES = [p[:p.index('%')] if '%' in p else p for p in POINT_PATTERNS]
 
@@ -71,6 +74,7 @@ INSERT INTO {TABLE_DATA} (device_id, point_code, point_value, ts)
 VALUES %s
 ON CONFLICT (device_id, ts, point_code) DO UPDATE SET
     point_value = EXCLUDED.point_value
+WHERE {TABLE_DATA}.point_value IS DISTINCT FROM EXCLUDED.point_value
 """
 _ROW_TEMPLATE = '(%s, %s, %s, %s)'
 
@@ -166,11 +170,14 @@ def ingest_messages(messages, wl=None):
         conn.close()
 
 # ---------------- 窗口与轮询 ----------------
-OVERLAP_SECONDS = 300
-# 重叠 5 分钟：上游按设备分批发布（同一秒的数据可能先到一部分），
-# 每轮重拉近 5 分钟，晚到的设备行在后续轮次被补齐（upsert 幂等）。
+OVERLAP_SECONDS = 120
+# 重叠 2 分钟：上游按设备分批发布（同一秒的数据可能先到一部分），
+# 每轮重拉近 2 分钟，晚到的设备行在后续轮次被补齐（upsert 幂等）。
 INITIAL_LOOKBACK_SECONDS = 300
-MAX_WINDOW_SECONDS = 120
+# 必须大于 OVERLAP_SECONDS：窗口终点是 start + MAX_WINDOW，
+# 若 MAX_WINDOW <= OVERLAP，终点会落回水位线之前，导致水位线不前进、
+# 原地无限重拉同一个窗口。重叠越大重复写入越多，膨胀越严重。
+MAX_WINDOW_SECONDS = 240
 FETCH_INTERVAL_SECONDS = 30
 FETCH_WORKERS = 4
 FUTURE_FILTER_SECONDS = 30 * 60
@@ -199,10 +206,29 @@ LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 LOG_TO_FILE = False
 LOG_BACKUP_DAYS = 30
 
+# ---------------- 历史分区空间回收 ----------------
+# upsert 会把同一行反复 UPDATE，autovacuum 只回收可复用空间、不缩小文件，
+# 所以每天凌晨对「昨天」的分区做一次 VACUUM FULL，把空间真正还给磁盘。
+VACUUM_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 'pv_vacuum_state.json')
+VACUUM_HOUR_RANGE = (2, 5)      # 仅在 02:00-04:59 执行，避开采集时段
+VACUUM_LOCK_TIMEOUT = '10s'     # 拿不到排他锁就跳过，下一个空闲周期重试
+
 # ---------------- 数据完整性自检 ----------------
 INTEGRITY_CHECK_SECONDS = 3600
 INTEGRITY_LOOKBACK_MIN = 5
 INTEGRITY_MIN_RATIO = 0.5
+
+# ---------------- 延迟自动回补 ----------------
+# 上游按设备分批发布：实时采集时绝大多数行尚未发布。实测同一 2 分钟窗口，
+# 实时采集只入库 3010 行，71 分钟后同一接口能拉到 664285 行。
+# 因此在空闲期把「已过发布稳定期」的历史块按同一接口重新回拉，由 upsert
+# 幂等补齐。只在非采集时段执行，避免与实时采集抢接口和数据库连接。
+REFETCH_DELAYS = (120 * 60,)      # 块结束需早于 now-该值（秒）；可配多轮
+REFETCH_BLOCK_SECONDS = 600       # 每个回补块 10 分钟
+REFETCH_WORKERS = 2               # 回补并发上限（角色连接上限仅 10，需给其它进程留余量）
+REFETCH_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'pv_refetch.json')
 
 
 def setup_logging():
@@ -327,7 +353,8 @@ def ensure_partitions(future_days=7):
             name = PARTITION_PREFIX + start.strftime('%Y%m%d')
             cur.execute(
                 f'CREATE TABLE IF NOT EXISTS {name} PARTITION OF '
-                f'{TABLE_DATA} FOR VALUES FROM (%s) TO (%s)',
+                f'{TABLE_DATA} FOR VALUES FROM (%s) TO (%s) '
+                f'WITH (fillfactor={FILLFACTOR})',
                 (start, end))
             created += name not in existing
         cur.close()
@@ -335,6 +362,63 @@ def ensure_partitions(future_days=7):
             log.info('分区保留 %s 天: DROP %s 个旧分区', RETENTION_DAYS, len(dropped))
         log.info('分区检查: 新建 %s 个，保留自 %s，已确保至 %s',
                  created, keep_from, today + timedelta(days=future_days))
+    finally:
+        conn.close()
+
+
+def load_vacuum_state():
+    try:
+        with open(VACUUM_STATE_FILE, encoding='utf-8') as f:
+            return json.load(f).get('last_vacuumed')
+    except Exception:
+        return None
+
+
+def save_vacuum_state(day_s):
+    tmp = VACUUM_STATE_FILE + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump({'last_vacuumed': day_s}, f, ensure_ascii=False)
+    os.replace(tmp, VACUUM_STATE_FILE)
+
+
+def vacuum_yesterday_partition(now):
+    """每天凌晨对「昨天」的分区执行一次 VACUUM FULL（幂等，按日期记状态）。
+
+    历史分区已停止写入，排他锁不影响采集；成功后才落状态，失败则下个空闲
+    周期自动重试。
+    """
+    if not (VACUUM_HOUR_RANGE[0] <= now.hour < VACUUM_HOUR_RANGE[1]):
+        return
+    tz = timezone(timedelta(hours=8))
+    day_s = (now.replace(tzinfo=tz).date() - timedelta(days=1)).strftime('%Y%m%d')
+    if load_vacuum_state() == day_s:
+        return
+    name = PARTITION_PREFIX + day_s
+    conn = connect()
+    conn.autocommit = True
+    try:
+        cur = conn.cursor()
+        cur.execute("""SELECT 1 FROM pg_inherits
+                       WHERE inhrelid = to_regclass(%s)::oid""", (name,))
+        if cur.fetchone() is None:
+            log.info('历史分区 %s 不存在，跳过 VACUUM FULL', name)
+            save_vacuum_state(day_s)
+            return
+        cur.execute(f"SET lock_timeout = '{VACUUM_LOCK_TIMEOUT}'")
+        # 服务器默认 statement_timeout=10min，大分区重写会超时被取消
+        cur.execute('SET statement_timeout = 0')
+        # 历史分区不再写入：恢复 fillfactor=100 让重写后页面装得更满
+        cur.execute(f'ALTER TABLE {name} RESET (fillfactor)')
+        cur.execute(f"SELECT pg_size_pretty(pg_total_relation_size('{name}'))")
+        before = cur.fetchone()[0]
+        t0 = time.time()
+        log.info('开始 VACUUM FULL %s（当前 %s）', name, before)
+        cur.execute(f'VACUUM (FULL, ANALYZE) {name}')
+        cur.execute(f"SELECT pg_size_pretty(pg_total_relation_size('{name}'))")
+        after = cur.fetchone()[0]
+        log.info('VACUUM FULL %s 完成: %s -> %s，耗时 %.0fs',
+                 name, before, after, time.time() - t0)
+        save_vacuum_state(day_s)
     finally:
         conn.close()
 
@@ -523,6 +607,92 @@ def collect_state(now):
     return True, win_open, win_close
 
 
+# ---------------- 延迟自动回补 ----------------
+def load_refetch_state():
+    """读取各轮回补的游标（下一待回补块起点）；缺失的位置返回 None。"""
+    try:
+        with open(REFETCH_STATE_FILE, encoding='utf-8') as f:
+            saved = json.load(f).get('cursors') or []
+    except (OSError, ValueError):
+        saved = []
+    cursors = []
+    for i in range(len(REFETCH_DELAYS)):
+        s = saved[i] if i < len(saved) else None
+        cursors.append(datetime.strptime(s, TS_FMT) if s else None)
+    return cursors
+
+
+def save_refetch_state(cursors):
+    """原子写回补游标（临时文件 + os.replace）。"""
+    tmp = REFETCH_STATE_FILE + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump({'cursors': [c.strftime(TS_FMT) if c else None
+                               for c in cursors]}, f)
+    os.replace(tmp, REFETCH_STATE_FILE)
+
+
+def _align_block(dt):
+    """把时间对齐到回补块边界（向下取整）。"""
+    step = REFETCH_BLOCK_SECONDS // 60
+    return dt.replace(minute=dt.minute - dt.minute % step,
+                      second=0, microsecond=0)
+
+
+def _first_block_of_day(day):
+    """当天第一个采集时段的起点（块对齐）。"""
+    return _align_block(datetime.combine(day, COLLECT_WINDOWS[0][0]))
+
+
+def _next_block_in_window(block):
+    """block 的下一块；若不在任何采集时段内，跳到下一个时段起点（可跨天）。"""
+    nxt = block + timedelta(seconds=REFETCH_BLOCK_SECONDS)
+    for d in (nxt.date(), nxt.date() + timedelta(days=1)):
+        for open_t, close_t in COLLECT_WINDOWS:
+            open_ = datetime.combine(d, open_t)
+            close = datetime.combine(d, close_t)
+            if close <= nxt:
+                continue
+            return max(nxt, open_)
+    return nxt
+
+
+def refetch_step(now):
+    """空闲期执行一步延迟回补：每轮最多拉一个块。
+
+    整块必须早于 now-REFETCH_DELAYS[i] 才算「已过发布稳定期」。
+    成功或无需拉取后推进游标并落盘；异常时游标不动，下次空闲重试。
+    返回是否执行了拉取。
+    """
+    global FETCH_WORKERS
+    cursors = load_refetch_state()
+    today_first = _first_block_of_day(now.date())
+    for i, delay in enumerate(REFETCH_DELAYS):
+        cur = cursors[i]
+        if cur is None or cur.date() < now.date():
+            cur = cursors[i] = today_first   # 首次运行/跨天：从当天首块开始
+        block_end = cur + timedelta(seconds=REFETCH_BLOCK_SECONDS)
+        if block_end > _align_block(now - timedelta(seconds=delay)):
+            continue                         # 该块尚未过发布稳定期
+        a, b = cur.strftime(TS_FMT), block_end.strftime(TS_FMT)
+        saved_workers = FETCH_WORKERS
+        FETCH_WORKERS = min(saved_workers, REFETCH_WORKERS)
+        try:
+            fetched, ingested = fetch_and_ingest_window(a, b)
+            log.info('延迟回补(延迟 %s 分钟) [%s, %s) 拉取 %s 条，补写 %s 条',
+                     delay // 60, a, b, fetched, ingested)
+        except Exception as e:
+            log.warning('延迟回补失败 [%s, %s)，保持游标下次重试: %r', a, b, e)
+            save_refetch_state(cursors)
+            return False
+        finally:
+            FETCH_WORKERS = saved_workers
+        cursors[i] = _next_block_in_window(cur)
+        save_refetch_state(cursors)
+        return True
+    save_refetch_state(cursors)
+    return False
+
+
 # ---------------- 主循环 ----------------
 def tick(now=None):
     """执行一轮「算窗口 -> 拉取 -> 入库 -> 落水位线」。
@@ -604,6 +774,14 @@ def main():
                     log.info('空闲中，下一时段 %s',
                              _next_segment(now).strftime('%m-%d %H:%M:%S'))
                     idle_cycles = 0
+            try:
+                vacuum_yesterday_partition(now)
+            except Exception as e:
+                log.warning('历史分区 VACUUM FULL 失败（下个空闲周期重试）: %r', e)
+            try:
+                refetch_step(now)
+            except Exception as e:
+                log.warning('延迟回补异常（下个空闲周期重试）: %r', e)
             time.sleep(IDLE_SLEEP_SECONDS)
             continue
         if idle is not False:
