@@ -56,6 +56,10 @@ int ds_is_available(void) {
 int pg_alarm_supported(void);
 int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
                       int max_rows);
+int pg_get_alarms_page(int page, int page_size,
+                       unsigned long long *total_out, struct ds_alarm *rows,
+                       int max_rows);
+int pg_get_recent_alarms(struct ds_alarm *rows, int max_rows);
 #endif
 
 int ds_alarm_supported(void) {
@@ -72,6 +76,31 @@ int ds_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
   return pg_get_new_alarms(after_id, rows, max_rows);
 #else
   (void) after_id;
+  (void) rows;
+  (void) max_rows;
+  return -1;
+#endif
+}
+
+int ds_get_alarms_page(int page, int page_size,
+                       unsigned long long *total_out, struct ds_alarm *rows,
+                       int max_rows) {
+#if defined(PG_MODE)
+  return pg_get_alarms_page(page, page_size, total_out, rows, max_rows);
+#else
+  (void) page;
+  (void) page_size;
+  (void) rows;
+  (void) max_rows;
+  if (total_out != NULL) *total_out = 0;
+  return -1;
+#endif
+}
+
+int ds_get_recent_alarms(struct ds_alarm *rows, int max_rows) {
+#if defined(PG_MODE)
+  return pg_get_recent_alarms(rows, max_rows);
+#else
   (void) rows;
   (void) max_rows;
   return -1;

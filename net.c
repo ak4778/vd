@@ -1111,6 +1111,37 @@ static int alarm_row_json(char *out, int pos, int cap, const struct ds_alarm *r)
   return pos;
 }
 
+// 动态预算的告警帧构建：{"prefix","items":[row,...]}，以 n*768B 起步，
+// 截断（pos==cap）则预算翻倍重试（上限 16MB），杜绝整帧静默丢弃。
+// 成功返回 malloc 缓冲（调用方 free）并写 out_len；失败返回 NULL。
+static char *alarm_build_items_frame(const char *prefix,
+                                     const struct ds_alarm *rows, int n,
+                                     size_t *out_len) {
+  size_t cap = (size_t) n * ALARM_JSON_ROW_MAX + 256;
+  if (cap < 1024) cap = 1024;
+  for (int attempt = 0; attempt < 6; attempt++) {
+    if (cap > (size_t) 16 * 1024 * 1024) break;
+    char *buf = (char *) malloc(cap);
+    if (buf == NULL) return NULL;
+    int pos = alarm_append(buf, 0, (int) cap, "%s", prefix);
+    for (int i = 0; i < n; i++) {
+      if (i > 0) pos = alarm_append(buf, pos, (int) cap, ",");
+      pos = alarm_row_json(buf, pos, (int) cap, &rows[i]);
+    }
+    pos = alarm_append(buf, pos, (int) cap, "]}");
+    if (pos < (int) cap) {  // 未截断：帧完整
+      if (attempt > 0) {
+        MG_INFO(("alarm frame needed enlarged budget: %zu bytes (n=%d)", cap, n));
+      }
+      *out_len = (size_t) pos;
+      return buf;
+    }
+    free(buf);
+    cap *= 2;
+  }
+  return NULL;
+}
+
 static void alarm_send_hello(struct mg_connection *c) {
   char buf[96];
   int n = snprintf(buf, sizeof(buf), "{\"type\":\"hello\",\"supported\":%s}",
@@ -1118,20 +1149,17 @@ static void alarm_send_hello(struct mg_connection *c) {
   if (n > 0) mg_ws_send(c, buf, (size_t) n, WEBSOCKET_OP_TEXT);
 }
 
-// 快照：把缓存整体发给新连接（旧 -> 新，单帧）。缓存 <= 200 行 x 768B 预算。
+// 快照：把缓存整体发给新连接（旧 -> 新，单帧）。缓存 <= 200 行，帧预算自适应。
 static void alarm_send_snapshot(struct mg_connection *c) {
-  int cap = ALARM_CACHE_MAX * ALARM_JSON_ROW_MAX + 256;
-  char *buf = (char *) malloc((size_t) cap);
-  if (buf == NULL) return;
-  int pos = alarm_append(buf, 0, cap, "{\"type\":\"snapshot\",\"items\":[");
-  for (int i = 0; i < s_alarm_cache_count; i++) {
-    if (i > 0) pos = alarm_append(buf, pos, cap, ",");
-    pos = alarm_row_json(buf, pos, cap, &s_alarm_cache[i]);
+  size_t len = 0;
+  char *buf = alarm_build_items_frame("{\"type\":\"snapshot\",\"items\":[",
+                                      s_alarm_cache, s_alarm_cache_count, &len);
+  if (buf == NULL) {
+    MG_ERROR(("alarm snapshot frame build failed (cache=%d rows)",
+              s_alarm_cache_count));
+    return;
   }
-  pos = alarm_append(buf, pos, cap, "]}");
-  if (pos > 0 && pos < cap) {
-    mg_ws_send(c, buf, (size_t) pos, WEBSOCKET_OP_TEXT);
-  }
+  mg_ws_send(c, buf, len, WEBSOCKET_OP_TEXT);
   free(buf);
 }
 
@@ -1182,20 +1210,16 @@ static void alarm_handle_rows(struct mg_mgr *mgr, const struct ds_alarm *rows,
   }
   if (!have_watcher) return;
 
-  int cap = n * ALARM_JSON_ROW_MAX + 128;
-  char *buf = (char *) malloc((size_t) cap);
-  if (buf == NULL) return;
-  int pos = alarm_append(buf, 0, cap, "{\"type\":\"alarm\",\"items\":[");
-  for (int i = 0; i < n; i++) {
-    if (i > 0) pos = alarm_append(buf, pos, cap, ",");
-    pos = alarm_row_json(buf, pos, cap, &rows[i]);
+  size_t len = 0;
+  char *buf = alarm_build_items_frame("{\"type\":\"alarm\",\"items\":[",
+                                      rows, n, &len);
+  if (buf == NULL) {
+    MG_ERROR(("alarm broadcast frame build failed (n=%d rows dropped)", n));
+    return;
   }
-  pos = alarm_append(buf, pos, cap, "]}");
-  if (pos > 0 && pos < cap) {
-    for (c = mgr->conns; c != NULL; c = c->next) {
-      if (is_alarm_watcher(c)) {
-        mg_ws_send(c, buf, (size_t) pos, WEBSOCKET_OP_TEXT);
-      }
+  for (c = mgr->conns; c != NULL; c = c->next) {
+    if (is_alarm_watcher(c)) {
+      mg_ws_send(c, buf, len, WEBSOCKET_OP_TEXT);
     }
   }
   free(buf);
@@ -1233,6 +1257,89 @@ static void alarm_dispatch_results(struct mg_mgr *mgr) {
     free(w);
     w = wnext;
   }
+}
+
+// ---- 告警历史分页查询（/api/alarms/get，仅 PG 模式） ----
+// 与 /api/nodes/get 同一异步模型：worker 线程查库 + 构建 JSON，事件循环
+// 线程由 dispatch_results 回写 HTTP。实时页仍走 WS，本接口只服务历史页。
+#define ALARM_PAGE_MAX 200  // 单页行数上限（200 = data_config.maxPageSize）
+
+struct alarm_page_work {
+  unsigned long long conn_id;
+  int page;
+  int page_size;
+  int n;                    // worker 填：行数，<0 查询失败
+  unsigned long long total; // worker 填：匹配总数
+  struct ds_alarm rows[ALARM_PAGE_MAX];
+};
+
+// worker 线程：查库 + 组装 {"total":N,"page":p,"pageSize":s,"items":[...]}
+static void alarm_page_thread(void *param) {
+  struct alarm_page_work *w = (struct alarm_page_work *) param;
+  unsigned long long total = 0;
+  int n = ds_get_alarms_page(w->page, w->page_size, &total, w->rows,
+                             ALARM_PAGE_MAX);
+  w->n = n;
+  w->total = total;
+
+  int status = 200;
+  char *body = NULL;
+  size_t len = 0;
+  if (n < 0) {
+    status = 503;
+    body = strdup("{\"error\":\"Alarm history query failed or unsupported\"}");
+  } else {
+    char prefix[128];
+    snprintf(prefix, sizeof(prefix),
+             "{\"total\":%llu,\"page\":%d,\"pageSize\":%d,\"items\":[",
+             total, w->page, w->page_size);
+    body = alarm_build_items_frame(prefix, w->rows, n, &len);
+    if (body == NULL) {
+      status = 500;
+      body = strdup("{\"error\":\"Memory allocation failed\"}");
+    }
+  }
+
+  if (body != NULL) {
+    if (len == 0) len = strlen(body);  // 错误分支用固定 JSON 长度
+    push_result(w->conn_id, status, body, len);
+  }
+  free(w);
+}
+
+static void handle_alarms_get(struct mg_connection *c,
+                              struct mg_http_message *hm) {
+  int page = 1;
+  int page_size = get_default_page_size();
+  char page_buf[16] = "";
+  char size_buf[16] = "";
+
+  mg_http_get_var(&hm->query, "page", page_buf, sizeof(page_buf));
+  mg_http_get_var(&hm->query, "pageSize", size_buf, sizeof(size_buf));
+  if (page_buf[0] != '\0') page = atoi(page_buf);
+  if (size_buf[0] != '\0') page_size = atoi(size_buf);
+
+  if (page < 1 || page_size < 1) {
+    mg_http_reply(c, 400, s_json_header,
+                  "{\"error\":\"Invalid parameters: page and pageSize must be positive integers\"}");
+    return;
+  }
+
+  int max_page_size = get_max_page_size();
+  if (max_page_size > ALARM_PAGE_MAX) max_page_size = ALARM_PAGE_MAX;
+  if (page_size > max_page_size) page_size = max_page_size;
+
+  struct alarm_page_work *w =
+      (struct alarm_page_work *) calloc(1, sizeof(*w));
+  if (w == NULL) {
+    mg_http_reply(c, 500, s_json_header,
+                  "{\"error\":\"Memory allocation failed\"}");
+    return;
+  }
+  w->conn_id = c->id;
+  w->page = page;
+  w->page_size = page_size;
+  start_thread(alarm_page_thread, w);
 }
 
 static void handle_login(struct mg_connection *c, struct mg_http_message *hm,
@@ -1381,6 +1488,13 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
         c->data[0] = 'A';
         mg_ws_upgrade(c, hm, NULL);
       }
+    } else if (mg_match(hm->uri, mg_str("/api/alarms/get"), NULL)) {
+      // 告警历史分页（实时页仍由 /api/alarms/ws 推送驱动）
+      if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
+        mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");
+      } else {
+        handle_alarms_get(c, hm);
+      }
     } else if (mg_match(hm->uri, mg_str("/api/nodes/queryCategory"), NULL)) {
       if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
         mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");
@@ -1437,6 +1551,16 @@ void web_init(struct mg_mgr *mgr) {
   // 告警推送：一次性探测（PG 连接 + wind_alarm 表存在性，结果缓存于驱动内）
   s_alarm_poll_enabled = (ds_alarm_supported() == 1);
   if (s_alarm_poll_enabled) {
+    // 启动预热：以最近 200 行初始化快照缓存与增量游标，避免重启后把历史
+    // 告警当作新增事件重放给客户端（实测曾一次重放 168 条）。
+    int n = ds_get_recent_alarms(s_alarm_cache, ALARM_CACHE_MAX);
+    if (n > 0) {
+      s_alarm_cache_count = n;
+      s_alarm_last_id = s_alarm_cache[n - 1].id;
+      MG_INFO(("Alarm cache warmed: %d rows, cursor=%llu", n, s_alarm_last_id));
+    } else if (n < 0) {
+      MG_ERROR(("Alarm cache warm-up query failed; cursor starts at 0"));
+    }
     MG_INFO(("Alarm push enabled (wind_alarm incremental polling every %dms)", ALARM_POLL_MS));
   } else {
     MG_INFO(("Alarm push disabled (PG mode with wind_alarm table required)"));

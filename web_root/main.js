@@ -739,13 +739,13 @@ const AlarmRow = ({a}) => {
       ${a.point_name && html`<span class="text-slate-400 ml-1 text-xs">(${a.point_code})<//>`}
     <//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.rule_code}<//>
-    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.temperature != null && a.temperature !== 0 ? a.temperature.toFixed(1) : '-'}<//>
-    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.temp_rate != null && a.temp_rate !== 0 ? a.temp_rate.toFixed(4) : '-'}<//>
-    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.range_1h != null && a.range_1h !== 0 ? a.range_1h.toFixed(2) : '-'}<//>
-    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.range_20s != null && a.range_20s !== 0 ? a.range_20s.toFixed(2) : '-'}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.temperature != null ? a.temperature.toFixed(1) : '-'}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.temp_rate != null ? a.temp_rate.toFixed(4) : '-'}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.range_1h != null ? a.range_1h.toFixed(2) : '-'}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.range_20s != null ? a.range_20s.toFixed(2) : '-'}<//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.alarm_type || ''}<//>
-    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.alarm_value != null && a.alarm_value !== 0 ? a.alarm_value.toFixed(2) : '-'}<//>
-    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600">${a.detail || ''}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.alarm_value != null ? a.alarm_value.toFixed(2) : '-'}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 overflow-hidden text-ellipsis whitespace-nowrap" title=${a.detail || ''}><span>${a.detail || ''}</span></td>
   <//>`;
 };
 
@@ -764,11 +764,106 @@ const alarmColumns = [
   {label: '20s极差', width: '90px'},
   {label: '告警类型', width: '110px'},
   {label: '告警值', width: '90px'},
-  {label: '详情', width: ''},
+  {label: '详情', width: '260px'},
 ];
 
-function Alarms({items, wsOk}) {
+// 告警页每页条数（与 data_config.defaultPageSize 对齐）
+const ALARM_PAGE_SIZE = 50;
+
+function Alarms({items, wsOk, alarmRx}) {
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);       // 服务端告警总数（分页器用）
+  const [hist, setHist] = useState([]);        // 历史页数据（page >= 2）
+  const [histLoading, setHistLoading] = useState(false);
+  const [histError, setHistError] = useState('');
+  // 自动滚动：勾选=新告警实时插入并滚回顶部；取消=冻结当前视图，仅累计提示
+  const [autoScroll, setAutoScroll] = useState(() => {
+    try { return localStorage.getItem('alarmAutoScroll') !== '0'; } catch (e) { return true; }
+  });
+  const [frozenMaxId, setFrozenMaxId] = useState(null);  // 冻结时的已见最大 id
+  const scrollRef = useRef(null);
+  // 总数基数：每次拉取 total 时记下当时的 alarmRx，之后展示 total + 增量差值
+  // （wind_alarm 为只追加表，WS 收到的增量行数即总数增量）
+  const rxRef = useRef(0);
+  rxRef.current = alarmRx;
+  const baseRxRef = useRef(0);
+
+  // 总数：进入页面 / WS 重连成功后向服务端取一次；失败时用已加载条数兜底
+  useEffect(() => {
+    fetchWithTimeout(`api/alarms/get?page=1&pageSize=1&t=${Date.now()}`, { method: 'GET', cache: 'no-cache', credentials: 'include' })
+      .then(r => (r.ok ? r.json() : null))
+      .then(r => { if (r && typeof r.total === 'number') { baseRxRef.current = rxRef.current; setTotal(r.total); } })
+      .catch(() => {});
+  }, [wsOk]);
+
+  // 第 1 页直接用 WS 内存列表（实时）；第 2 页起向服务端按 id 倒序取历史
+  useEffect(() => {
+    if (page === 1) {
+      setHist([]);
+      setHistError('');
+      return undefined;
+    }
+    let cancelled = false;
+    setHistLoading(true);
+    setHistError('');
+    fetchWithTimeout(`api/alarms/get?page=${page}&pageSize=${ALARM_PAGE_SIZE}&t=${Date.now()}`, { method: 'GET', cache: 'no-cache', credentials: 'include' })
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then(r => {
+        if (cancelled) return;
+        setHist(r.items || []);
+        if (typeof r.total === 'number') { baseRxRef.current = rxRef.current; setTotal(r.total); }
+        setHistLoading(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setHist([]);
+        setHistError('历史数据加载失败，请稍后重试');
+        setHistLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [page]);
+
+  // 自动滚动：items 前插新告警后把滚动条拉回顶部（仅实时页）
+  useEffect(() => {
+    if (page !== 1 || !autoScroll) return;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = 0;
+  }, [items, page, autoScroll]);
+
+  const toggleAutoScroll = checked => {
+    setAutoScroll(checked);
+    try { localStorage.setItem('alarmAutoScroll', checked ? '1' : '0'); } catch (e) {}
+    if (checked) {
+      setFrozenMaxId(null);          // 恢复实时跟随
+      const el = scrollRef.current;
+      if (el) el.scrollTop = 0;
+    } else {
+      setFrozenMaxId(items.length ? items[0].id : 0);  // 冻结在当前已见范围
+    }
+  };
+
+  // 冻结边界：取消自动滚动后，id 大于边界的告警先不插入表格，只累计计数
+  const frozenBound = autoScroll
+    ? null
+    : (frozenMaxId === null ? (items.length ? items[0].id : 0) : frozenMaxId);
+  const visibleAll = frozenBound === null ? items : items.filter(x => x.id <= frozenBound);
+  const pendingCount = frozenBound === null ? 0 : items.filter(x => x.id > frozenBound).length;
+
+  const revealNew = () => {
+    if (items.length) setFrozenMaxId(items[0].id);
+    const el = scrollRef.current;
+    if (el) el.scrollTop = 0;
+  };
+
+  const rows = page === 1 ? visibleAll.slice(0, ALARM_PAGE_SIZE) : hist;
+  // 实时总数：基数 + 取数后实收的 WS 增量；条数下限由内存列表兜底
+  const liveTotal = total + Math.max(0, alarmRx - baseRxRef.current);
+  const shownTotal = page === 1 ? Math.max(liveTotal, items.length) : Math.max(liveTotal, hist.length);
   const latest = items.length > 0 ? items[0].ts : '';
+  const showBanner = page === 1 && pendingCount > 0;
   return html`
   <div class="flex-1 min-h-0 flex flex-col p-2">
     <div class="ind-panel flex-1 min-h-0 flex flex-col">
@@ -778,10 +873,16 @@ function Alarms({items, wsOk}) {
         <span class="lamp ${wsOk ? 'lamp-green' : 'lamp-red'}"><//>
         ${wsOk ? '已连接' : '重连中...'}
       <//>
-      <span class="text-sm ind-dim">共 ${items.length} 条</span>
+      <span class="text-sm ind-dim">共 ${shownTotal} 条</span>
       ${latest && html`<span class="text-sm ind-dim">最新: ${latest}<//>`}
+      ${page > 1 && html`<span class="alarm-hist-hint" title="新告警仍会实时进入第 1 页">历史浏览中<//>`}
+      <label class="alarm-auto-scroll" title="勾选：新告警自动滚到顶部；取消：冻结当前列表，只提示新告警数量">
+        <input type="checkbox" checked=${autoScroll} onchange=${e => toggleAutoScroll(e.target.checked)} />
+        自动滚动
+      <//>
     <//>
-    <div class="flex-1 min-h-0 overflow-auto scrollbar-force bg-white ind-lightbox ind-darktable">
+    ${showBanner && html`<div class="alarm-new-banner" onclick=${revealNew}>↑ ${pendingCount} 条新告警，点击查看<//>`}
+    <div class="flex-1 min-h-0 overflow-auto scrollbar-force bg-white ind-lightbox ind-darktable" ref=${scrollRef}>
       <table class="border-separate border-spacing-0 bg-white ind-darktable" style="table-layout: fixed; width: 100%;">
         <thead>
           <tr>
@@ -791,13 +892,16 @@ function Alarms({items, wsOk}) {
           <//>
         <//>
         <tbody>
-          ${items.length === 0 ? html`<tr><td colspan="14" class="text-center py-8 text-gray-500">
-            ${wsOk ? '暂无告警，等待新事件...' : '未连接告警服务，等待重连...'}
+          ${rows.length === 0 ? html`<tr><td colspan="14" class="text-center py-8 text-gray-500">
+            ${page === 1
+              ? (wsOk ? '暂无告警，等待新事件...' : '未连接告警服务，等待重连...')
+              : (histLoading ? '加载中...' : (histError || '本页暂无数据'))}
           <//></tr>` :
-          items.map(a => h(AlarmRow, {key: a.id, a}))}
+          rows.map(a => h(AlarmRow, {key: a.id, a}))}
         <//>
       <//>
     <//>
+    ${shownTotal > 0 && html`<${Pagination} currentPage=${page} setPageFn=${setPage} totalItems=${shownTotal} itemsPerPage=${ALARM_PAGE_SIZE} />`}
     <//>
   <//>`;
 };
@@ -813,6 +917,8 @@ const App = function({}) {
   const [alarmItems, setAlarmItems] = useState([]);
   const [alarmUnread, setAlarmUnread] = useState(0);
   const [alarmWsOk, setAlarmWsOk] = useState(false);
+  // 自上次快照后实收的告警行数（Alarms 用它把总数基数推成实时总数）
+  const [alarmRx, setAlarmRx] = useState(0);
   // 主题：ind=工业深色 / classic=经典浅色，持久化在 localStorage.theme（初始值由 index.html 头部脚本写到 html class）
   const [theme, setTheme] = useState(() => document.documentElement.classList.contains('ind-theme') ? 'ind' : 'classic');
 
@@ -860,10 +966,12 @@ const App = function({}) {
         try { msg = JSON.parse(ev.data); } catch (e) { return; }
         if (msg.type === 'snapshot') {
           setAlarmItems([...(msg.items || [])].reverse().slice(0, ALARM_CAP));
+          setAlarmRx(0);
         } else if (msg.type === 'alarm') {
           const fresh = msg.items || [];
           if (fresh.length === 0) return;
           setAlarmItems(prev => [...fresh].reverse().concat(prev).slice(0, ALARM_CAP));
+          setAlarmRx(c => c + fresh.length);
           if (urlRef.current !== '/alarms') {
             const n = fresh.filter(x => x.event === 'ALARM').length;
             if (n > 0) setAlarmUnread(u => u + n);
@@ -908,7 +1016,7 @@ const App = function({}) {
   <${Sidebar} url=${url} show=${showSidebar} alarmUnread=${alarmUnread} />
   <${Header} logout=${logout} user=${user} showSidebar=${showSidebar} setShowSidebar=${setShowSidebar} dbMode=${dbMode} dbAvailable=${dbAvailable} theme=${theme} toggleTheme=${toggleTheme} />
   <div class="flex-1 min-h-0 ${showSidebar && 'pl-40'} transition-all duration-300 transform flex flex-col">
-    ${url === '/alarms' ? html`<${Alarms} items=${alarmItems} wsOk=${alarmWsOk} />` : html`<${Events} />`}
+    ${url === '/alarms' ? html`<${Alarms} items=${alarmItems} wsOk=${alarmWsOk} alarmRx=${alarmRx} />` : html`<${Events} />`}
   <//>
 <//>`;
 };

@@ -537,6 +537,40 @@ static void alarm_set_str(char *dst, size_t cap, PGresult *res, int row,
                           int col) {
   // libpq 对 NULL 返回空串，与 get_nodes 的 NULL->"" 兜底语义一致
   snprintf(dst, cap, "%s", PQgetvalue(res, row, col));
+  // UTF-8 安全截断：snprintf 按字节截断，可能切断多字节字符产生非法 UTF-8，
+  // 导致严格 WS 客户端拒绝整帧。截断发生时回退到最近的完整字符边界。
+  size_t len = strlen(dst);
+  if (len == cap - 1 && len > 0) {
+    size_t i = len;
+    while (i > 0 && ((unsigned char) dst[i - 1] & 0xC0) == 0x80) i--;
+    if (i > 0) {
+      unsigned char lead = (unsigned char) dst[i - 1];
+      int need = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+      if ((int) (len - (i - 1)) != need) dst[i - 1] = '\0';  // 序列不完整，砍掉首字节
+    }
+  }
+}
+
+// 单行结果填充（三处告警查询共用）
+static void alarm_fill_row(struct ds_alarm *r, PGresult *res, int i) {
+  memset(r, 0, sizeof(*r));
+  r->id = strtoull(PQgetvalue(res, i, 0), NULL, 10);
+  alarm_set_str(r->event, sizeof(r->event), res, i, 1);
+  alarm_set_str(r->ts, sizeof(r->ts), res, i, 2);
+  alarm_set_str(r->region_company_name, sizeof(r->region_company_name), res, i, 3);
+  alarm_set_str(r->station_name, sizeof(r->station_name), res, i, 4);
+  alarm_set_str(r->device_id, sizeof(r->device_id), res, i, 5);
+  alarm_set_str(r->device_name, sizeof(r->device_name), res, i, 6);
+  alarm_set_str(r->point_code, sizeof(r->point_code), res, i, 7);
+  alarm_set_str(r->point_name, sizeof(r->point_name), res, i, 8);
+  alarm_set_str(r->rule_code, sizeof(r->rule_code), res, i, 9);
+  alarm_set_str(r->alarm_type, sizeof(r->alarm_type), res, i, 10);
+  r->temperature = atof(PQgetvalue(res, i, 11));
+  r->temp_rate = atof(PQgetvalue(res, i, 12));
+  r->range_1h = atof(PQgetvalue(res, i, 13));
+  r->range_20s = atof(PQgetvalue(res, i, 14));
+  r->alarm_value = atof(PQgetvalue(res, i, 15));
+  alarm_set_str(r->detail, sizeof(r->detail), res, i, 16);
 }
 
 // 拉取 id > after_id 的新告警事件（按 id 升序，最多 max_rows 行）。
@@ -578,6 +612,75 @@ int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
 
   int n = PQntuples(res);
   if (n > max_rows) n = max_rows;
+  for (int i = 0; i < n; i++) alarm_fill_row(&rows[i], res, i);
+  PQclear(res);
+  pg_mutex_unlock();
+  return n;
+}
+
+// 按 id 倒序分页查询告警历史（最新在前），供 /api/alarms/get 使用。
+// total_out 返回匹配总数（前端分页器用）；返回行数，空页 0，失败 -1。
+int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
+                       struct ds_alarm *rows, int max_rows) {
+  if (total_out != NULL) *total_out = 0;
+  if (s_conn == NULL || rows == NULL || max_rows <= 0 ||
+      page < 1 || page_size < 1) {
+    return -1;
+  }
+  if (page_size > max_rows) page_size = max_rows;
+
+  pg_mutex_lock();
+  if (s_conn == NULL) {
+    pg_mutex_unlock();
+    return -1;
+  }
+
+  // 先取总数：wind_alarm 为只追加的告警流水表，规模远小于秒级明细表
+  PGresult *cres = PQexec(s_conn, "SELECT count(*) FROM wind_alarm");
+  if (cres == NULL || PQresultStatus(cres) != PGRES_TUPLES_OK ||
+      PQntuples(cres) != 1) {
+    fprintf(stderr, "PG alarm count error: %s\n", PQerrorMessage(s_conn));
+    PQclear(cres);
+    pg_mutex_unlock();
+    return -1;
+  }
+  unsigned long long total = strtoull(PQgetvalue(cres, 0, 0), NULL, 10);
+  PQclear(cres);
+  if (total_out != NULL) *total_out = total;
+
+  long long offset = (long long) (page - 1) * (long long) page_size;
+  if (offset < 0 || offset >= (long long) total) {
+    pg_mutex_unlock();
+    return 0;  // 超出末页：合法空结果
+  }
+
+  char limitbuf[16], offsetbuf[32];
+  snprintf(limitbuf, sizeof(limitbuf), "%d", page_size);
+  snprintf(offsetbuf, sizeof(offsetbuf), "%lld", offset);
+  const char *vals[2] = {limitbuf, offsetbuf};
+
+  static const char *SQL =
+      "SELECT id, event,"
+      " COALESCE(to_char(ts, 'YYYY-MM-DD HH24:MI:SS'), ''),"
+      " COALESCE(region_company_name, ''), COALESCE(station_name, ''),"
+      " device_id, COALESCE(device_name, ''),"
+      " point_code, COALESCE(point_name, ''),"
+      " rule_code, COALESCE(alarm_type, ''),"
+      " COALESCE(temperature, 0), COALESCE(temp_rate, 0),"
+      " COALESCE(range_1h, 0), COALESCE(range_20s, 0),"
+      " COALESCE(alarm_value, 0), COALESCE(detail, '')"
+      " FROM wind_alarm ORDER BY id DESC LIMIT $1 OFFSET $2";
+
+  PGresult *res = PQexecParams(s_conn, SQL, 2, NULL, vals, NULL, NULL, 0);
+  if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
+    fprintf(stderr, "PG alarm page query error: %s\n", PQerrorMessage(s_conn));
+    PQclear(res);
+    pg_mutex_unlock();
+    return -1;
+  }
+
+  int n = PQntuples(res);
+  if (n > page_size) n = page_size;
   for (int i = 0; i < n; i++) {
     struct ds_alarm *r = &rows[i];
     memset(r, 0, sizeof(*r));
@@ -599,6 +702,49 @@ int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
     r->alarm_value = atof(PQgetvalue(res, i, 15));
     alarm_set_str(r->detail, sizeof(r->detail), res, i, 16);
   }
+  PQclear(res);
+  pg_mutex_unlock();
+  return n;
+}
+
+// 启动预热：拉取最近 max_rows 行（旧 -> 新返回），用于初始化快照缓存与增量
+// 游标，避免服务重启后把历史告警当作新增事件重放给客户端。
+int pg_get_recent_alarms(struct ds_alarm *rows, int max_rows) {
+  if (s_conn == NULL || rows == NULL || max_rows <= 0) return -1;
+  pg_mutex_lock();
+  if (s_conn == NULL) {
+    pg_mutex_unlock();
+    return -1;
+  }
+
+  char limbuf[16];
+  snprintf(limbuf, sizeof(limbuf), "%d", max_rows);
+  const char *vals[1] = {limbuf};
+
+  static const char *SQL =
+      "SELECT id, event,"
+      " COALESCE(to_char(ts, 'YYYY-MM-DD HH24:MI:SS'), ''),"
+      " COALESCE(region_company_name, ''), COALESCE(station_name, ''),"
+      " device_id, COALESCE(device_name, ''),"
+      " point_code, COALESCE(point_name, ''),"
+      " rule_code, COALESCE(alarm_type, ''),"
+      " COALESCE(temperature, 0), COALESCE(temp_rate, 0),"
+      " COALESCE(range_1h, 0), COALESCE(range_20s, 0),"
+      " COALESCE(alarm_value, 0), COALESCE(detail, '')"
+      " FROM wind_alarm ORDER BY id DESC LIMIT $1";
+
+  PGresult *res = PQexecParams(s_conn, SQL, 1, NULL, vals, NULL, NULL, 0);
+  if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
+    fprintf(stderr, "PG alarm recent query error: %s\n", PQerrorMessage(s_conn));
+    PQclear(res);
+    pg_mutex_unlock();
+    return -1;
+  }
+
+  int n = PQntuples(res);
+  if (n > max_rows) n = max_rows;
+  // DESC 取回，倒序填入调用方数组（旧 -> 新）
+  for (int i = 0; i < n; i++) alarm_fill_row(&rows[i], res, n - 1 - i);
   PQclear(res);
   pg_mutex_unlock();
   return n;

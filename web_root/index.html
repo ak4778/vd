@@ -128,6 +128,16 @@
       .ind-theme .ind-darktable::-webkit-scrollbar-thumb { background-color: rgba(255, 255, 255, 0.25); }
       /* Logo 描边在深色背景上用浅蓝（覆盖 SVG 内嵌的 stroke:#000） */
       .ind-theme svg .ll-cls-1 { stroke: #7fb3ff; }
+      /* ===== 实时告警页：自动滚动开关 + 新告警提示条 + 历史页标记 ===== */
+      .alarm-auto-scroll { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; font-size: 12px; color: #64748b; cursor: pointer; user-select: none; }
+      .alarm-auto-scroll input[type="checkbox"] { width: 13px; height: 13px; margin: 0; cursor: pointer; accent-color: #2563eb; }
+      .ind-theme .alarm-auto-scroll { color: #8aa2ba; }
+      .alarm-new-banner { display: flex; align-items: center; gap: 6px; padding: 5px 12px; background: #fef3c7; color: #92400e; border-bottom: 1px solid #fcd34d; font-size: 12px; font-weight: 600; cursor: pointer; user-select: none; }
+      .alarm-new-banner:hover { background: #fde68a; }
+      .ind-theme .alarm-new-banner { background: rgba(245, 158, 11, 0.16); color: #fbbf24; border-bottom-color: rgba(245, 158, 11, 0.45); }
+      .ind-theme .alarm-new-banner:hover { background: rgba(245, 158, 11, 0.26); }
+      .alarm-hist-hint { font-size: 12px; color: #b45309; }
+      .ind-theme .alarm-hist-hint { color: #fbbf24; }
     </style>
   </head>
   <body class="h-full"></body>
