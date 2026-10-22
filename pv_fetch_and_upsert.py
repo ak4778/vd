@@ -50,7 +50,7 @@ API_URL = 'http://10.65.78.65:18082/queryData'
 API_TOKEN = '775823708c6a807f3fe2eb801287cf71ff31ba00976045788497045348eddcf9'
 DATA_STB = 'ods_ly_data_hub_gfmjsj_new'          # type=1029 数据表（光伏）
 PAGE_SIZE = 1000   # 服务端对大响应中途断连，1000 实测稳定
-TIMEOUT = 30
+TIMEOUT = 60        # 32 个 pattern 下回补块数据量翻倍，上游单查询需 60s+，放宽超时减少无意义重试
 MAX_RETRIES = 3
 RETRY_INTERVAL = 5
 
@@ -58,11 +58,11 @@ RETRY_INTERVAL = 5
 # 测点 LIKE 模式列表（不含 GFMJ1_ 前缀），接口 parameter = GFMJ1_%{pattern}
 # 每个 pattern 中的字面前缀（% 之前的部分）用于 parse_tag 定位 inverter_id
 #
-# 拆成 16 个精确组串号（不用单通配 STRING_BRANCH%_A）：
+# 拆成 32 个精确组串号（不用单通配 STRING_BRANCH%_A）：
 # 单通配模式下一个请求匹配全部 14037 台逆变器的所有组串，响应体过大，
-# 早上数据高峰期触发 API 大响应断连/ReadTimeout；拆分后单请求响应小 16 倍，
+# 早上数据高峰期触发 API 大响应断连/ReadTimeout；拆分后单请求响应小 32 倍，
 # 与 wind_fetch 的 19 后缀分散模式一致。
-POINT_PATTERNS = [f'STRING_BRANCH{i}_A' for i in range(1, 17)]  # 组串电流 1~16（17+ 接口无数据返回）
+POINT_PATTERNS = [f'STRING_BRANCH{i}_A' for i in range(1, 33)]  # 组串电流 1~32
 # 从 patterns 自动提取测点前缀（% 之前的字面部分），用于 tagName 解析
 POINT_PREFIXES = [p[:p.index('%')] if '%' in p else p for p in POINT_PATTERNS]
 
@@ -135,19 +135,23 @@ def ingest_messages(messages, wl=None):
         dev, pc, val, ts = parsed
         if dev not in wl:
             continue
-        # 未来时间防御
+        # 未来时间防御 + 采集时段硬过滤
         try:
             ts_dt = datetime.strptime(ts, TS_FMT)
             if ts_dt > future_limit:
+                future_dropped += 1
+                continue
+            # 只保留落在当天采集时段内的 ts，设备时钟飘移导致的时段外数据一律丢弃
+            t = ts_dt.time()
+            if not any(o <= t < c for o, c in COLLECT_WINDOWS):
                 future_dropped += 1
                 continue
         except ValueError:
             pass  # 解析失败的保守保留
         rows.append((dev, pc, val, ts))
     if future_dropped:
-        log.warning('discard %d 条未来时间脏数据（ts > %s），阈值=%ds',
-                    future_dropped, future_limit.strftime(TS_FMT),
-                    FUTURE_FILTER_SECONDS)
+        log.warning('discard %d 条异常时间数据（未来时间或非采集时段），阈值=%ds',
+                    future_dropped, FUTURE_FILTER_SECONDS)
     if not rows:
         return 0
     # 按 (device_id, ts, point_code) 去重：后到覆盖先到，避免 execute_values
@@ -226,7 +230,7 @@ INTEGRITY_MIN_RATIO = 0.5
 # 幂等补齐。只在非采集时段执行，避免与实时采集抢接口和数据库连接。
 REFETCH_DELAYS = (120 * 60,)      # 块结束需早于 now-该值（秒）；可配多轮
 REFETCH_BLOCK_SECONDS = 600       # 每个回补块 10 分钟
-REFETCH_WORKERS = 2               # 回补并发上限（角色连接上限仅 10，需给其它进程留余量）
+REFETCH_WORKERS = 1               # 回补并发上限（32 pattern 数据量大，2 路并发会压垮上游导致 ReadTimeout）
 REFETCH_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                   'pv_refetch.json')
 

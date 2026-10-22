@@ -1,13 +1,14 @@
 """批量排查：从 pv_station_invert 读全部逆变器 ID，逐个调 monitor_api
-queryBranchCurrent 接口，筛 value == "/" 的异常支路，汇总 CSV（含站/区域维度）。
+queryBranchCurrent 接口，筛 value == "/" 的异常支路，汇总 xlsx（含站/区域维度）。
 """
-import csv
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 import psycopg2
 import requests
+from openpyxl import Workbook
 
 # ---------- 数据库 ----------
 TABLE_DEVICE = 'pv_station_invert'
@@ -34,8 +35,19 @@ COL_META = ['region_company_name', 'station_id', 'station_name',
 COL_BAD = COL_META + ['branch_name', 'state', 'value']
 COL_FAIL = COL_META + ['error']
 
-OUT_BAD = Path('branch_current_all_bad.csv')
-OUT_FAIL = Path('branch_current_all_fail.csv')
+_RUN_TS = datetime.now().strftime('%Y%m%d_%H%M%S')
+OUT_BAD = Path(f'branch_current_all_bad_{_RUN_TS}.xlsx')
+OUT_FAIL = Path(f'branch_current_all_fail_{_RUN_TS}.xlsx')
+
+
+def write_xlsx(path, columns, rows):
+    """全部单元格按字符串写入，避免 Excel 把 4-23-07 之类的编码识别成日期。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(columns)
+    for r in rows:
+        ws.append(['' if r.get(c) is None else str(r.get(c)) for c in columns])
+    wb.save(path)
 
 
 def load_inverters():
@@ -101,18 +113,10 @@ def main():
                 print(f'  进度 {done}/{total}  异常支路 {len(bad_rows)}  失败 {len(fails)}')
 
     # ---- 写异常汇总 ----
-    with OUT_BAD.open('w', encoding='utf-8-sig', newline='') as f:
-        w = csv.DictWriter(f, fieldnames=COL_BAD)
-        w.writeheader()
-        for r in bad_rows:
-            w.writerow(r)
+    write_xlsx(OUT_BAD, COL_BAD, bad_rows)
 
     # ---- 写失败清单 ----
-    with OUT_FAIL.open('w', encoding='utf-8-sig', newline='') as f:
-        w = csv.DictWriter(f, fieldnames=COL_FAIL)
-        w.writeheader()
-        for r in fails:
-            w.writerow(r)
+    write_xlsx(OUT_FAIL, COL_FAIL, fails)
 
     # 异常逆变器集合（用于快速统计）
     bad_inv_ids = {r['inverter_id'] for r in bad_rows}

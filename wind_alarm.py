@@ -30,9 +30,11 @@
 """
 
 import csv
+import glob
 import json
 import logging
 import os
+import re
 import sys
 import time
 import threading
@@ -41,7 +43,6 @@ import requests
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
 
 # 让 Windows 控制台中文输出尽量不报错
 try:
@@ -123,17 +124,66 @@ ALARM_TYPE_MAP = {
 
 TS_FMT = "%Y-%m-%d %H:%M:%S"
 
-# 日志轮转：单文件 100MB，保留最近 5 份历史（当前文件 + 5 份旧文件，磁盘上限约 600MB）
-LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'wind_alarm.log')
+# 日志轮转：写满 100MB 关闭当前文件、新建 wind_alarm_YYYYMMDD_HHMMSS.log 继续写，保留最近 5 份。
+# 不用 RotatingFileHandler 的 rename 方式：Windows 下外部读句柄（Get-Content/tail 等）
+# 会阻塞 os.rename，异常被 logging 静默吞掉，轮转失效导致单文件无限膨胀（曾涨到 1.5GB）。
+LOG_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_PREFIX = 'wind_alarm'
 LOG_MAX_BYTES = 100 * 1024 * 1024
 LOG_BACKUP_COUNT = 5
+
+
+class TimestampRotatingHandler(logging.FileHandler):
+    """写满 max_bytes 即切换到新时间戳文件，全程不 rename，Windows 下无文件锁冲突。
+    旧文件超出 backup_count 份时删最旧的；被外部占用删不掉则跳过，不影响写日志。"""
+
+    def __init__(self, log_dir, prefix, max_bytes, backup_count, encoding='utf-8'):
+        self.log_dir = log_dir
+        self.prefix = prefix
+        self.max_bytes = max_bytes
+        self.backup_count = backup_count
+        # 启动时复用最近一个未满的日志文件，避免频繁重启产生碎片文件
+        logs = self._logs()
+        path = logs[-1] if logs else None
+        if path is None or os.path.getsize(path) >= max_bytes:
+            path = self._new_log()
+        super().__init__(path, mode='a', encoding=encoding)
+
+    def _logs(self):
+        # 严格匹配 前缀_YYYYMMDD_HHMMSS.log，排除 wind_alarm_watchdog.log 等同前缀文件
+        rx = re.compile(rf'{re.escape(self.prefix)}_\d{{8}}_\d{{6}}\.log$')
+        pat = os.path.join(self.log_dir, f'{self.prefix}_*.log')
+        return sorted(p for p in glob.glob(pat) if rx.search(os.path.basename(p)))
+
+    def _new_log(self):
+        name = f'{self.prefix}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+        return os.path.join(self.log_dir, name)
+
+    def emit(self, record):
+        try:
+            if self.stream is not None:
+                self.stream.seek(0, 2)      # append 模式初始 offset 为 0，先定位末尾再量大小
+                if self.stream.tell() >= self.max_bytes:
+                    self.close()
+                    self.baseFilename = self._new_log()   # 本次 emit 自动以新文件重开
+                    logs = self._logs()
+                    excess = logs[:-self.backup_count] if self.backup_count else logs
+                    for old in excess:
+                        try:
+                            os.remove(old)
+                        except OSError:
+                            pass            # 被占用删不掉：跳过，磁盘兜底靠人工
+        except Exception:
+            pass                            # 轮转检查任何失败都不丢日志
+        super().emit(record)
+
 
 _logger = logging.getLogger('wind_alarm')
 _logger.setLevel(logging.INFO)
 _logger.propagate = False
 if not _logger.handlers:
-    _fh = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES,
-                              backupCount=LOG_BACKUP_COUNT, encoding='utf-8')
+    _fh = TimestampRotatingHandler(LOG_DIR, LOG_PREFIX, LOG_MAX_BYTES,
+                                   LOG_BACKUP_COUNT, encoding='utf-8')
     _fh.setFormatter(logging.Formatter('%(message)s'))
     _logger.addHandler(_fh)
 
