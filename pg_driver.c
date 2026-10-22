@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
@@ -551,6 +552,13 @@ static void alarm_set_str(char *dst, size_t cap, PGresult *res, int row,
   }
 }
 
+// 数值列：SQL NULL 用 NAN 表示，JSON 序列化时输出 null（前端显示 '-'），
+// 与真实 0 区分；库里的 NaN/Infinity 同样会在序列化阶段变成 null。
+static double alarm_get_num(PGresult *res, int row, int col) {
+  if (PQgetisnull(res, row, col)) return NAN;
+  return atof(PQgetvalue(res, row, col));
+}
+
 // 单行结果填充（三处告警查询共用）
 static void alarm_fill_row(struct ds_alarm *r, PGresult *res, int i) {
   memset(r, 0, sizeof(*r));
@@ -565,11 +573,11 @@ static void alarm_fill_row(struct ds_alarm *r, PGresult *res, int i) {
   alarm_set_str(r->point_name, sizeof(r->point_name), res, i, 8);
   alarm_set_str(r->rule_code, sizeof(r->rule_code), res, i, 9);
   alarm_set_str(r->alarm_type, sizeof(r->alarm_type), res, i, 10);
-  r->temperature = atof(PQgetvalue(res, i, 11));
-  r->temp_rate = atof(PQgetvalue(res, i, 12));
-  r->range_1h = atof(PQgetvalue(res, i, 13));
-  r->range_20s = atof(PQgetvalue(res, i, 14));
-  r->alarm_value = atof(PQgetvalue(res, i, 15));
+  r->temperature = alarm_get_num(res, i, 11);
+  r->temp_rate = alarm_get_num(res, i, 12);
+  r->range_1h = alarm_get_num(res, i, 13);
+  r->range_20s = alarm_get_num(res, i, 14);
+  r->alarm_value = alarm_get_num(res, i, 15);
   alarm_set_str(r->detail, sizeof(r->detail), res, i, 16);
 }
 
@@ -597,9 +605,9 @@ int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
       " device_id, COALESCE(device_name, ''),"
       " point_code, COALESCE(point_name, ''),"
       " rule_code, COALESCE(alarm_type, ''),"
-      " COALESCE(temperature, 0), COALESCE(temp_rate, 0),"
-      " COALESCE(range_1h, 0), COALESCE(range_20s, 0),"
-      " COALESCE(alarm_value, 0), COALESCE(detail, '')"
+      " temperature, temp_rate,"
+      " range_1h, range_20s,"
+      " alarm_value, COALESCE(detail, '')"
       " FROM wind_alarm WHERE id > $1 ORDER BY id ASC LIMIT $2";
 
   PGresult *res = PQexecParams(s_conn, SQL, 2, NULL, vals, NULL, NULL, 0);
@@ -666,9 +674,9 @@ int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
       " device_id, COALESCE(device_name, ''),"
       " point_code, COALESCE(point_name, ''),"
       " rule_code, COALESCE(alarm_type, ''),"
-      " COALESCE(temperature, 0), COALESCE(temp_rate, 0),"
-      " COALESCE(range_1h, 0), COALESCE(range_20s, 0),"
-      " COALESCE(alarm_value, 0), COALESCE(detail, '')"
+      " temperature, temp_rate,"
+      " range_1h, range_20s,"
+      " alarm_value, COALESCE(detail, '')"
       " FROM wind_alarm ORDER BY id DESC LIMIT $1 OFFSET $2";
 
   PGresult *res = PQexecParams(s_conn, SQL, 2, NULL, vals, NULL, NULL, 0);
@@ -681,27 +689,7 @@ int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
 
   int n = PQntuples(res);
   if (n > page_size) n = page_size;
-  for (int i = 0; i < n; i++) {
-    struct ds_alarm *r = &rows[i];
-    memset(r, 0, sizeof(*r));
-    r->id = strtoull(PQgetvalue(res, i, 0), NULL, 10);
-    alarm_set_str(r->event, sizeof(r->event), res, i, 1);
-    alarm_set_str(r->ts, sizeof(r->ts), res, i, 2);
-    alarm_set_str(r->region_company_name, sizeof(r->region_company_name), res, i, 3);
-    alarm_set_str(r->station_name, sizeof(r->station_name), res, i, 4);
-    alarm_set_str(r->device_id, sizeof(r->device_id), res, i, 5);
-    alarm_set_str(r->device_name, sizeof(r->device_name), res, i, 6);
-    alarm_set_str(r->point_code, sizeof(r->point_code), res, i, 7);
-    alarm_set_str(r->point_name, sizeof(r->point_name), res, i, 8);
-    alarm_set_str(r->rule_code, sizeof(r->rule_code), res, i, 9);
-    alarm_set_str(r->alarm_type, sizeof(r->alarm_type), res, i, 10);
-    r->temperature = atof(PQgetvalue(res, i, 11));
-    r->temp_rate = atof(PQgetvalue(res, i, 12));
-    r->range_1h = atof(PQgetvalue(res, i, 13));
-    r->range_20s = atof(PQgetvalue(res, i, 14));
-    r->alarm_value = atof(PQgetvalue(res, i, 15));
-    alarm_set_str(r->detail, sizeof(r->detail), res, i, 16);
-  }
+  for (int i = 0; i < n; i++) alarm_fill_row(&rows[i], res, i);
   PQclear(res);
   pg_mutex_unlock();
   return n;
@@ -728,9 +716,9 @@ int pg_get_recent_alarms(struct ds_alarm *rows, int max_rows) {
       " device_id, COALESCE(device_name, ''),"
       " point_code, COALESCE(point_name, ''),"
       " rule_code, COALESCE(alarm_type, ''),"
-      " COALESCE(temperature, 0), COALESCE(temp_rate, 0),"
-      " COALESCE(range_1h, 0), COALESCE(range_20s, 0),"
-      " COALESCE(alarm_value, 0), COALESCE(detail, '')"
+      " temperature, temp_rate,"
+      " range_1h, range_20s,"
+      " alarm_value, COALESCE(detail, '')"
       " FROM wind_alarm ORDER BY id DESC LIMIT $1";
 
   PGresult *res = PQexecParams(s_conn, SQL, 1, NULL, vals, NULL, NULL, 0);

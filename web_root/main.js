@@ -770,7 +770,7 @@ const alarmColumns = [
 // 告警页每页条数（与 data_config.defaultPageSize 对齐）
 const ALARM_PAGE_SIZE = 50;
 
-function Alarms({items, wsOk, alarmRx}) {
+function Alarms({items, wsOk, alarmRx, authLost, onReauth}) {
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);       // 服务端告警总数（分页器用）
   const [hist, setHist] = useState([]);        // 历史页数据（page >= 2）
@@ -869,15 +869,16 @@ function Alarms({items, wsOk, alarmRx}) {
     <div class="ind-panel flex-1 min-h-0 flex flex-col">
     <div class="ind-titlebar">
       <span class="text-lg font-bold text-slate-700 ind-text">实时告警</span>
-      <span class="flex items-center gap-1.5 text-sm ${wsOk ? 'text-green-600 ind-ok' : 'text-red-500 ind-bad'}">
+      <span class="flex items-center gap-1.5 text-sm ${wsOk ? 'text-green-600 ind-ok' : (authLost ? 'text-amber-600' : 'text-red-500 ind-bad')}">
         <span class="lamp ${wsOk ? 'lamp-green' : 'lamp-red'}"><//>
-        ${wsOk ? '已连接' : '重连中...'}
+        ${wsOk ? '已连接' : (authLost ? '登录已失效' : '重连中...')}
       <//>
+      ${!wsOk && authLost && html`<button type="button" class="alarm-reauth text-sm px-2 py-0.5 rounded border border-amber-400 text-amber-600 hover:bg-amber-50" onclick=${onReauth}>重新登录<//>`}
       <span class="text-sm ind-dim">共 ${shownTotal} 条</span>
       ${latest && html`<span class="text-sm ind-dim">最新: ${latest}<//>`}
       ${page > 1 && html`<span class="alarm-hist-hint" title="新告警仍会实时进入第 1 页">历史浏览中<//>`}
-      <label class="alarm-auto-scroll" title="勾选：新告警自动滚到顶部；取消：冻结当前列表，只提示新告警数量">
-        <input type="checkbox" checked=${autoScroll} onchange=${e => toggleAutoScroll(e.target.checked)} />
+      <label class="alarm-auto-scroll ${page > 1 ? 'opacity-40' : ''}" title=${page > 1 ? '仅第 1 页实时视图可用' : '勾选：新告警自动滚到顶部；取消：冻结当前列表，只提示新告警数量'}>
+        <input type="checkbox" checked=${autoScroll} disabled=${page > 1} onchange=${e => toggleAutoScroll(e.target.checked)} />
         自动滚动
       <//>
     <//>
@@ -919,6 +920,8 @@ const App = function({}) {
   const [alarmWsOk, setAlarmWsOk] = useState(false);
   // 自上次快照后实收的告警行数（Alarms 用它把总数基数推成实时总数）
   const [alarmRx, setAlarmRx] = useState(0);
+  // 服务端重启会使内存会话失效：连续重连失败时探测到 403 就提示重新登录
+  const [alarmAuthLost, setAlarmAuthLost] = useState(false);
   // 主题：ind=工业深色 / classic=经典浅色，持久化在 localStorage.theme（初始值由 index.html 头部脚本写到 html class）
   const [theme, setTheme] = useState(() => document.documentElement.classList.contains('ind-theme') ? 'ind' : 'classic');
 
@@ -949,18 +952,24 @@ const App = function({}) {
     if (url === '/alarms') setAlarmUnread(0);
   }, [url]);
 
-  // 告警 WS：登录后建连；断线 2s 重连；登出关闭。
+  // 告警 WS：登录后建连；断线按指数退避重连（2s→30s）；连续失败 3 次时
+  // 探测一次会话是否已失效（服务端重启会让内存 session 清空，WS 升级被拒）。
   // 快照(旧->新)倒序入 state；live 增量(旧->新)同样倒序前插。
   useEffect(() => {
     if (!user) return undefined;
     let ws = null;
     let timer = null;
     let disposed = false;
+    let failures = 0;
     const connect = () => {
       if (disposed) return;
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
       ws = new WebSocket(`${proto}//${location.host}/api/alarms/ws`);
-      ws.onopen = () => setAlarmWsOk(true);
+      ws.onopen = () => {
+        failures = 0;
+        setAlarmAuthLost(false);
+        setAlarmWsOk(true);
+      };
       ws.onmessage = ev => {
         let msg;
         try { msg = JSON.parse(ev.data); } catch (e) { return; }
@@ -980,7 +989,15 @@ const App = function({}) {
       };
       ws.onclose = () => {
         setAlarmWsOk(false);
-        if (!disposed) timer = setTimeout(connect, 2000);
+        if (disposed) return;
+        failures += 1;
+        if (failures === 3) {
+          fetchWithTimeout('api/alarms/get?page=1&pageSize=1', { credentials: 'include' })
+            .then(r => { if (r.status === 403) setAlarmAuthLost(true); })
+            .catch(() => {});
+        }
+        const delay = Math.min(2000 * Math.pow(2, Math.min(failures - 1, 4)), 30000);
+        timer = setTimeout(connect, delay);
       };
       ws.onerror = () => {};
     };
@@ -990,6 +1007,7 @@ const App = function({}) {
       clearTimeout(timer);
       if (ws) ws.close();
       setAlarmWsOk(false);
+      setAlarmAuthLost(false);
     };
   }, [user]);
 
@@ -1016,7 +1034,7 @@ const App = function({}) {
   <${Sidebar} url=${url} show=${showSidebar} alarmUnread=${alarmUnread} />
   <${Header} logout=${logout} user=${user} showSidebar=${showSidebar} setShowSidebar=${setShowSidebar} dbMode=${dbMode} dbAvailable=${dbAvailable} theme=${theme} toggleTheme=${toggleTheme} />
   <div class="flex-1 min-h-0 ${showSidebar && 'pl-40'} transition-all duration-300 transform flex flex-col">
-    ${url === '/alarms' ? html`<${Alarms} items=${alarmItems} wsOk=${alarmWsOk} alarmRx=${alarmRx} />` : html`<${Events} />`}
+    ${url === '/alarms' ? html`<${Alarms} items=${alarmItems} wsOk=${alarmWsOk} alarmRx=${alarmRx} authLost=${alarmAuthLost} onReauth=${logout} />` : html`<${Events} />`}
   <//>
 <//>`;
 };

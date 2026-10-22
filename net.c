@@ -4,6 +4,7 @@
 #include "net.h"
 #include "password_hash.h"
 #include "data_source.h"
+#include <math.h>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
@@ -221,7 +222,7 @@ static int json_escape_append(char *out, int pos, int cap, const char *str) {
       case '\f': seq = "\\f";  seqlen = 2; break;
       default:
         if (c < 0x20) {
-          if (pos + 6 > cap) return pos;
+          if (pos + 6 > cap) return cap;  // 截断：必须返回 cap 让调用方感知
           out[pos++] = '\\';
           out[pos++] = 'u';
           out[pos++] = '0';
@@ -229,12 +230,12 @@ static int json_escape_append(char *out, int pos, int cap, const char *str) {
           out[pos++] = hex[c >> 4];
           out[pos++] = hex[c & 0xf];
         } else {
-          if (pos + 1 > cap) return pos;
+          if (pos + 1 > cap) return cap;  // 截断
           out[pos++] = (char) c;
         }
         continue;
     }
-    if (pos + seqlen > cap) return pos;
+    if (pos + seqlen > cap) return cap;  // 截断
     memcpy(out + pos, seq, (size_t) seqlen);
     pos += seqlen;
   }
@@ -1048,7 +1049,8 @@ static struct user *find_user_by_creds(const char *name, const char *pw) {
 #define ALARM_POLL_MS        1000  // 轮询周期
 #define ALARM_POLL_LIMIT     100   // 单轮最多拉取行数（主键索引扫描，毫秒级）
 #define ALARM_CACHE_MAX      200   // 快照缓存容量（新连接重放最近 200 条）
-#define ALARM_JSON_ROW_MAX   768   // 单行 JSON 预算（含转义膨胀，超长截断）
+#define ALARM_JSON_ROW_MAX   1536  // 单行 JSON 预算（detail 已扩到 1KB）
+#define ALARM_WS_SEND_MAX    (8 * 1024 * 1024)  // 慢客户端发送缓冲上限，超出即断开
 
 static struct ds_alarm s_alarm_cache[ALARM_CACHE_MAX];
 static int s_alarm_cache_count = 0;             // 有效行数（旧 -> 新）
@@ -1080,6 +1082,14 @@ static int alarm_append(char *out, int pos, int cap, const char *fmt, ...) {
   return pos + n;
 }
 
+// 数值字段：非有限值（NaN/Infinity，可能来自库里的异常数据）输出 JSON null，
+// 避免生成 nan/inf 这类非法字面量导致整帧被前端 JSON.parse 丢弃。
+static int alarm_append_num(char *out, int pos, int cap, const char *fmt,
+                            double v) {
+  if (!isfinite(v)) return alarm_append(out, pos, cap, "null");
+  return alarm_append(out, pos, cap, fmt, v);
+}
+
 // 单行告警 JSON（字段顺序与前端展示一致）
 static int alarm_row_json(char *out, int pos, int cap, const struct ds_alarm *r) {
   pos = alarm_append(out, pos, cap,
@@ -1099,13 +1109,19 @@ static int alarm_row_json(char *out, int pos, int cap, const struct ds_alarm *r)
   pos = json_escape_append(out, pos, cap, r->point_name);
   pos = alarm_append(out, pos, cap, "\",\"rule_code\":\"");
   pos = json_escape_append(out, pos, cap, r->rule_code);
-  pos = alarm_append(out, pos, cap,
-                     "\",\"temperature\":%.2f,\"temp_rate\":%.4f,"
-                     "\"range_1h\":%.2f,\"range_20s\":%.2f,\"alarm_type\":\"",
-                     r->temperature, r->temp_rate, r->range_1h, r->range_20s);
+  pos = alarm_append(out, pos, cap, "\",\"temperature\":");
+  pos = alarm_append_num(out, pos, cap, "%.2f", r->temperature);
+  pos = alarm_append(out, pos, cap, ",\"temp_rate\":");
+  pos = alarm_append_num(out, pos, cap, "%.4f", r->temp_rate);
+  pos = alarm_append(out, pos, cap, ",\"range_1h\":");
+  pos = alarm_append_num(out, pos, cap, "%.2f", r->range_1h);
+  pos = alarm_append(out, pos, cap, ",\"range_20s\":");
+  pos = alarm_append_num(out, pos, cap, "%.2f", r->range_20s);
+  pos = alarm_append(out, pos, cap, ",\"alarm_type\":\"");
   pos = json_escape_append(out, pos, cap, r->alarm_type);
-  pos = alarm_append(out, pos, cap, "\",\"alarm_value\":%.2f,\"detail\":\"",
-                     r->alarm_value);
+  pos = alarm_append(out, pos, cap, "\",\"alarm_value\":");
+  pos = alarm_append_num(out, pos, cap, "%.2f", r->alarm_value);
+  pos = alarm_append(out, pos, cap, ",\"detail\":\"");
   pos = json_escape_append(out, pos, cap, r->detail);
   pos = alarm_append(out, pos, cap, "\"}");
   return pos;
@@ -1219,6 +1235,14 @@ static void alarm_handle_rows(struct mg_mgr *mgr, const struct ds_alarm *rows,
   }
   for (c = mgr->conns; c != NULL; c = c->next) {
     if (is_alarm_watcher(c)) {
+      // 背压保护：慢客户端不消费时发送缓冲会持续增长，超阈值直接断开，
+      // 让客户端按重连逻辑重新拉快照，避免服务端内存无上限膨胀。
+      if (c->send.len > ALARM_WS_SEND_MAX) {
+        MG_ERROR(("alarm ws client %lu too slow (%lu bytes queued), closing",
+                  c->id, (unsigned long) c->send.len));
+        c->is_closing = 1;
+        continue;
+      }
       mg_ws_send(c, buf, len, WEBSOCKET_OP_TEXT);
     }
   }
@@ -1263,6 +1287,7 @@ static void alarm_dispatch_results(struct mg_mgr *mgr) {
 // 与 /api/nodes/get 同一异步模型：worker 线程查库 + 构建 JSON，事件循环
 // 线程由 dispatch_results 回写 HTTP。实时页仍走 WS，本接口只服务历史页。
 #define ALARM_PAGE_MAX 200  // 单页行数上限（200 = data_config.maxPageSize）
+#define ALARM_PAGE_INDEX_MAX 10000  // 页码上限：防止超大 OFFSET 拖垮数据库
 
 struct alarm_page_work {
   unsigned long long conn_id;
@@ -1307,6 +1332,22 @@ static void alarm_page_thread(void *param) {
   free(w);
 }
 
+// 严格解析正整数：必须全为数字且落在 [1, max]。返回 1 成功，0 非法。
+// 与 atoi 的区别：拒绝 "1abc"、" 2"、"+2" 等形态，避免宽松解析掩盖错误。
+static int parse_positive_int(const char *s, long max, int *out) {
+  if (s == NULL || *s == '\0') return 0;
+  long v = 0;
+  const char *p = s;
+  while (*p >= '0' && *p <= '9') {
+    v = v * 10 + (*p - '0');
+    if (v > max) return 0;
+    p++;
+  }
+  if (p == s || *p != '\0' || v < 1) return 0;
+  *out = (int) v;
+  return 1;
+}
+
 static void handle_alarms_get(struct mg_connection *c,
                               struct mg_http_message *hm) {
   int page = 1;
@@ -1316,8 +1357,18 @@ static void handle_alarms_get(struct mg_connection *c,
 
   mg_http_get_var(&hm->query, "page", page_buf, sizeof(page_buf));
   mg_http_get_var(&hm->query, "pageSize", size_buf, sizeof(size_buf));
-  if (page_buf[0] != '\0') page = atoi(page_buf);
-  if (size_buf[0] != '\0') page_size = atoi(size_buf);
+  if (page_buf[0] != '\0' &&
+      !parse_positive_int(page_buf, ALARM_PAGE_INDEX_MAX, &page)) {
+    mg_http_reply(c, 400, s_json_header,
+                  "{\"error\":\"Invalid parameter: page must be an integer in [1,10000]\"}");
+    return;
+  }
+  if (size_buf[0] != '\0' &&
+      !parse_positive_int(size_buf, 1000000, &page_size)) {
+    mg_http_reply(c, 400, s_json_header,
+                  "{\"error\":\"Invalid parameter: pageSize must be a positive integer\"}");
+    return;
+  }
 
   if (page < 1 || page_size < 1) {
     mg_http_reply(c, 400, s_json_header,

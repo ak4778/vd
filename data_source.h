@@ -59,7 +59,7 @@ struct ds_alarm {
   double range_1h;
   double range_20s;
   double alarm_value;
-  char detail[256];
+  char detail[1024];
 };
 
 struct ds_driver {
