@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, time as dtime, timedelta, timezone
@@ -229,8 +230,8 @@ INTEGRITY_MIN_RATIO = 0.5
 # 因此在空闲期把「已过发布稳定期」的历史块按同一接口重新回拉，由 upsert
 # 幂等补齐。只在非采集时段执行，避免与实时采集抢接口和数据库连接。
 REFETCH_DELAYS = (120 * 60,)      # 块结束需早于 now-该值（秒）；可配多轮
-REFETCH_BLOCK_SECONDS = 600       # 每个回补块 10 分钟
-REFETCH_WORKERS = 1               # 回补并发上限（32 pattern 数据量大，2 路并发会压垮上游导致 ReadTimeout）
+REFETCH_BLOCK_SECONDS = 60        # 每个回补块 1 分钟（块小、可随时中断续补）
+REFETCH_WORKERS = 4               # 回补并发上限（与实时采集 FETCH_WORKERS 一致，实测上游可承受）
 REFETCH_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                   'pv_refetch.json')
 
@@ -477,8 +478,12 @@ def criterion_like_pattern(pattern):
             'condition': 'like', 'parameter': f'GFMJ1_%{pattern}'}
 
 
-def fetch_target(criteria, tag_criterion=None):
-    """按 criteria(+可选 tag 条件) 查询并翻页取全，返回 (items, total)。"""
+def fetch_target(criteria, tag_criterion=None, workers=None):
+    """按 criteria(+可选 tag 条件) 查询并翻页取全，返回 (items, total)。
+
+    workers 为空时用全局 FETCH_WORKERS；回补线程传入独立值，避免与实时采集互相影响。
+    """
+    w = workers or FETCH_WORKERS
     qc = ([tag_criterion] if tag_criterion is not None else []) \
         + list(criteria)
     base_map = {
@@ -495,7 +500,7 @@ def fetch_target(criteria, tag_criterion=None):
     if n_pages > 1:
         page_map = {}
         with ThreadPoolExecutor(
-                max_workers=min(FETCH_WORKERS, n_pages - 1)) as pool:
+                max_workers=min(w, n_pages - 1)) as pool:
             futures = {
                 pool.submit(post_json, {'type': 1029, 'map': {
                     **base_map, 'pageNum': p, 'pageSize': PAGE_SIZE}}): p
@@ -507,13 +512,15 @@ def fetch_target(criteria, tag_criterion=None):
     return items, total
 
 
-def fetch_and_ingest_window(start, end):
+def fetch_and_ingest_window(start, end, workers=None):
     """按 like 模式拉取窗口 [start, end) 内的原始消息并流式入库。
 
     每个 pattern 拉完自己的全部页立刻 ingest，避免「全部 pattern 拉完再统一入库」
     的串行等待，让拉取与入库在并发线程内交错进行，缩短单轮总耗时。
+    workers 为空时用全局 FETCH_WORKERS；回补线程传入独立值，避免改全局影响实时采集。
     返回 (fetched, ingested)。任一请求/入库失败即整体抛异常：本轮不入库、水位线不推进。
     """
+    w = workers or FETCH_WORKERS
     if MOCK:
         items = mock_window(start, end)
         return len(items), ingest_messages(items)
@@ -529,8 +536,8 @@ def fetch_and_ingest_window(start, end):
     wl = load_whitelist()  # 提前填充缓存，避免子线程首次 ingest 时竞争查询
     total_fetched = 0
     total_ingested = 0
-    with ThreadPoolExecutor(max_workers=min(FETCH_WORKERS, len(jobs))) as pool:
-        futures = {pool.submit(_fetch_and_ingest_one, jc, label, criteria, wl): label
+    with ThreadPoolExecutor(max_workers=min(w, len(jobs))) as pool:
+        futures = {pool.submit(_fetch_and_ingest_one, jc, label, criteria, wl, w): label
                    for jc, label in jobs}
         for fut in as_completed(futures):
             label, fetched, ingested = fut.result()
@@ -540,9 +547,9 @@ def fetch_and_ingest_window(start, end):
     return total_fetched, total_ingested
 
 
-def _fetch_and_ingest_one(tag_criterion, label, criteria, wl):
+def _fetch_and_ingest_one(tag_criterion, label, criteria, wl, workers=None):
     """拉取单个 pattern 的全部页并立即入库该 pattern 的数据。"""
-    items, total = fetch_target(criteria, tag_criterion)
+    items, total = fetch_target(criteria, tag_criterion, workers=workers)
     n = ingest_messages(items, wl)
     return label, len(items), n
 
@@ -682,12 +689,16 @@ def refetch_step(now):
     成功或无需拉取后推进游标并落盘；异常时游标不动，下次空闲重试。
     返回是否执行了拉取。
     """
-    global FETCH_WORKERS
     cursors = load_refetch_state()
     for i, delay in enumerate(REFETCH_DELAYS):
         cur = cursors[i]
-        if cur is None or cur.date() < now.date():
+        if cur is None:
             cur = cursors[i] = _first_block_of_day(now.date())
+        # 跨天时保留往日游标继续补，直到该日采集块全部补完才跳到下一天；
+        # 直接重置为今天会让昨天没补完的块永久丢失。
+        while not _block_in_collect_window(cur) and cur.date() < now.date():
+            cur = _advance_to_first_block(cur)
+        cursors[i] = cur
         # 若 block 起点已超出当天所有采集时段，跳到明天
         if not _block_in_collect_window(cur):
             cur = cursors[i] = _advance_to_first_block(cur)
@@ -696,27 +707,38 @@ def refetch_step(now):
         if block_end > _align_block(now - timedelta(seconds=delay)):
             continue                         # 该块尚未过发布稳定期
         a, b = cur.strftime(TS_FMT), block_end.strftime(TS_FMT)
-        saved_workers = FETCH_WORKERS
-        FETCH_WORKERS = min(saved_workers, REFETCH_WORKERS)
         try:
-            fetched, ingested = fetch_and_ingest_window(a, b)
+            fetched, ingested = fetch_and_ingest_window(
+                a, b, workers=REFETCH_WORKERS)
             log.info('延迟回补(延迟 %s 分钟) [%s, %s) 拉取 %s 条，补写 %s 条',
                      delay // 60, a, b, fetched, ingested)
         except Exception as e:
             log.warning('延迟回补失败 [%s, %s)，保持游标下次重试: %r', a, b, e)
             save_refetch_state(cursors)
             return False
-        finally:
-            FETCH_WORKERS = saved_workers
-        # 下一块：先 +10min，若起点已超出当天最后时段，跳到明天首块
+        # 下一块：先 +1min，若已跨出当前时段，推进到当天下一个时段的起点；
+        # 只有当天的时段全部补完才跳到次日首块（不能直接跳次日，否则会整段
+        # 跳过同一天的后续采集时段，例如 12:59 -> 次日 10:00 会漏掉 14:00-16:00）。
         nxt = cur + timedelta(seconds=REFETCH_BLOCK_SECONDS)
         if not _block_in_collect_window(nxt):
-            nxt = _first_block_of_day(nxt.date() + timedelta(days=1))
+            nxt = _advance_to_first_block(nxt)
         cursors[i] = nxt
         save_refetch_state(cursors)
         return True
     save_refetch_state(cursors)
     return False
+
+
+def _refetch_worker():
+    """后台回补线程：只在非采集时段补历史块，跑在主循环之外，绝不阻塞实时采集。"""
+    while True:
+        try:
+            now = datetime.now()
+            if not collect_state(now)[0] and refetch_step(now):
+                continue                 # 补完一块立刻补下一块
+        except Exception as e:
+            log.warning('延迟回补异常（稍后重试）: %r', e)
+        time.sleep(IDLE_SLEEP_SECONDS)
 
 
 # ---------------- 主循环 ----------------
@@ -784,6 +806,7 @@ def main():
     except Exception as e:
         log.warning('分区维护失败（不影响采集）: %r', e)
     last_integrity = time.time()
+    threading.Thread(target=_refetch_worker, name='refetch', daemon=True).start()
     idle = None  # None=未知, True=空闲中, False=采集时段内
     idle_cycles = 0  # 空闲循环累计轮数，用于周期性心跳
     while True:
@@ -804,10 +827,6 @@ def main():
                 vacuum_yesterday_partition(now)
             except Exception as e:
                 log.warning('历史分区 VACUUM FULL 失败（下个空闲周期重试）: %r', e)
-            try:
-                refetch_step(now)
-            except Exception as e:
-                log.warning('延迟回补异常（下个空闲周期重试）: %r', e)
             time.sleep(IDLE_SLEEP_SECONDS)
             continue
         if idle is not False:
