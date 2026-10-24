@@ -88,9 +88,12 @@ int ds_alarm_supported(void);
 int ds_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
                       int max_rows);
 // 按 id 倒序分页查询告警历史（页码从 1 开始），total_out 返回匹配总数。
+// point_code / rule_code / event 为可选精确过滤（NULL 或空串 = 不过滤）。
 // 返回实际行数（0 = 空页；-1 = 不支持或查询失败）
 int ds_get_alarms_page(int page, int page_size, unsigned long long *total_out,
-                       struct ds_alarm *rows, int max_rows);
+                       struct ds_alarm *rows, int max_rows,
+                       const char *point_code, const char *rule_code,
+                       const char *event);
 // 启动预热：取最近 max_rows 行（旧 -> 新），用于初始化快照缓存与增量游标。
 // 返回实际行数（0 = 空表；-1 = 不支持或查询失败）
 int ds_get_recent_alarms(struct ds_alarm *rows, int max_rows);

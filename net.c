@@ -1315,6 +1315,9 @@ struct alarm_page_work {
   unsigned long long conn_id;
   int page;
   int page_size;
+  char point_code[96];  // 可选精确过滤；空串 = 不过滤
+  char rule_code[48];   // 可选精确过滤；空串 = 不过滤
+  char event[16];       // 可选精确过滤；空串 = 不过滤（ALARM / RECOVER）
   int n;                    // worker 填：行数，<0 查询失败
   unsigned long long total; // worker 填：匹配总数
   struct ds_alarm rows[ALARM_PAGE_MAX];
@@ -1325,7 +1328,10 @@ static void alarm_page_thread(void *param) {
   struct alarm_page_work *w = (struct alarm_page_work *) param;
   unsigned long long total = 0;
   int n = ds_get_alarms_page(w->page, w->page_size, &total, w->rows,
-                             ALARM_PAGE_MAX);
+                             ALARM_PAGE_MAX,
+                             w->point_code[0] ? w->point_code : NULL,
+                             w->rule_code[0] ? w->rule_code : NULL,
+                             w->event[0] ? w->event : NULL);
   w->n = n;
   w->total = total;
 
@@ -1412,6 +1418,14 @@ static void handle_alarms_get(struct mg_connection *c,
   w->conn_id = c->id;
   w->page = page;
   w->page_size = page_size;
+  // 可选过滤：测点 / 规则 / 事件 精确匹配。mg_http_get_var 已做 URL 解码；
+  // 长度被缓冲截断时值不再完整，最多匹配不到行，无注入面（值走参数化）。
+  mg_http_get_var(&hm->query, "point_code", w->point_code,
+                  sizeof(w->point_code));
+  mg_http_get_var(&hm->query, "rule_code", w->rule_code,
+                  sizeof(w->rule_code));
+  mg_http_get_var(&hm->query, "event", w->event,
+                  sizeof(w->event));
   start_thread(alarm_page_thread, w);
 }
 

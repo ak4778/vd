@@ -627,9 +627,13 @@ int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
 }
 
 // 按 id 倒序分页查询告警历史（最新在前），供 /api/alarms/get 使用。
-// total_out 返回匹配总数（前端分页器用）；返回行数，空页 0，失败 -1。
+// point_code / rule_code 为可选精确过滤（NULL 或空串 = 不过滤），值全部
+// 走 PQexecParams 参数化，列名硬编码，无注入面。
+// total_out 返回过滤后匹配总数（前端分页器用）；返回行数，空页 0，失败 -1。
 int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
-                       struct ds_alarm *rows, int max_rows) {
+                       struct ds_alarm *rows, int max_rows,
+                       const char *point_code, const char *rule_code,
+                       const char *event) {
   if (total_out != NULL) *total_out = 0;
   if (s_conn == NULL || rows == NULL || max_rows <= 0 ||
       page < 1 || page_size < 1) {
@@ -637,14 +641,48 @@ int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
   }
   if (page_size > max_rows) page_size = max_rows;
 
+  const int use_point = (point_code != NULL && point_code[0] != '\0');
+  const int use_rule = (rule_code != NULL && rule_code[0] != '\0');
+  const int use_event = (event != NULL && event[0] != '\0');
+
   pg_mutex_lock();
   if (s_conn == NULL) {
     pg_mutex_unlock();
     return -1;
   }
 
-  // 先取总数：wind_alarm 为只追加的告警流水表，规模远小于秒级明细表
-  PGresult *cres = PQexec(s_conn, "SELECT count(*) FROM wind_alarm");
+  // 先取总数（带相同过滤条件）：wind_alarm 为只追加的告警流水表，
+  // 规模远小于秒级明细表。过滤列参数编号从 $1 起。
+  char count_sql[256];
+  const char *cvals[3];
+  int cn = 0;
+  strcpy(count_sql, "SELECT count(*) FROM wind_alarm");
+  char cwhere[160] = "";
+  int cidx = 1;
+  if (use_point) {
+    const char *conj = cidx == 1 ? " WHERE" : " AND";
+    snprintf(cwhere + strlen(cwhere), sizeof(cwhere) - strlen(cwhere),
+             "%s point_code = $%d", conj, cidx);
+    cidx++;
+    cvals[cn++] = point_code;
+  }
+  if (use_rule) {
+    const char *conj = cidx == 1 ? " WHERE" : " AND";
+    snprintf(cwhere + strlen(cwhere), sizeof(cwhere) - strlen(cwhere),
+             "%s rule_code = $%d", conj, cidx);
+    cidx++;
+    cvals[cn++] = rule_code;
+  }
+  if (use_event) {
+    const char *conj = cidx == 1 ? " WHERE" : " AND";
+    snprintf(cwhere + strlen(cwhere), sizeof(cwhere) - strlen(cwhere),
+             "%s event = $%d", conj, cidx);
+    cidx++;
+    cvals[cn++] = event;
+  }
+  strcat(count_sql, cwhere);
+  PGresult *cres = PQexecParams(s_conn, count_sql, cn, NULL,
+                                cn > 0 ? cvals : NULL, NULL, NULL, 0);
   if (cres == NULL || PQresultStatus(cres) != PGRES_TUPLES_OK ||
       PQntuples(cres) != 1) {
     fprintf(stderr, "PG alarm count error: %s\n", PQerrorMessage(s_conn));
@@ -665,9 +703,11 @@ int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
   char limitbuf[16], offsetbuf[32];
   snprintf(limitbuf, sizeof(limitbuf), "%d", page_size);
   snprintf(offsetbuf, sizeof(offsetbuf), "%lld", offset);
-  const char *vals[2] = {limitbuf, offsetbuf};
+  const char *vals[5] = {limitbuf, offsetbuf, NULL, NULL, NULL};
+  int vn = 2;
 
-  static const char *SQL =
+  // 分页查询：$1=LIMIT $2=OFFSET，过滤列从 $3 起
+  static const char *SELECT_COLS =
       "SELECT id, event,"
       " COALESCE(to_char(ts, 'YYYY-MM-DD HH24:MI:SS'), ''),"
       " COALESCE(region_company_name, ''), COALESCE(station_name, ''),"
@@ -677,9 +717,36 @@ int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
       " temperature, temp_rate,"
       " range_1h, range_20s,"
       " alarm_value, COALESCE(detail, '')"
-      " FROM wind_alarm ORDER BY id DESC LIMIT $1 OFFSET $2";
+      " FROM wind_alarm";
+  char sql[1024];
+  strcpy(sql, SELECT_COLS);
+  char where[200] = "";
+  int widx = 3;
+  if (use_point) {
+    const char *conj = widx == 3 ? " WHERE" : " AND";
+    snprintf(where + strlen(where), sizeof(where) - strlen(where),
+             "%s point_code = $%d", conj, widx);
+    widx++;
+    vals[vn++] = point_code;
+  }
+  if (use_rule) {
+    const char *conj = widx == 3 ? " WHERE" : " AND";
+    snprintf(where + strlen(where), sizeof(where) - strlen(where),
+             "%s rule_code = $%d", conj, widx);
+    widx++;
+    vals[vn++] = rule_code;
+  }
+  if (use_event) {
+    const char *conj = widx == 3 ? " WHERE" : " AND";
+    snprintf(where + strlen(where), sizeof(where) - strlen(where),
+             "%s event = $%d", conj, widx);
+    widx++;
+    vals[vn++] = event;
+  }
+  strcat(sql, where);
+  strcat(sql, " ORDER BY id DESC LIMIT $1 OFFSET $2");
 
-  PGresult *res = PQexecParams(s_conn, SQL, 2, NULL, vals, NULL, NULL, 0);
+  PGresult *res = PQexecParams(s_conn, sql, vn, NULL, vals, NULL, NULL, 0);
   if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
     fprintf(stderr, "PG alarm page query error: %s\n", PQerrorMessage(s_conn));
     PQclear(res);

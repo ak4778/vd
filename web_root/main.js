@@ -764,12 +764,27 @@ const alarmColumns = [
 // 告警页每页条数（与 data_config.defaultPageSize 对齐）
 const ALARM_PAGE_SIZE = 50;
 
+// 告警规则枚举：与 monitor_fj_state.py 的 ALARM_TYPE_MAP 对齐（固定写死）。
+// C03_RATE/C04_JUMP 暂未实现，提前占位以兼容未来规则扩展（过滤时无匹配数据即可）。
+const ALARM_RULE_OPTIONS = ['C01_FAULT', 'C01_HIGH', 'C01_LOW', 'C02_FROZEN', 'C03_FLUCT', 'C03_RATE', 'C04_JUMP'];
+const ALARM_EVENT_OPTIONS = ['ALARM', 'RECOVER'];
+
 function Alarms({items, wsOk, alarmRx, authLost, onReauth}) {
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);       // 服务端告警总数（分页器用）
   const [hist, setHist] = useState([]);        // 历史页数据（page >= 2）
   const [histLoading, setHistLoading] = useState(false);
   const [histError, setHistError] = useState('');
+  // 过滤：测点精确匹配（下拉，选项从已见告警累积）+ 规则固定枚举 + 事件类型；跨页生效
+  const [pointFilter, setPointFilter] = useState('');
+  const [ruleFilter, setRuleFilter] = useState('');
+  const [eventFilter, setEventFilter] = useState('');
+  const [pointOptions, setPointOptions] = useState([]);  // [{code, name}]
+  // 过滤激活时的实时总数增量：仅统计匹配过滤条件的 WS 新行
+  const [filteredRx, setFilteredRx] = useState(0);
+  const seenMaxIdRef = useRef(0);
+  const latestIdRef = useRef(0);
+  latestIdRef.current = items.length ? items[0].id : 0;
   // 自动滚动：勾选=新告警实时插入并滚回顶部；取消=冻结当前视图，仅累计提示
   const [autoScroll, setAutoScroll] = useState(() => {
     try { return localStorage.getItem('alarmAutoScroll') !== '0'; } catch (e) { return true; }
@@ -782,13 +797,72 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth}) {
   rxRef.current = alarmRx;
   const baseRxRef = useRef(0);
 
-  // 总数：进入页面 / WS 重连成功后向服务端取一次；失败时用已加载条数兜底
+  const filterActive = pointFilter !== '' || ruleFilter !== '' || eventFilter !== '';
+  const matchFilters = a =>
+    (!pointFilter || a.point_code === pointFilter) &&
+    (!ruleFilter || a.rule_code === ruleFilter) &&
+    (!eventFilter || a.event === eventFilter);
+  // 过滤参数串：历史分页与总数查询共用（encodeURIComponent 防特殊字符）
+  const filterQuery = () => {
+    const q = [];
+    if (pointFilter) q.push(`point_code=${encodeURIComponent(pointFilter)}`);
+    if (ruleFilter) q.push(`rule_code=${encodeURIComponent(ruleFilter)}`);
+    if (eventFilter) q.push(`event=${encodeURIComponent(eventFilter)}`);
+    return q.length ? '&' + q.join('&') : '';
+  };
+
+  // 测点下拉选项：从 WS 实时列表与历史页响应中累积去重（按编码排序）。
+  // 仅"出现过告警的测点"才有意义——未告警的测点过滤结果必然为空。
   useEffect(() => {
-    fetchWithTimeout(`api/alarms/get?page=1&pageSize=1&t=${Date.now()}`, { method: 'GET', cache: 'no-cache', credentials: 'include' })
+    setPointOptions(prev => {
+      const map = new Map(prev.map(o => [o.code, o.name]));
+      let changed = false;
+      for (const src of [items, hist]) {
+        for (const a of src) {
+          if (a.point_code && !map.has(a.point_code)) {
+            map.set(a.point_code, a.point_name || '');
+            changed = true;
+          }
+        }
+      }
+      if (!changed) return prev;
+      return [...map.entries()].map(([code, name]) => ({code, name}))
+        .sort((x, y) => x.code.localeCompare(y.code));
+    });
+  }, [items, hist]);
+
+  // 过滤条件变化：回到第 1 页，重置过滤增量的统计起点
+  useEffect(() => {
+    setPage(1);
+    seenMaxIdRef.current = latestIdRef.current;
+    setFilteredRx(0);
+  }, [pointFilter, ruleFilter, eventFilter]);
+
+  // 过滤激活时，累加 WS 新行中匹配过滤的行数（items 按 id 倒序，新行在头部）
+  useEffect(() => {
+    if (!filterActive) return;
+    const maxId = latestIdRef.current;
+    if (maxId < seenMaxIdRef.current) {
+      seenMaxIdRef.current = maxId;  // snapshot 重置等情况：跟随最新基线
+      return;
+    }
+    if (maxId === seenMaxIdRef.current) return;
+    let add = 0;
+    for (const a of items) {
+      if (a.id <= seenMaxIdRef.current) break;
+      if (matchFilters(a)) add++;
+    }
+    seenMaxIdRef.current = maxId;
+    if (add > 0) setFilteredRx(c => c + add);
+  }, [items, pointFilter, ruleFilter, eventFilter]);
+
+  // 总数：进入页面 / WS 重连成功 / 过滤条件变化时向服务端取一次；失败时用已加载条数兜底
+  useEffect(() => {
+    fetchWithTimeout(`api/alarms/get?page=1&pageSize=1${filterQuery()}&t=${Date.now()}`, { method: 'GET', cache: 'no-cache', credentials: 'include' })
       .then(r => (r.ok ? r.json() : null))
       .then(r => { if (r && typeof r.total === 'number') { baseRxRef.current = rxRef.current; setTotal(r.total); } })
       .catch(() => {});
-  }, [wsOk]);
+  }, [wsOk, pointFilter, ruleFilter, eventFilter]);
 
   // 第 1 页直接用 WS 内存列表（实时）；第 2 页起向服务端按 id 倒序取历史
   useEffect(() => {
@@ -800,7 +874,7 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth}) {
     let cancelled = false;
     setHistLoading(true);
     setHistError('');
-    fetchWithTimeout(`api/alarms/get?page=${page}&pageSize=${ALARM_PAGE_SIZE}&t=${Date.now()}`, { method: 'GET', cache: 'no-cache', credentials: 'include' })
+    fetchWithTimeout(`api/alarms/get?page=${page}&pageSize=${ALARM_PAGE_SIZE}${filterQuery()}&t=${Date.now()}`, { method: 'GET', cache: 'no-cache', credentials: 'include' })
       .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
@@ -818,7 +892,7 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth}) {
         setHistLoading(false);
       });
     return () => { cancelled = true; };
-  }, [page]);
+  }, [page, pointFilter, ruleFilter, eventFilter]);
 
   // 自动滚动：items 前插新告警后把滚动条拉回顶部（仅实时页）
   useEffect(() => {
@@ -844,7 +918,9 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth}) {
     ? null
     : (frozenMaxId === null ? (items.length ? items[0].id : 0) : frozenMaxId);
   const visibleAll = frozenBound === null ? items : items.filter(x => x.id <= frozenBound);
-  const pendingCount = frozenBound === null ? 0 : items.filter(x => x.id > frozenBound).length;
+  // 冻结横幅计数：边界外且匹配过滤条件的新行（无过滤时 matchFilters 恒真）
+  const pendingNew = frozenBound === null ? 0
+    : items.filter(x => x.id > frozenBound && matchFilters(x)).length;
 
   const revealNew = () => {
     if (items.length) setFrozenMaxId(items[0].id);
@@ -852,12 +928,17 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth}) {
     if (el) el.scrollTop = 0;
   };
 
-  const rows = page === 1 ? visibleAll.slice(0, ALARM_PAGE_SIZE) : hist;
-  // 实时总数：基数 + 取数后实收的 WS 增量；条数下限由内存列表兜底
-  const liveTotal = total + Math.max(0, alarmRx - baseRxRef.current);
-  const shownTotal = page === 1 ? Math.max(liveTotal, items.length) : Math.max(liveTotal, hist.length);
+  // 实时页（第 1 页）走内存过滤；历史页已由服务端按相同条件过滤
+  const filtered = filterActive ? visibleAll.filter(matchFilters) : visibleAll;
+  const rows = page === 1 ? filtered.slice(0, ALARM_PAGE_SIZE) : hist;
+  // 实时总数：基数 + 取数后实收的 WS 增量（过滤激活时仅统计匹配行）；
+  // 条数下限由内存列表兜底
+  const liveTotal = filterActive
+    ? total + filteredRx
+    : total + Math.max(0, alarmRx - baseRxRef.current);
+  const shownTotal = page === 1 ? Math.max(liveTotal, filtered.length) : Math.max(liveTotal, hist.length);
   const latest = items.length > 0 ? items[0].ts : '';
-  const showBanner = page === 1 && pendingCount > 0;
+  const showBanner = page === 1 && pendingNew > 0;
   return html`
   <div class="flex-1 min-h-0 flex flex-col p-2">
     <div class="ind-panel flex-1 min-h-0 flex flex-col">
@@ -876,7 +957,33 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth}) {
         自动滚动
       <//>
     <//>
-    ${showBanner && html`<div class="alarm-new-banner" onclick=${revealNew}>↑ ${pendingCount} 条新告警，点击查看<//>`}
+    <div class="alarm-filterbar">
+      <span class="alarm-filter-label">测点</span>
+      <select class="alarm-filter-select" value=${pointFilter}
+              onchange=${e => setPointFilter(e.target.value)}
+              title="按测点编码精确过滤（选项来自已出现的告警）">
+        <option value="">全部测点</option>
+        ${pointOptions.map(o => html`<option key=${o.code} value=${o.code}>${o.code}${o.name ? ' · ' + o.name : ''}</option>`)}
+      </select>
+      <span class="alarm-filter-label">规则</span>
+      <select class="alarm-filter-select" value=${ruleFilter}
+              onchange=${e => setRuleFilter(e.target.value)}
+              title="按告警规则精确过滤">
+        <option value="">全部规则</option>
+        ${ALARM_RULE_OPTIONS.map(r => html`<option key=${r} value=${r}>${r}</option>`)}
+      </select>
+      <span class="alarm-filter-label">事件</span>
+      <select class="alarm-filter-select" value=${eventFilter}
+              onchange=${e => setEventFilter(e.target.value)}
+              title="按事件类型过滤（ALARM=触发 / RECOVER=恢复）">
+        <option value="">全部事件</option>
+        ${ALARM_EVENT_OPTIONS.map(ev => html`<option key=${ev} value=${ev}>${ev}</option>`)}
+      </select>
+      ${filterActive && html`<button type="button" class="alarm-filter-clear"
+        onclick=${() => { setPointFilter(''); setRuleFilter(''); setEventFilter(''); }}>清除筛选<//>`}
+      ${filterActive && page === 1 && html`<span class="alarm-filter-hint">第 1 页为内存实时过滤，历史页由服务端按相同条件查询<//>`}
+    <//>
+    ${showBanner && html`<div class="alarm-new-banner" onclick=${revealNew}>↑ ${pendingNew} 条新告警，点击查看<//>`}
     <div class="flex-1 min-h-0 overflow-auto scrollbar-force bg-white ind-lightbox ind-darktable" ref=${scrollRef}>
       <table class="border-separate border-spacing-0 bg-white ind-darktable" style="table-layout: fixed; width: 100%;">
         <thead>

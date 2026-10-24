@@ -58,7 +58,8 @@ int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
                       int max_rows);
 int pg_get_alarms_page(int page, int page_size,
                        unsigned long long *total_out, struct ds_alarm *rows,
-                       int max_rows);
+                       int max_rows, const char *point_code,
+                       const char *rule_code, const char *event);
 int pg_get_recent_alarms(struct ds_alarm *rows, int max_rows);
 #endif
 
@@ -84,14 +85,19 @@ int ds_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
 
 int ds_get_alarms_page(int page, int page_size,
                        unsigned long long *total_out, struct ds_alarm *rows,
-                       int max_rows) {
+                       int max_rows, const char *point_code,
+                       const char *rule_code, const char *event) {
 #if defined(PG_MODE)
-  return pg_get_alarms_page(page, page_size, total_out, rows, max_rows);
+  return pg_get_alarms_page(page, page_size, total_out, rows, max_rows,
+                            point_code, rule_code, event);
 #else
   (void) page;
   (void) page_size;
   (void) rows;
   (void) max_rows;
+  (void) point_code;
+  (void) rule_code;
+  (void) event;
   if (total_out != NULL) *total_out = 0;
   return -1;
 #endif
