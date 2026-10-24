@@ -18,9 +18,7 @@ function fetchWithTimeout(url, options = {}) {
 
 const Logo = props => html`<svg class=${props.class} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12.87 12.85"><defs><style>.ll-cls-1{fill:none;stroke:#000;stroke-miterlimit:10;stroke-width:0.5px;}</style></defs><g id="Layer_2" data-name="Layer 2"><g id="Layer_1-2" data-name="Layer 1"><path class="ll-cls-1" d="M12.62,1.82V8.91A1.58,1.58,0,0,1,11,10.48H4a1.44,1.44,0,0,1-1-.37A.69.69,0,0,1,2.84,10l-.1-.12a.81.81,0,0,1-.15-.48V5.57a.87.87,0,0,1,.86-.86H4.73V7.28a.86.86,0,0,0,.86.85H9.42a.85.85,0,0,0,.85-.85V3.45A.86.86,0,0,0,10.13,3,.76.76,0,0,0,10,2.84a.29.29,0,0,0-.12-.1,1.49,1.49,0,0,0-1-.37H2.39V1.82A1.57,1.57,0,0,1,4,.25H11A1.57,1.57,0,0,1,12.62,1.82Z"/><path class="ll-cls-1" d="M10.48,10.48V11A1.58,1.58,0,0,1,8.9,12.6H1.82A1.57,1.57,0,0,1,.25,11V3.94A1.57,1.57,0,0,1,1.82,2.37H8.9a1.49,1.49,0,0,1,1,.37l.12.1a.76.76,0,0,1,.11.14.86.86,0,0,1,.14.47V7.28a.85.85,0,0,1-.85.85H8.13V5.57a.86.86,0,0,0-.85-.86H3.45a.87.87,0,0,0-.86.86V9.4a.81.81,0,0,0,.15.48l.1.12a.69.69,0,0,0,.13.11,1.44,1.44,0,0,0,1,.37Z"/></g></g></svg>`;
 
-function Header({logout, user, setShowSidebar, showSidebar, dbMode, dbAvailable, theme, toggleTheme}) {
-  const modeColor = !dbAvailable ? 'text-gray-500' : (dbMode === 'SQLite' ? 'text-green-600' : 'text-blue-600');
-  const modeBadge = !dbAvailable ? 'bg-gray-100' : (dbMode === 'SQLite' ? 'bg-green-100' : 'bg-blue-100');
+function Header({logout, user, setShowSidebar, showSidebar, theme, toggleTheme}) {
   return html`
 <div class="bg-white ind-header sticky top-0 z-[48] xw-full border-b py-2 ${showSidebar && 'pl-40'} transition-all duration-300 transform">
   <div class="px-2 w-full py-0 my-0 flex items-center">
@@ -32,10 +30,6 @@ function Header({logout, user, setShowSidebar, showSidebar, dbMode, dbAvailable,
       <div class="flex items-center gap-x-4 lg:gap-x-6">
         <span class="text-sm text-slate-400">logged in as: ${user}<//>
         <div class="hidden lg:block lg:h-4 lg:w-px lg:bg-gray-200" aria-hidden="true"><//>
-        <span class="text-sm ${modeColor}">
-          <span class="px-2 py-0.5 rounded text-xs font-medium ${modeBadge}">${dbMode}模式</span>
-        <//>
-        <div class="hidden lg:block lg:h-4 lg:w-px lg:bg-gray-200" aria-hidden="true"><//>
         <${Button} title=${theme === 'ind' ? '经典风格' : '工业风格'} icon=${theme === 'ind' ? Icons.desktop : Icons.bolt} onclick=${toggleTheme} />
         <div class="hidden lg:block lg:h-4 lg:w-px lg:bg-gray-200" aria-hidden="true"><//>
         <${Button} title="Logout" icon=${Icons.logout} onclick=${logout} />
@@ -45,7 +39,7 @@ function Header({logout, user, setShowSidebar, showSidebar, dbMode, dbAvailable,
 <//>`;
 };
 
-function Sidebar({url, show, alarmUnread}) {
+function Sidebar({url, show, alarmUnread, videoEnabled}) {
   const NavLink = ({title, icon, href, url, badge}) => html`
   <div>
     <a href="#${href}" class="${href == url ? 'bg-slate-50 text-blue-600 group ind-navlink ind-navlink-active' : 'text-gray-700 hover:text-blue-600 hover:bg-gray-50 group ind-navlink'} flex gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold relative">
@@ -65,7 +59,7 @@ function Sidebar({url, show, alarmUnread}) {
       <${Logo} class="h-full"/> GD
     <//>
     <div class="flex flex-1 flex-col gap-y-1">
-      <${NavLink} title="视频设备" icon=${Icons.camera} href="/events" url=${url} />
+      ${videoEnabled && html`<${NavLink} title="视频设备" icon=${Icons.camera} href="/events" url=${url} />`}
       <${NavLink} title="实时告警" icon=${Icons.exclamationTriangle} href="/alarms" url=${url} badge=${url === '/alarms' ? 0 : alarmUnread} />
     <//>
   <//>
@@ -912,8 +906,7 @@ const App = function({}) {
   const [url, setUrl] = useState('/');
   const [user, setUser] = useState('');
   const [showSidebar, setShowSidebar] = useState(true);
-  const [dbMode, setDbMode] = useState('');
-  const [dbAvailable, setDbAvailable] = useState(true);
+  const [videoEnabled, setVideoEnabled] = useState(true);  // 视频设备总开关（来自登录响应）
   // 告警推送状态：items 新->旧，unread 仅统计非 /alarms 页收到的新 ALARM 事件
   const [alarmItems, setAlarmItems] = useState([]);
   const [alarmUnread, setAlarmUnread] = useState(0);
@@ -936,7 +929,7 @@ const App = function({}) {
     return next;
   });
   const login = r => !r.ok ? setLoading(false) && setUser(null) : r.json()
-      .then(r => setUser(r.user))
+      .then(r => { setUser(r.user); setVideoEnabled(r.videoEnabled !== false); })
       .finally(r => setLoading(false));
 
   // hash 路由：#/events / #/alarms（Sidebar NavLink 的 href 即锚点）
@@ -1013,16 +1006,6 @@ const App = function({}) {
 
   useEffect(() => {
     fetchWithTimeout('api/login', { method: 'POST', credentials: 'include' }).then(login).catch(() => { setLoading(false); setUser(null); });
-    fetchWithTimeout('api/mode/get')
-      .then(r => r.json())
-      .then(r => {
-        setDbMode(r.mode);
-        setDbAvailable(r.available === undefined ? true : r.available === 1);
-      })
-      .catch(e => {
-        setDbMode('Unknown');
-        setDbAvailable(false);
-      });
   }, []);
 
   if (loading) return '';  // Show blank page on initial load
@@ -1031,10 +1014,14 @@ const App = function({}) {
 
   return html`
 <div class="h-screen bg-slate-100 ind-shell flex flex-col overflow-hidden">
-  <${Sidebar} url=${url} show=${showSidebar} alarmUnread=${alarmUnread} />
-  <${Header} logout=${logout} user=${user} showSidebar=${showSidebar} setShowSidebar=${setShowSidebar} dbMode=${dbMode} dbAvailable=${dbAvailable} theme=${theme} toggleTheme=${toggleTheme} />
+  <${Sidebar} url=${url} show=${showSidebar} alarmUnread=${alarmUnread} videoEnabled=${videoEnabled} />
+  <${Header} logout=${logout} user=${user} showSidebar=${showSidebar} setShowSidebar=${setShowSidebar} theme=${theme} toggleTheme=${toggleTheme} />
   <div class="flex-1 min-h-0 ${showSidebar && 'pl-40'} transition-all duration-300 transform flex flex-col">
-    ${url === '/alarms' ? html`<${Alarms} items=${alarmItems} wsOk=${alarmWsOk} alarmRx=${alarmRx} authLost=${alarmAuthLost} onReauth=${logout} />` : html`<${Events} />`}
+    ${url === '/alarms'
+      ? html`<${Alarms} items=${alarmItems} wsOk=${alarmWsOk} alarmRx=${alarmRx} authLost=${alarmAuthLost} onReauth=${logout} />`
+      : (videoEnabled
+          ? html`<${Events} />`
+          : html`<div class="flex-1 flex items-center justify-center text-slate-400 text-lg">视频设备功能未启用</div>`)}
   <//>
 <//>`;
 };

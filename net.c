@@ -90,6 +90,7 @@ struct cfg_parsed {
   int maxPageSize;
   int httpPort;
   int httpsPort;
+  int enableVideoDevices;          // 1=启用视频设备, 0=禁用（侧边栏/接口/数据加载全部跳过）
   char field_keys[MAX_FIELD_KEYS][MAX_FIELD_KEY_LEN];
   int field_key_count;
   size_t fields_tok_len;
@@ -129,9 +130,18 @@ static void parse_config_fields(const char *cfg_buf) {
   cp->maxPageSize = 100;
   cp->httpPort = HTTP_PORT;
   cp->httpsPort = HTTPS_PORT;
+  cp->enableVideoDevices = 1;  // 默认启用
 
   struct mg_str json = mg_str((char *)cfg_buf);
   double v;
+
+  // 视频设备总开关：true=启用，false/no/0=禁用
+  {
+    bool bv = true;
+    if (mg_json_get_bool(json, "$.enableVideoDevices", &bv) && !bv) {
+      cp->enableVideoDevices = 0;
+    }
+  }
 
   // Parse numeric fields via mg_json_get_num
   if (mg_json_get_num(json, "$.defaultPageSize", &v) && v > 0)
@@ -196,6 +206,18 @@ static int get_default_page_size(void) {
     if (buf) parse_config_fields(buf);
   }
   int val = g_cfg_parsed.defaultPageSize;
+  cfg_unlock();
+  return val;
+}
+
+// 视频设备总开关：1=启用，0=禁用（配置项 enableVideoDevices）
+static int video_devices_enabled(void) {
+  cfg_lock();
+  if (!g_cfg_parsed_valid) {
+    char *buf = get_config_buf_unlocked();
+    if (buf) parse_config_fields(buf);
+  }
+  int val = g_cfg_parsed.enableVideoDevices;
   cfg_unlock();
   return val;
 }
@@ -1431,9 +1453,10 @@ static void handle_login(struct mg_connection *c, struct mg_http_message *hm,
               "Content-Type: application/json\r\n",
               u->access_token, 3600 * 24);
   mg_http_reply(c, 200, cookie,
-                "{\"status\":\"true\",%m:%m,%m:%m}",
+                "{\"status\":\"true\",%m:%m,%m:%m,\"videoEnabled\":%s}",
                 MG_ESC("user"), MG_ESC(u->name),
-                MG_ESC("token"), MG_ESC(u->access_token));
+                MG_ESC("token"), MG_ESC(u->access_token),
+                video_devices_enabled() ? "true" : "false");
   // Scrub submitted plaintext password from the stack frame.
   memset(nm, 0, sizeof(nm));
   memset(pw, 0, sizeof(pw));
@@ -1546,6 +1569,10 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       } else {
         handle_alarms_get(c, hm);
       }
+    } else if (mg_match(hm->uri, mg_str("/api/nodes/#"), NULL) && !video_devices_enabled()) {
+      // 视频设备功能已禁用：所有 /api/nodes/* 接口统一拒绝，不触发任何数据库/数据加载
+      mg_http_reply(c, 403, s_json_header,
+                    "{\"status\":\"false\",\"message\":\"Video devices disabled\"}");
     } else if (mg_match(hm->uri, mg_str("/api/nodes/queryCategory"), NULL)) {
       if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
         mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");
