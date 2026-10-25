@@ -228,8 +228,33 @@ int main(void) {
     fprintf(stderr, "Failed to initialize PostgreSQL connection\n");
     return 1;
   }
-  MG_INFO(("Using PostgreSQL mode, conn: %s", mask_pg_password(pg_conn)));
-#elif !defined(CSV_MODE)
+  // 告警事件范围：event_type=true 同时取 ALARM+RECOVER，false 仅取 ALARM（默认 true）
+  {
+    int include_recover = 1;
+    FILE *cfp = fopen("data_config.json", "rb");
+    if (cfp != NULL) {
+      fseek(cfp, 0, SEEK_END);
+      long csz = ftell(cfp);
+      fseek(cfp, 0, SEEK_SET);
+      char *cbuf = (char *) malloc((size_t) csz + 1);
+      if (cbuf != NULL) {
+        fread(cbuf, 1, (size_t) csz, cfp);
+        cbuf[csz] = '\0';
+        bool ev = true;
+        if (mg_json_get_bool(mg_str(cbuf), "$.event_type", &ev) && !ev) {
+          include_recover = 0;
+        }
+        free(cbuf);
+      }
+      fclose(cfp);
+    }
+    extern void pg_set_alarm_include_recover(int);
+    pg_set_alarm_include_recover(include_recover);
+    MG_INFO(("Using PostgreSQL mode, conn: %s, event_type: %s",
+             mask_pg_password(pg_conn),
+             include_recover ? "ALARM+RECOVER" : "ALARM only"));
+  }
+#else
   // Initialize SQLite database with path from config
   const char *sqlite_path = get_path_from_config("$.sqliteFilePath", "device_dashboard.db");
   if (ds_init(sqlite_path) != 0) {
@@ -237,14 +262,6 @@ int main(void) {
     return 1;
   }
   MG_INFO(("Using SQLite database mode, file: %s", sqlite_path));
-#else
-  // Initialize CSV mode with path from config
-  const char *csv_path = get_path_from_config("$.csvFilePath", "leaf_nodes.csv");
-  if (ds_init(csv_path) != 0) {
-    fprintf(stderr, "Failed to initialize CSV\n");
-    return 1;
-  }
-  MG_INFO(("Using CSV mode, file: %s", csv_path));
 #endif
 
   mg_mgr_init(&mgr);

@@ -1,4 +1,4 @@
-PROG ?= ./vvvv       # Program we are building
+PROG ?= ./gddl_alarm       # Program we are building
 OUT ?= -o $(PROG)       # Compiler argument for output file
 SOURCES = main.c mongoose.c net.c data_source.c   # Source code files
 # Enable mongoose's built-in TLS backend (EC P-256 + AES/ChaCha20).
@@ -20,18 +20,11 @@ CFLAGS += -DMG_ENABLE_CUSTOM_LOG=1
 # URL-encoded CJK keyword; oversized lines chunk-flush, nothing is lost.
 CFLAGS += -DLOG_LINE_BUF_SIZE=2048
 
-# Database mode: PostgreSQL (default), CSV, or SQLite
+# Database mode: PostgreSQL (default) or SQLite
 # Default: make            (PostgreSQL)
-# To use CSV:    make CSV_MODE=1
 # To use SQLite: make PG_MODE=0
-ifneq ($(CSV_MODE),1)
-  PG_MODE ?= 1
-endif
-ifeq ($(CSV_MODE),1)
-  CFLAGS += -DCSV_MODE
-  SOURCES += csv_driver.c
-  MODE = csv
-else ifeq ($(PG_MODE),1)
+PG_MODE ?= 1
+ifeq ($(PG_MODE),1)
   CFLAGS += -DPG_MODE
   SOURCES += pg_driver.c
   MODE = pg
@@ -49,7 +42,7 @@ else ifeq ($(PG_MODE),1)
     # live in companion archives libpgcommon_shlib.a/libpgport_shlib.a plus a
     # heap of system libs. bin first makes the unambiguous DLL choice.
     CFLAGS += -I"$(PG_HOME)/include" -L"$(PG_HOME)/bin" -L"$(PG_HOME)/lib" -lpq
-    # vvvv.exe links the libpq import library -> libpq.dll (+ its OpenSSL/etc
+    # gddl_alarm.exe links the libpq import library -> libpq.dll (+ its OpenSSL/etc
     # runtime deps) must sit next to the exe at runtime.  PG_COPY_CMD copies
     # them AFTER linking in the $(PROG) recipe, so foreign DLLs never shadow
     # the toolchain's own libwinpthread/libiconv/libintl while gcc/collect2
@@ -72,7 +65,7 @@ else
 endif
 
 ifeq ($(OS),Windows_NT)         # Windows settings. Assume MinGW compiler.
-  PROG = vvvv.exe
+  PROG = gddl_alarm.exe
   CC = gcc
   CFLAGS += -lws2_32
   # Force select() on Windows: mongoose global default sets MG_ENABLE_EPOLL=1
@@ -87,7 +80,7 @@ ifeq ($(OS),Windows_NT)         # Windows settings. Assume MinGW compiler.
   # connections.  Default 64 broke at ~78 concurrent connections.
   CFLAGS += -DFD_SETSIZE=4096
   MODE_STAMP = .mode_$(MODE).win
-  RM_MODE = -del /Q /F .mode_csv.win .mode_sqlite.win .mode_pg.win 2>nul
+  RM_MODE = -del /Q /F .mode_sqlite.win .mode_pg.win 2>nul
   TOUCH_MODE = type nul >
   DEL_CMD = cmd /C del /Q /F /S
   # libpq.dll alone is NOT enough: official EDB builds link OpenSSL etc.
@@ -100,7 +93,7 @@ ifeq ($(OS),Windows_NT)         # Windows settings. Assume MinGW compiler.
   PG_COPY_CMD = cmd /C "for %f in ($(PG_RUNTIME_DLLS)) do @if exist "$(subst /,\,$(PG_HOME))\bin\%f" copy /Y "$(subst /,\,$(PG_HOME))\bin\%f" . >nul"
   CHECK_PROG = @if not exist $(subst /,\,$(PROG)) (echo *** BUILD FAILED *** & exit 1)
   # Delete the exe when the build MODE changes. MinGW make has coarse mtime
-  # granularity: rapid PG->CSV->SQLite switches can leave the (newly touched)
+  # granularity: rapid PG->SQLite switches can leave the (newly touched)
   # mode stamp and the (old-mode) exe in the same second, so make considers
   # the exe up-to-date and silently keeps the OLD driver build. The mode-stamp
   # filename itself changes per mode, so its recipe always runs on switch —
@@ -119,7 +112,7 @@ else
     CFLAGS += -DMG_ENABLE_EPOLL=1 -DMG_ENABLE_POLL=0
   endif
   MODE_STAMP = .mode_$(MODE)
-  RM_MODE = @rm -f .mode_csv .mode_sqlite .mode_pg
+  RM_MODE = @rm -f .mode_sqlite .mode_pg
   TOUCH_MODE = @touch
   DEL_CMD = rm -rf
   # Linux loads system libpq.so via ldconfig; no DLL copy needed

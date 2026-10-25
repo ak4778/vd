@@ -17,7 +17,7 @@ ID长度	对应层级  示例
 
 **User**
 
-make CSV_MODE=1 
+make
 
 ## 构建架构
 
@@ -26,8 +26,8 @@ make CSV_MODE=1
 ### 1. 后端（C 代码）——由 `make` 处理
 
 ```
-make                  # SQLite 模式（默认）
-make CSV_MODE=1       # CSV 模式
+make                  # PostgreSQL 模式（默认）
+make PG_MODE=0        # SQLite 模式
 make clean            # 清理
 ```
 

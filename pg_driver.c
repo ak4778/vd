@@ -511,6 +511,14 @@ fail:
 // 表由 monitor_fj_state.py 建表并写入，本模块只读。
 static int s_alarm_table_ok = -1;  // -1 未探测 / 0 表不存在 / 1 表存在
 
+// 告警事件范围开关：1=同时取 ALARM 和 RECOVER，0=仅取 ALARM。
+// 由 data_config.json 的 event_type 字段控制（默认 1，保持向后兼容）。
+static int s_alarm_include_recover = 1;
+
+void pg_set_alarm_include_recover(int include_recover) {
+  s_alarm_include_recover = include_recover ? 1 : 0;
+}
+
 int pg_alarm_supported(void) {
   pg_mutex_lock();
   if (s_conn == NULL) {
@@ -598,7 +606,7 @@ int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
   snprintf(limbuf, sizeof(limbuf), "%d", max_rows);
   const char *vals[2] = {idbuf, limbuf};
 
-  static const char *SQL =
+  static const char *SQL_ALL =
       "SELECT id, event,"
       " COALESCE(to_char(ts, 'YYYY-MM-DD HH24:MI:SS'), ''),"
       " COALESCE(region_company_name, ''), COALESCE(station_name, ''),"
@@ -610,7 +618,22 @@ int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
       " alarm_value, COALESCE(detail, '')"
       " FROM wind_alarm WHERE id > $1 ORDER BY id ASC LIMIT $2";
 
-  PGresult *res = PQexecParams(s_conn, SQL, 2, NULL, vals, NULL, NULL, 0);
+  static const char *SQL_ALARM_ONLY =
+      "SELECT id, event,"
+      " COALESCE(to_char(ts, 'YYYY-MM-DD HH24:MI:SS'), ''),"
+      " COALESCE(region_company_name, ''), COALESCE(station_name, ''),"
+      " device_id, COALESCE(device_name, ''),"
+      " point_code, COALESCE(point_name, ''),"
+      " rule_code, COALESCE(alarm_type, ''),"
+      " temperature, temp_rate,"
+      " range_1h, range_20s,"
+      " alarm_value, COALESCE(detail, '')"
+      " FROM wind_alarm WHERE id > $1 AND event = 'ALARM'"
+      " ORDER BY id ASC LIMIT $2";
+
+  const char *sql = s_alarm_include_recover ? SQL_ALL : SQL_ALARM_ONLY;
+
+  PGresult *res = PQexecParams(s_conn, sql, 2, NULL, vals, NULL, NULL, 0);
   if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
     fprintf(stderr, "PG alarm query error: %s\n", PQerrorMessage(s_conn));
     PQclear(res);
@@ -643,6 +666,9 @@ int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
 
   const int use_point = (point_code != NULL && point_code[0] != '\0');
   const int use_rule = (rule_code != NULL && rule_code[0] != '\0');
+  const int alarm_only = !s_alarm_include_recover;
+  // event 过滤始终生效；alarm_only 时额外强制 event='ALARM'，
+  // 用户若选 RECOVER 则 WHERE event='ALARM' AND event='RECOVER' 返回空。
   const int use_event = (event != NULL && event[0] != '\0');
 
   pg_mutex_lock();
@@ -657,28 +683,36 @@ int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
   const char *cvals[3];
   int cn = 0;
   strcpy(count_sql, "SELECT count(*) FROM wind_alarm");
-  char cwhere[160] = "";
+  char cwhere[200] = "";
   int cidx = 1;
+  int has_where = 0;
+  if (alarm_only) {
+    strcpy(cwhere, " WHERE event = 'ALARM'");
+    has_where = 1;
+  }
   if (use_point) {
-    const char *conj = cidx == 1 ? " WHERE" : " AND";
+    const char *conj = has_where ? " AND" : " WHERE";
     snprintf(cwhere + strlen(cwhere), sizeof(cwhere) - strlen(cwhere),
              "%s point_code = $%d", conj, cidx);
     cidx++;
     cvals[cn++] = point_code;
+    has_where = 1;
   }
   if (use_rule) {
-    const char *conj = cidx == 1 ? " WHERE" : " AND";
+    const char *conj = has_where ? " AND" : " WHERE";
     snprintf(cwhere + strlen(cwhere), sizeof(cwhere) - strlen(cwhere),
              "%s rule_code = $%d", conj, cidx);
     cidx++;
     cvals[cn++] = rule_code;
+    has_where = 1;
   }
   if (use_event) {
-    const char *conj = cidx == 1 ? " WHERE" : " AND";
+    const char *conj = has_where ? " AND" : " WHERE";
     snprintf(cwhere + strlen(cwhere), sizeof(cwhere) - strlen(cwhere),
              "%s event = $%d", conj, cidx);
     cidx++;
     cvals[cn++] = event;
+    has_where = 1;
   }
   strcat(count_sql, cwhere);
   PGresult *cres = PQexecParams(s_conn, count_sql, cn, NULL,
@@ -722,26 +756,34 @@ int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
   strcpy(sql, SELECT_COLS);
   char where[200] = "";
   int widx = 3;
+  int whas = 0;
+  if (alarm_only) {
+    strcpy(where, " WHERE event = 'ALARM'");
+    whas = 1;
+  }
   if (use_point) {
-    const char *conj = widx == 3 ? " WHERE" : " AND";
+    const char *conj = whas ? " AND" : " WHERE";
     snprintf(where + strlen(where), sizeof(where) - strlen(where),
              "%s point_code = $%d", conj, widx);
     widx++;
     vals[vn++] = point_code;
+    whas = 1;
   }
   if (use_rule) {
-    const char *conj = widx == 3 ? " WHERE" : " AND";
+    const char *conj = whas ? " AND" : " WHERE";
     snprintf(where + strlen(where), sizeof(where) - strlen(where),
              "%s rule_code = $%d", conj, widx);
     widx++;
     vals[vn++] = rule_code;
+    whas = 1;
   }
   if (use_event) {
-    const char *conj = widx == 3 ? " WHERE" : " AND";
+    const char *conj = whas ? " AND" : " WHERE";
     snprintf(where + strlen(where), sizeof(where) - strlen(where),
              "%s event = $%d", conj, widx);
     widx++;
     vals[vn++] = event;
+    whas = 1;
   }
   strcat(sql, where);
   strcat(sql, " ORDER BY id DESC LIMIT $1 OFFSET $2");
@@ -782,7 +824,7 @@ int pg_get_alarms_range(const char *start, const char *end,
   const char *vals[3] = {start, end, limbuf};
 
   // 闭区间实现：ts < end + 1s（秒级粒度），与 Python 导出脚本语义一致
-  static const char *SQL =
+  static const char *SQL_ALL =
       "SELECT id, event,"
       " COALESCE(to_char(ts, 'YYYY-MM-DD HH24:MI:SS'), ''),"
       " COALESCE(region_company_name, ''), COALESCE(station_name, ''),"
@@ -797,7 +839,25 @@ int pg_get_alarms_range(const char *start, const char *end,
       " AND ts < ($2::timestamp + interval '1 second')"
       " ORDER BY id ASC LIMIT $3";
 
-  PGresult *res = PQexecParams(s_conn, SQL, 3, NULL, vals, NULL, NULL, 0);
+  static const char *SQL_ALARM_ONLY =
+      "SELECT id, event,"
+      " COALESCE(to_char(ts, 'YYYY-MM-DD HH24:MI:SS'), ''),"
+      " COALESCE(region_company_name, ''), COALESCE(station_name, ''),"
+      " device_id, COALESCE(device_name, ''),"
+      " point_code, COALESCE(point_name, ''),"
+      " rule_code, COALESCE(alarm_type, ''),"
+      " temperature, temp_rate,"
+      " range_1h, range_20s,"
+      " alarm_value, COALESCE(detail, '')"
+      " FROM wind_alarm"
+      " WHERE ts >= $1::timestamp"
+      " AND ts < ($2::timestamp + interval '1 second')"
+      " AND event = 'ALARM'"
+      " ORDER BY id ASC LIMIT $3";
+
+  const char *sql = s_alarm_include_recover ? SQL_ALL : SQL_ALARM_ONLY;
+
+  PGresult *res = PQexecParams(s_conn, sql, 3, NULL, vals, NULL, NULL, 0);
   if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
     fprintf(stderr, "PG alarm export query error: %s\n", PQerrorMessage(s_conn));
     PQclear(res);
@@ -827,7 +887,7 @@ int pg_get_recent_alarms(struct ds_alarm *rows, int max_rows) {
   snprintf(limbuf, sizeof(limbuf), "%d", max_rows);
   const char *vals[1] = {limbuf};
 
-  static const char *SQL =
+  static const char *SQL_ALL =
       "SELECT id, event,"
       " COALESCE(to_char(ts, 'YYYY-MM-DD HH24:MI:SS'), ''),"
       " COALESCE(region_company_name, ''), COALESCE(station_name, ''),"
@@ -839,7 +899,21 @@ int pg_get_recent_alarms(struct ds_alarm *rows, int max_rows) {
       " alarm_value, COALESCE(detail, '')"
       " FROM wind_alarm ORDER BY id DESC LIMIT $1";
 
-  PGresult *res = PQexecParams(s_conn, SQL, 1, NULL, vals, NULL, NULL, 0);
+  static const char *SQL_ALARM_ONLY =
+      "SELECT id, event,"
+      " COALESCE(to_char(ts, 'YYYY-MM-DD HH24:MI:SS'), ''),"
+      " COALESCE(region_company_name, ''), COALESCE(station_name, ''),"
+      " device_id, COALESCE(device_name, ''),"
+      " point_code, COALESCE(point_name, ''),"
+      " rule_code, COALESCE(alarm_type, ''),"
+      " temperature, temp_rate,"
+      " range_1h, range_20s,"
+      " alarm_value, COALESCE(detail, '')"
+      " FROM wind_alarm WHERE event = 'ALARM' ORDER BY id DESC LIMIT $1";
+
+  const char *sql = s_alarm_include_recover ? SQL_ALL : SQL_ALARM_ONLY;
+
+  PGresult *res = PQexecParams(s_conn, sql, 1, NULL, vals, NULL, NULL, 0);
   if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
     fprintf(stderr, "PG alarm recent query error: %s\n", PQerrorMessage(s_conn));
     PQclear(res);

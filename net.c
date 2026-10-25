@@ -91,6 +91,7 @@ struct cfg_parsed {
   int httpPort;
   int httpsPort;
   int enableVideoDevices;          // 1=启用视频设备, 0=禁用（侧边栏/接口/数据加载全部跳过）
+  int alarmEventAll;               // 1=告警含ALARM+RECOVER, 0=仅ALARM（配置项 event_type）
   char field_keys[MAX_FIELD_KEYS][MAX_FIELD_KEY_LEN];
   int field_key_count;
   size_t fields_tok_len;
@@ -131,6 +132,7 @@ static void parse_config_fields(const char *cfg_buf) {
   cp->httpPort = HTTP_PORT;
   cp->httpsPort = HTTPS_PORT;
   cp->enableVideoDevices = 1;  // 默认启用
+  cp->alarmEventAll = 1;       // 默认含 ALARM+RECOVER
 
   struct mg_str json = mg_str((char *)cfg_buf);
   double v;
@@ -140,6 +142,14 @@ static void parse_config_fields(const char *cfg_buf) {
     bool bv = true;
     if (mg_json_get_bool(json, "$.enableVideoDevices", &bv) && !bv) {
       cp->enableVideoDevices = 0;
+    }
+  }
+
+  // 告警事件范围：true=ALARM+RECOVER，false=仅ALARM
+  {
+    bool bv = true;
+    if (mg_json_get_bool(json, "$.event_type", &bv) && !bv) {
+      cp->alarmEventAll = 0;
     }
   }
 
@@ -218,6 +228,18 @@ static int video_devices_enabled(void) {
     if (buf) parse_config_fields(buf);
   }
   int val = g_cfg_parsed.enableVideoDevices;
+  cfg_unlock();
+  return val;
+}
+
+// 告警事件范围：1=ALARM+RECOVER，0=仅ALARM（配置项 event_type）
+static int alarm_event_all(void) {
+  cfg_lock();
+  if (!g_cfg_parsed_valid) {
+    char *buf = get_config_buf_unlocked();
+    if (buf) parse_config_fields(buf);
+  }
+  int val = g_cfg_parsed.alarmEventAll;
   cfg_unlock();
   return val;
 }
@@ -503,12 +525,9 @@ static void nodes_batchset_thread(void *param) {
 #if defined(PG_MODE)
 #define DS_MODE "PostgreSQL"
 #define DS_MODE_TYPE 2
-#elif !defined(CSV_MODE)
+#else
 #define DS_MODE "SQLite"
 #define DS_MODE_TYPE 1
-#else
-#define DS_MODE "CSV"
-#define DS_MODE_TYPE 0
 #endif
 
 struct user {
@@ -1775,10 +1794,11 @@ static void handle_login(struct mg_connection *c, struct mg_http_message *hm,
               "Content-Type: application/json\r\n",
               u->access_token, 3600 * 24);
   mg_http_reply(c, 200, cookie,
-                "{\"status\":\"true\",%m:%m,%m:%m,\"videoEnabled\":%s}",
+                "{\"status\":\"true\",%m:%m,%m:%m,\"videoEnabled\":%s,\"alarmEventAll\":%s}",
                 MG_ESC("user"), MG_ESC(u->name),
                 MG_ESC("token"), MG_ESC(u->access_token),
-                video_devices_enabled() ? "true" : "false");
+                video_devices_enabled() ? "true" : "false",
+                alarm_event_all() ? "true" : "false");
   // Scrub submitted plaintext password from the stack frame.
   memset(nm, 0, sizeof(nm));
   memset(pw, 0, sizeof(pw));

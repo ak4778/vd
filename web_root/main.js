@@ -775,7 +775,7 @@ const localDateStr = (d = new Date()) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 };
 
-function Alarms({items, wsOk, alarmRx, authLost, onReauth}) {
+function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);       // 服务端告警总数（分页器用）
   const [hist, setHist] = useState([]);        // 历史页数据（page >= 2）
@@ -785,6 +785,10 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth}) {
   const [pointFilter, setPointFilter] = useState('');
   const [ruleFilter, setRuleFilter] = useState('');
   const [eventFilter, setEventFilter] = useState('');
+  // event_type=false 时不允许选 RECOVER：若当前选中 RECOVER 则清空
+  useEffect(() => {
+    if (!alarmEventAll && eventFilter === 'RECOVER') setEventFilter('');
+  }, [alarmEventAll, eventFilter]);
   const [pointOptions, setPointOptions] = useState([]);  // [{code, name}]
   // 按日期导出 CSV：默认当天（本地时区）；区间模式默认当天 00:00 ~ 23:59
   const [exportMode, setExportMode] = useState('day');  // 'day' | 'range'
@@ -1018,7 +1022,7 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth}) {
               onchange=${e => setEventFilter(e.target.value)}
               title="按事件类型过滤（ALARM=触发 / RECOVER=恢复）">
         <option value="">全部事件</option>
-        ${ALARM_EVENT_OPTIONS.map(ev => html`<option key=${ev} value=${ev}>${ev}</option>`)}
+        ${ALARM_EVENT_OPTIONS.filter(ev => alarmEventAll || ev !== 'RECOVER').map(ev => html`<option key=${ev} value=${ev}>${ev}</option>`)}
       </select>
       ${filterActive && html`<button type="button" class="alarm-filter-clear"
         onclick=${() => { setPointFilter(''); setRuleFilter(''); setEventFilter(''); }}>清除筛选<//>`}
@@ -1077,6 +1081,7 @@ const App = function({}) {
   const [user, setUser] = useState('');
   const [showSidebar, setShowSidebar] = useState(true);
   const [videoEnabled, setVideoEnabled] = useState(true);  // 视频设备总开关（来自登录响应）
+  const [alarmEventAll, setAlarmEventAll] = useState(true); // 告警事件范围：true=ALARM+RECOVER, false=仅ALARM
   // 告警推送状态：items 新->旧，unread 仅统计非 /alarms 页收到的新 ALARM 事件
   const [alarmItems, setAlarmItems] = useState([]);
   const [alarmUnread, setAlarmUnread] = useState(0);
@@ -1099,7 +1104,7 @@ const App = function({}) {
     return next;
   });
   const login = r => !r.ok ? setLoading(false) && setUser(null) : r.json()
-      .then(r => { setUser(r.user); setVideoEnabled(r.videoEnabled !== false); })
+      .then(r => { setUser(r.user); setVideoEnabled(r.videoEnabled !== false); setAlarmEventAll(r.alarmEventAll !== false); })
       .finally(r => setLoading(false));
 
   // hash 路由：#/events / #/alarms（Sidebar NavLink 的 href 即锚点）
@@ -1188,7 +1193,7 @@ const App = function({}) {
   <${Header} logout=${logout} user=${user} showSidebar=${showSidebar} setShowSidebar=${setShowSidebar} theme=${theme} toggleTheme=${toggleTheme} />
   <div class="flex-1 min-h-0 ${showSidebar && 'pl-40'} transition-all duration-300 transform flex flex-col">
     ${url === '/alarms'
-      ? html`<${Alarms} items=${alarmItems} wsOk=${alarmWsOk} alarmRx=${alarmRx} authLost=${alarmAuthLost} onReauth=${logout} />`
+      ? html`<${Alarms} items=${alarmItems} wsOk=${alarmWsOk} alarmRx=${alarmRx} authLost=${alarmAuthLost} onReauth=${logout} alarmEventAll=${alarmEventAll} />`
       : (videoEnabled
           ? html`<${Events} />`
           : html`<div class="flex-1 flex items-center justify-center text-slate-400 text-lg">视频设备功能未启用</div>`)}
