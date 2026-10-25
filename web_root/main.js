@@ -785,10 +785,7 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
   const [pointFilter, setPointFilter] = useState('');
   const [ruleFilter, setRuleFilter] = useState('');
   const [eventFilter, setEventFilter] = useState('');
-  // event_type=false 时不允许选 RECOVER：若当前选中 RECOVER 则清空
-  useEffect(() => {
-    if (!alarmEventAll && eventFilter === 'RECOVER') setEventFilter('');
-  }, [alarmEventAll, eventFilter]);
+  // event_type=false（alarmEventAll=false）时整个事件过滤下拉不渲染，eventFilter 恒为 ''
   const [pointOptions, setPointOptions] = useState([]);  // [{code, name}]
   // 按日期导出 CSV：默认当天（本地时区）；区间模式默认当天 00:00 ~ 23:59
   const [exportMode, setExportMode] = useState('day');  // 'day' | 'range'
@@ -1017,13 +1014,14 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
         <option value="">全部规则</option>
         ${ALARM_RULE_OPTIONS.map(r => html`<option key=${r} value=${r}>${r}</option>`)}
       </select>
+      ${alarmEventAll && html`
       <span class="alarm-filter-label">事件</span>
       <select class="alarm-filter-select" value=${eventFilter}
               onchange=${e => setEventFilter(e.target.value)}
               title="按事件类型过滤（ALARM=触发 / RECOVER=恢复）">
         <option value="">全部事件</option>
-        ${ALARM_EVENT_OPTIONS.filter(ev => alarmEventAll || ev !== 'RECOVER').map(ev => html`<option key=${ev} value=${ev}>${ev}</option>`)}
-      </select>
+        ${ALARM_EVENT_OPTIONS.map(ev => html`<option key=${ev} value=${ev}>${ev}</option>`)}
+      </select>`}
       ${filterActive && html`<button type="button" class="alarm-filter-clear"
         onclick=${() => { setPointFilter(''); setRuleFilter(''); setEventFilter(''); }}>清除筛选<//>`}
       ${filterActive && page === 1 && html`<span class="alarm-filter-hint">第 1 页为内存实时过滤，历史页由服务端按相同条件查询<//>`}
