@@ -23,12 +23,13 @@ SyslogIdentifier=gddl_alarm
 # 日志时间戳与告警时间窗统一按东八区
 Environment=TZ=Asia/Shanghai
 NoNewPrivileges=true
-ProtectSystem=strict
+# ProtectSystem=full（systemd v215+，CentOS 7 也支持）：/usr、/boot、/etc 只读，
+# 工作目录仍可写，用于 data_config.json / 可选 server.log。
+# 不用 strict / ReadWritePaths（v231+，老 systemd 会报 "Failed to parse" / "Unknown lvalue"）。
+ProtectSystem=full
 # 不启用 ProtectHome：就地部署时程序目录可能位于 /root 或 /home 下，
 # ProtectHome=true 会让该目录对服务不可见（启动即 FileNotFound）。
 PrivateTmp=true
-# data_config.json（含口令）与可选的 server.log 都在这里，需可写
-ReadWritePaths=/opt/gddl_alarm
 
 [Install]
 WantedBy=multi-user.target

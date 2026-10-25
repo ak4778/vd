@@ -98,11 +98,29 @@ gddl_wind_fetch:wind_fetch_and_upsert.py
 gddl_pv_fetch:pv_fetch_and_upsert.py"
 
 PY_UNITS=""
-if ! command -v python3 >/dev/null; then
-  echo "!! 缺少 python3，跳过全部 Python 服务"
+# 解析 Python 解释器绝对路径：
+#   - 先检查常见绝对路径（sudo 环境 PATH 可能不含 /usr/local/bin）
+#   - 再用 type -P 在 PATH 中搜索（type -P 跳过 alias/function，避免返回 "alias python3='...'"）
+PYBIN=""
+for cand in \
+  /usr/local/bin/python3.13 /usr/local/bin/python3.12 /usr/local/bin/python3.11 \
+  /usr/local/bin/python3 \
+  /usr/bin/python3.13 /usr/bin/python3.12 /usr/bin/python3.11 /usr/bin/python3 \
+  /bin/python3.13 /bin/python3.12 /bin/python3.11 /bin/python3 \
+  python3.13 python3.12 python3.11 python3.10 python3.9 python3; do
+  if [ -x "$cand" ]; then
+    PYBIN="$cand"; break
+  fi
+  if p="$(type -P "$cand" 2>/dev/null)" && [ -x "$p" ]; then
+    PYBIN="$p"; break
+  fi
+done
+if [ -z "$PYBIN" ]; then
+  echo "!! 找不到 python3，跳过全部 Python 服务"
 else
-  python3 -c 'import psycopg2, requests' 2>/dev/null || \
-    echo "!! 缺少 Python 依赖，请先安装：pip3 install psycopg2-binary requests"
+  echo "==> Python 解释器：$PYBIN"
+  "$PYBIN" -c 'import psycopg2, requests' 2>/dev/null || \
+    echo "!! 缺少 Python 依赖，请先安装：$PYBIN -m pip install psycopg2-binary requests"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     py_unit="${line%%:*}"
@@ -110,10 +128,13 @@ else
     if [ ! -f "$SRC_DIR/$py_script" ]; then
       continue
     fi
-    sed "s|/opt/gddl_alarm|$APP_DIR|g" "$SRC_DIR/deploy/$py_unit.service" \
+    # 替换安装目录，并把模板里硬编码的 /usr/bin/python3 替换为实际解释器路径
+    sed -e "s|/opt/gddl_alarm|$APP_DIR|g" \
+        -e "s|/usr/bin/python3|$PYBIN|g" \
+        "$SRC_DIR/deploy/$py_unit.service" \
       > "/etc/systemd/system/$py_unit.service"
     chmod 0644 "/etc/systemd/system/$py_unit.service"
-    echo "==> 已安装 $py_unit（$py_script）"
+    echo "==> 已安装 $py_unit（$py_script，Python=$PYBIN）"
     PY_UNITS="$PY_UNITS $py_unit"
   done <<EOF
 $PY_SERVICES
