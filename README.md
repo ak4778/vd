@@ -31,7 +31,7 @@ make PG_MODE=0        # SQLite 模式
 make clean            # 清理
 ```
 
-`make` 只编译 C 源文件（`main.c`, `mongoose.c`, `net.c`, `data_source.c`），生成可执行文件 `vvvv`。
+`make` 只编译 C 源文件（`main.c`, `mongoose.c`, `net.c`, `data_source.c`），生成可执行文件 `gddl_alarm`。
 
 ### 2. 前端（HTML/JS/CSS）——独立构建
 
@@ -57,7 +57,7 @@ npx tailwindcss build web_root/tailwind.css -o web_root/dist/tailwind.css
 make
 
 # 4. 运行
-./vvvv          # 或 vvvv.exe on Windows
+./gddl_alarm          # 或 gddl_alarm.exe on Windows
 ```
 
 ### 日常开发中的修改规则

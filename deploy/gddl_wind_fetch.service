@@ -1,0 +1,32 @@
+[Unit]
+Description=gddl_wind_fetch wind data fetcher (Python, writes wind_seconds_di)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 不指定 User/Group：以 systemctl 的调用者（通常是 root）身份运行
+# wind_fetch_and_upsert.py 用相对路径读 data_config.json（pgConnStr），
+# 水位线与日志写在脚本目录，因此工作目录必须是安装目录。
+WorkingDirectory=/opt/gddl_alarm
+ExecStart=/usr/bin/python3 /opt/gddl_alarm/wind_fetch_and_upsert.py
+# 常驻采集（FETCH_INTERVAL_SECONDS 默认 30s）；异常退出后自动拉起
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gddl_wind_fetch
+Environment=TZ=Asia/Shanghai
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+ProtectSystem=strict
+# 不启用 ProtectHome：就地部署时脚本目录可能位于 /root 或 /home 下，
+# ProtectHome=true 会让该目录对服务不可见（读取 data_config.json 即失败）。
+PrivateTmp=true
+# data_config.json、水位线文件、轮转日志都在这里，需可写
+ReadWritePaths=/opt/gddl_alarm
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,35 @@
+[Unit]
+Description=gddl_wind_alarm wind alarm monitor (Python, writes wind_alarm table)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 不指定 User/Group：以 systemctl 的调用者（通常是 root）身份运行
+# wind_alarm.py 用相对路径读取 data_config.json（pgConnStr），输出 CSV 与日志
+# 也写在脚本目录，所以工作目录必须是安装目录。
+WorkingDirectory=/opt/gddl_alarm
+ExecStart=/usr/bin/python3 /opt/gddl_alarm/wind_alarm.py
+# 脚本为常驻轮询（POLL_INTERVAL=30s）；异常退出后自动拉起
+Restart=always
+RestartSec=10
+# Python 默认不处理 SIGTERM 之外的行为；systemd 发 SIGTERM 即结束进程
+KillSignal=SIGTERM
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gddl_wind_alarm
+# 日志时间戳与告警时间窗统一按东八区
+Environment=TZ=Asia/Shanghai
+# 无缓冲输出，保证 journal 实时看到日志
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+ProtectSystem=strict
+# 不启用 ProtectHome：就地部署时脚本目录可能位于 /root 或 /home 下，
+# ProtectHome=true 会让该目录对服务不可见（读取 data_config.json 即失败）。
+PrivateTmp=true
+# data_config.json、告警 CSV、轮转日志都在这里，需可写
+ReadWritePaths=/opt/gddl_alarm
+
+[Install]
+WantedBy=multi-user.target
