@@ -762,6 +762,57 @@ int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
   return n;
 }
 
+// 按时间区间导出告警：ts 落在 [start, end]（闭区间），按 id 升序返回
+// （导出文件按时间从早到晚排列）。最多 max_rows 行。
+// start/end 为归一化的 'YYYY-MM-DD HH:MM:SS'，合法性由调用方校验。
+int pg_get_alarms_range(const char *start, const char *end,
+                        struct ds_alarm *rows, int max_rows) {
+  if (s_conn == NULL || rows == NULL || max_rows <= 0 ||
+      start == NULL || start[0] == '\0' || end == NULL || end[0] == '\0') {
+    return -1;
+  }
+  pg_mutex_lock();
+  if (s_conn == NULL) {
+    pg_mutex_unlock();
+    return -1;
+  }
+
+  char limbuf[16];
+  snprintf(limbuf, sizeof(limbuf), "%d", max_rows);
+  const char *vals[3] = {start, end, limbuf};
+
+  // 闭区间实现：ts < end + 1s（秒级粒度），与 Python 导出脚本语义一致
+  static const char *SQL =
+      "SELECT id, event,"
+      " COALESCE(to_char(ts, 'YYYY-MM-DD HH24:MI:SS'), ''),"
+      " COALESCE(region_company_name, ''), COALESCE(station_name, ''),"
+      " device_id, COALESCE(device_name, ''),"
+      " point_code, COALESCE(point_name, ''),"
+      " rule_code, COALESCE(alarm_type, ''),"
+      " temperature, temp_rate,"
+      " range_1h, range_20s,"
+      " alarm_value, COALESCE(detail, '')"
+      " FROM wind_alarm"
+      " WHERE ts >= $1::timestamp"
+      " AND ts < ($2::timestamp + interval '1 second')"
+      " ORDER BY id ASC LIMIT $3";
+
+  PGresult *res = PQexecParams(s_conn, SQL, 3, NULL, vals, NULL, NULL, 0);
+  if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {
+    fprintf(stderr, "PG alarm export query error: %s\n", PQerrorMessage(s_conn));
+    PQclear(res);
+    pg_mutex_unlock();
+    return -1;
+  }
+
+  int n = PQntuples(res);
+  if (n > max_rows) n = max_rows;
+  for (int i = 0; i < n; i++) alarm_fill_row(&rows[i], res, i);
+  PQclear(res);
+  pg_mutex_unlock();
+  return n;
+}
+
 // 启动预热：拉取最近 max_rows 行（旧 -> 新返回），用于初始化快照缓存与增量
 // 游标，避免服务重启后把历史告警当作新增事件重放给客户端。
 int pg_get_recent_alarms(struct ds_alarm *rows, int max_rows) {

@@ -610,6 +610,7 @@ struct async_result {
   int http_status;
   char *body;
   size_t len;
+  char *headers;  // 可选：非 NULL 时覆盖默认 JSON 响应头（CSV 导出等）
   struct async_result *next;
 };
 
@@ -634,17 +635,19 @@ static void results_lock(void) { pthread_mutex_lock(&s_results_mutex); }
 static void results_unlock(void) { pthread_mutex_unlock(&s_results_mutex); }
 #endif
 
-static void push_result(unsigned long conn_id, int http_status,
-                        char *body, size_t len) {
+static void push_result_headers(unsigned long conn_id, int http_status,
+                                char *body, size_t len, char *headers) {
   struct async_result *r = (struct async_result *) calloc(1, sizeof(*r));
   if (r == NULL) {
     if (body != NULL) free(body);
+    if (headers != NULL) free(headers);
     return;
   }
   r->conn_id = conn_id;
   r->http_status = http_status;
   r->body = body;
   r->len = len;
+  r->headers = headers;
   r->next = NULL;
   results_lock();
   if (s_results_tail != NULL) {
@@ -654,6 +657,11 @@ static void push_result(unsigned long conn_id, int http_status,
     s_results_head = s_results_tail = r;
   }
   results_unlock();
+}
+
+static void push_result(unsigned long conn_id, int http_status,
+                        char *body, size_t len) {
+  push_result_headers(conn_id, http_status, body, len, NULL);
 }
 
 static void dispatch_results(void *arg) {
@@ -668,12 +676,14 @@ static void dispatch_results(void *arg) {
     struct mg_connection *c;
     for (c = mgr->conns; c != NULL; c = c->next) {
       if (c->id == r->conn_id) {
-        mg_http_reply(c, r->http_status, s_json_header, "%.*s",
-                      (int) r->len, r->body);
+        mg_http_reply(c, r->http_status,
+                      r->headers != NULL ? r->headers : s_json_header,
+                      "%.*s", (int) r->len, r->body);
         break;
       }
     }
     if (r->body != NULL) free(r->body);
+    if (r->headers != NULL) free(r->headers);
     free(r);
     r = next;
   }
@@ -1429,6 +1439,304 @@ static void handle_alarms_get(struct mg_connection *c,
   start_thread(alarm_page_thread, w);
 }
 
+// ---- 告警 CSV 导出（/api/alarms/export?date=... 或 start=...&end=...，仅 PG 模式） ----
+// 与分页查询同一异步模型：worker 线程按时间区间查库 -> 组装 CSV（UTF-8 BOM）
+// -> 事件循环线程带附件响应头回写。行数上限防止超大导出耗尽内存。
+#define ALARM_EXPORT_MAX 20000  // 单次导出行数上限（超出部分截断）
+
+struct alarm_export_work {
+  unsigned long long conn_id;
+  char start[24];  // 归一化 'YYYY-MM-DD HH:MM:SS'
+  char end[24];    // 归一化 'YYYY-MM-DD HH:MM:SS'
+  char fname[96];  // 下载文件名（仅含日期/时间，无特殊字符）
+};
+
+// 动态增长字符串缓冲：失败后置 failed，后续写入全部跳过
+struct csv_out {
+  char *buf;
+  size_t len;
+  size_t cap;
+  int failed;
+};
+
+static void csv_reserve(struct csv_out *o, size_t extra) {
+  if (o->failed) return;
+  size_t need = o->len + extra + 1;
+  if (need <= o->cap) return;
+  size_t cap = o->cap > 0 ? o->cap : 8192;
+  while (cap < need) {
+    if (cap > (size_t) 128 * 1024 * 1024) {  // 上限 128MB
+      o->failed = 1;
+      return;
+    }
+    cap *= 2;
+  }
+  char *p = (char *) realloc(o->buf, cap);
+  if (p == NULL) {
+    o->failed = 1;
+    return;
+  }
+  o->buf = p;
+  o->cap = cap;
+}
+
+static void csv_put(struct csv_out *o, const char *s, size_t n) {
+  csv_reserve(o, n);
+  if (o->failed) return;
+  memcpy(o->buf + o->len, s, n);
+  o->len += n;
+  o->buf[o->len] = '\0';
+}
+
+static void csv_put_str(struct csv_out *o, const char *s) {
+  csv_put(o, s, strlen(s));
+}
+
+// RFC4180 字段转义：含逗号/引号/换行时整体加引号，内部引号双写
+static void csv_field(struct csv_out *o, const char *s) {
+  int quote = 0;
+  for (const char *p = s; *p != '\0'; p++) {
+    if (*p == ',' || *p == '"' || *p == '\n' || *p == '\r') {
+      quote = 1;
+      break;
+    }
+  }
+  if (!quote) {
+    csv_put_str(o, s);
+    return;
+  }
+  csv_put(o, "\"", 1);
+  for (const char *p = s; *p != '\0'; p++) {
+    if (*p == '"') csv_put(o, "\"\"", 2);
+    else csv_put(o, p, 1);
+  }
+  csv_put(o, "\"", 1);
+}
+
+// 数值列：NULL/NaN/Infinity 输出空单元格（Excel 显示为空）
+static void csv_num(struct csv_out *o, double v, const char *fmt) {
+  if (!isfinite(v)) return;
+  char tmp[64];
+  snprintf(tmp, sizeof(tmp), fmt, v);
+  csv_put_str(o, tmp);
+}
+
+static void csv_sep(struct csv_out *o) {
+  csv_put(o, ",", 1);
+}
+
+static void csv_alarm_row(struct csv_out *o, const struct ds_alarm *r) {
+  char idbuf[24];
+  snprintf(idbuf, sizeof(idbuf), "%llu", r->id);
+  csv_put_str(o, idbuf);
+  csv_sep(o);
+  csv_field(o, r->event);
+  csv_sep(o);
+  csv_field(o, r->ts);
+  csv_sep(o);
+  csv_field(o, r->region_company_name);
+  csv_sep(o);
+  csv_field(o, r->station_name);
+  csv_sep(o);
+  csv_field(o, r->device_id);
+  csv_sep(o);
+  csv_field(o, r->device_name);
+  csv_sep(o);
+  csv_field(o, r->point_code);
+  csv_sep(o);
+  csv_field(o, r->point_name);
+  csv_sep(o);
+  csv_field(o, r->rule_code);
+  csv_sep(o);
+  csv_field(o, r->alarm_type);
+  csv_sep(o);
+  csv_num(o, r->temperature, "%.2f");
+  csv_sep(o);
+  csv_num(o, r->temp_rate, "%.4f");
+  csv_sep(o);
+  csv_num(o, r->range_1h, "%.2f");
+  csv_sep(o);
+  csv_num(o, r->range_20s, "%.2f");
+  csv_sep(o);
+  csv_num(o, r->alarm_value, "%.2f");
+  csv_sep(o);
+  csv_field(o, r->detail);
+  csv_put(o, "\r\n", 2);
+}
+
+static void alarm_export_thread(void *param) {
+  struct alarm_export_work *w = (struct alarm_export_work *) param;
+  int status = 200;
+  char *body = NULL;
+  size_t len = 0;
+  char *headers = NULL;
+
+  struct ds_alarm *rows =
+      (struct ds_alarm *) calloc(ALARM_EXPORT_MAX, sizeof(*rows));
+  int n = rows == NULL ? -1 : ds_get_alarms_range(w->start, w->end, rows,
+                                                  ALARM_EXPORT_MAX);
+
+  if (n < 0) {
+    status = 503;
+    body = strdup("{\"error\":\"Alarm export unsupported or query failed\"}");
+  } else {
+    struct csv_out o;
+    memset(&o, 0, sizeof(o));
+    csv_put(&o, "\xEF\xBB\xBF", 3);  // UTF-8 BOM：Excel 直接识别中文
+    csv_put_str(&o, "事件ID,事件类型,触发时刻,区域公司,场站,设备ID,设备名称,"
+                    "测点编码,测点名称,规则,告警类型,温度,温升速率,"
+                    "1h极差,20s极差,告警值,详情\r\n");
+    for (int i = 0; i < n; i++) csv_alarm_row(&o, &rows[i]);
+    if (o.failed) {
+      free(o.buf);
+      status = 500;
+      body = strdup("{\"error\":\"Memory allocation failed\"}");
+    } else {
+      body = o.buf;
+      len = o.len;
+    }
+  }
+  if (rows != NULL) free(rows);
+
+  // 附件响应头：浏览器直接下载为 alarms_<date>.csv
+  if (status == 200) {
+    headers = (char *) malloc(256);
+    if (headers == NULL) {
+      if (body != NULL) free(body);
+      status = 500;
+      body = strdup("{\"error\":\"Memory allocation failed\"}");
+      len = 0;
+    } else {
+      snprintf(headers, 256,
+               "Content-Type: text/csv; charset=utf-8\r\n"
+               "Content-Disposition: attachment; filename=\"%s\"\r\n"
+               "Cache-Control: no-cache\r\n",
+               w->fname);
+    }
+  }
+
+  if (body != NULL) {
+    if (len == 0) len = strlen(body);
+    push_result_headers(w->conn_id, status, body, len, headers);
+  } else if (headers != NULL) {
+    free(headers);
+  }
+  free(w);
+}
+
+// 解析 'YYYY-MM-DD' 或 'YYYY-MM-DD HH:MM:SS'（第 11 位也接受 'T'/'+'），
+// 输出归一化 'YYYY-MM-DD HH:MM:SS'。仅日期时：is_end=0 取 00:00:00，
+// is_end=1 取 23:59:59（与 Python 导出脚本 --date 语义一致）。
+static int parse_ts_param(const char *s, int is_end, char *out, size_t cap) {
+  if (s == NULL || out == NULL || cap < 20) return 0;
+  size_t len = strlen(s);
+  if (len != 10 && len != 19) return 0;
+  for (int i = 0; i < 10; i++) {
+    if (i == 4 || i == 7) {
+      if (s[i] != '-') return 0;
+    } else if (s[i] < '0' || s[i] > '9') {
+      return 0;
+    }
+  }
+  int y = (s[0] - '0') * 1000 + (s[1] - '0') * 100 + (s[2] - '0') * 10 +
+          (s[3] - '0');
+  int m = (s[5] - '0') * 10 + (s[6] - '0');
+  int d = (s[8] - '0') * 10 + (s[9] - '0');
+  if (y < 2000 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) return 0;
+
+  int hh = 0, mm = 0, ss = 0;
+  if (len == 19) {
+    char sep = s[10];
+    if (sep != ' ' && sep != 'T' && sep != '+') return 0;
+    if (s[13] != ':' || s[16] != ':') return 0;
+    for (int i = 11; i < 19; i++) {
+      if (i == 13 || i == 16) continue;
+      if (s[i] < '0' || s[i] > '9') return 0;
+    }
+    hh = (s[11] - '0') * 10 + (s[12] - '0');
+    mm = (s[14] - '0') * 10 + (s[15] - '0');
+    ss = (s[17] - '0') * 10 + (s[18] - '0');
+    if (hh > 23 || mm > 59 || ss > 59) return 0;
+  } else if (is_end) {
+    hh = 23;
+    mm = 59;
+    ss = 59;
+  }
+
+  snprintf(out, cap, "%04d-%02d-%02d %02d:%02d:%02d", y, m, d, hh, mm, ss);
+  return 1;
+}
+
+// 文件名脱敏：空格/冒号替换为 '-'，避免响应头里出现特殊字符
+static void make_export_filename(char *out, size_t cap, const char *start,
+                                 const char *end) {
+  char a[32], b[32];
+  size_t j = 0;
+  for (size_t i = 0; start[i] != '\0' && j + 1 < sizeof(a); i++) {
+    a[j++] = (start[i] == ' ' || start[i] == ':') ? '-' : start[i];
+  }
+  a[j] = '\0';
+  j = 0;
+  for (size_t i = 0; end[i] != '\0' && j + 1 < sizeof(b); i++) {
+    b[j++] = (end[i] == ' ' || end[i] == ':') ? '-' : end[i];
+  }
+  b[j] = '\0';
+  snprintf(out, cap, "alarms_%s_%s.csv", a, b);
+}
+
+static void handle_alarms_export(struct mg_connection *c,
+                                 struct mg_http_message *hm) {
+  char date[24] = "", start[24] = "", end[24] = "";
+  char norm_start[24] = "", norm_end[24] = "";
+  int ok = 0;
+
+  mg_http_get_var(&hm->query, "date", date, sizeof(date));
+  if (date[0] != '\0') {
+    // 单日模式：当天 00:00:00 ~ 23:59:59
+    ok = parse_ts_param(date, 0, norm_start, sizeof(norm_start)) &&
+         parse_ts_param(date, 1, norm_end, sizeof(norm_end));
+  } else {
+    // 区间模式：start/end 均必填
+    mg_http_get_var(&hm->query, "start", start, sizeof(start));
+    mg_http_get_var(&hm->query, "end", end, sizeof(end));
+    if (start[0] != '\0' && end[0] != '\0') {
+      ok = parse_ts_param(start, 0, norm_start, sizeof(norm_start)) &&
+           parse_ts_param(end, 1, norm_end, sizeof(norm_end));
+    }
+  }
+
+  if (!ok) {
+    mg_http_reply(c, 400, s_json_header,
+                  "{\"error\":\"Invalid parameter: date=YYYY-MM-DD or "
+                  "start/end=YYYY-MM-DD[ HH:MM:SS]\"}");
+    return;
+  }
+  if (strcmp(norm_start, norm_end) > 0) {
+    mg_http_reply(c, 400, s_json_header,
+                  "{\"error\":\"Invalid range: start must not be later than "
+                  "end\"}");
+    return;
+  }
+
+  struct alarm_export_work *w =
+      (struct alarm_export_work *) calloc(1, sizeof(*w));
+  if (w == NULL) {
+    mg_http_reply(c, 500, s_json_header,
+                  "{\"error\":\"Memory allocation failed\"}");
+    return;
+  }
+  w->conn_id = c->id;
+  snprintf(w->start, sizeof(w->start), "%s", norm_start);
+  snprintf(w->end, sizeof(w->end), "%s", norm_end);
+  if (date[0] != '\0') {
+    // 单日模式文件名简洁：alarms_YYYY-MM-DD.csv
+    snprintf(w->fname, sizeof(w->fname), "alarms_%s.csv", date);
+  } else {
+    make_export_filename(w->fname, sizeof(w->fname), norm_start, norm_end);
+  }
+  start_thread(alarm_export_thread, w);
+}
+
 static void handle_login(struct mg_connection *c, struct mg_http_message *hm,
                          struct user *u) {
   // Lifted to function scope so we can scrub them on every return path.
@@ -1575,6 +1883,13 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       } else {
         c->data[0] = 'A';
         mg_ws_upgrade(c, hm, NULL);
+      }
+    } else if (mg_match(hm->uri, mg_str("/api/alarms/export"), NULL)) {
+      // 按日期导出告警 CSV（浏览器直接下载附件）
+      if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
+        mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");
+      } else {
+        handle_alarms_export(c, hm);
       }
     } else if (mg_match(hm->uri, mg_str("/api/alarms/get"), NULL)) {
       // 告警历史分页（实时页仍由 /api/alarms/ws 推送驱动）

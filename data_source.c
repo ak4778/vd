@@ -61,6 +61,8 @@ int pg_get_alarms_page(int page, int page_size,
                        int max_rows, const char *point_code,
                        const char *rule_code, const char *event);
 int pg_get_recent_alarms(struct ds_alarm *rows, int max_rows);
+int pg_get_alarms_range(const char *start, const char *end,
+                        struct ds_alarm *rows, int max_rows);
 #endif
 
 int ds_alarm_supported(void) {
@@ -107,6 +109,19 @@ int ds_get_recent_alarms(struct ds_alarm *rows, int max_rows) {
 #if defined(PG_MODE)
   return pg_get_recent_alarms(rows, max_rows);
 #else
+  (void) rows;
+  (void) max_rows;
+  return -1;
+#endif
+}
+
+int ds_get_alarms_range(const char *start, const char *end,
+                        struct ds_alarm *rows, int max_rows) {
+#if defined(PG_MODE)
+  return pg_get_alarms_range(start, end, rows, max_rows);
+#else
+  (void) start;
+  (void) end;
   (void) rows;
   (void) max_rows;
   return -1;

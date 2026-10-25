@@ -97,6 +97,11 @@ int ds_get_alarms_page(int page, int page_size, unsigned long long *total_out,
 // 启动预热：取最近 max_rows 行（旧 -> 新），用于初始化快照缓存与增量游标。
 // 返回实际行数（0 = 空表；-1 = 不支持或查询失败）
 int ds_get_recent_alarms(struct ds_alarm *rows, int max_rows);
+// 按时间区间导出告警（start/end 为 'YYYY-MM-DD HH:MM:SS'，闭区间，
+// 按 ts 升序，最多 max_rows 行）。
+// 返回实际行数（0 = 区间内无数据；-1 = 不支持或查询失败）
+int ds_get_alarms_range(const char *start, const char *end,
+                        struct ds_alarm *rows, int max_rows);
 
 #ifdef __cplusplus
 }

@@ -769,6 +769,12 @@ const ALARM_PAGE_SIZE = 50;
 const ALARM_RULE_OPTIONS = ['C01_FAULT', 'C01_HIGH', 'C01_LOW', 'C02_FROZEN', 'C03_FLUCT', 'C03_RATE', 'C04_JUMP'];
 const ALARM_EVENT_OPTIONS = ['ALARM', 'RECOVER'];
 
+// 本地日期 YYYY-MM-DD（导出默认值；不用 toISOString 以免时区偏移）
+const localDateStr = (d = new Date()) => {
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+};
+
 function Alarms({items, wsOk, alarmRx, authLost, onReauth}) {
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);       // 服务端告警总数（分页器用）
@@ -780,6 +786,11 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth}) {
   const [ruleFilter, setRuleFilter] = useState('');
   const [eventFilter, setEventFilter] = useState('');
   const [pointOptions, setPointOptions] = useState([]);  // [{code, name}]
+  // 按日期导出 CSV：默认当天（本地时区）；区间模式默认当天 00:00 ~ 23:59
+  const [exportMode, setExportMode] = useState('day');  // 'day' | 'range'
+  const [exportDate, setExportDate] = useState(() => localDateStr());
+  const [exportStart, setExportStart] = useState(() => `${localDateStr()}T00:00`);
+  const [exportEnd, setExportEnd] = useState(() => `${localDateStr()}T23:59`);
   // 过滤激活时的实时总数增量：仅统计匹配过滤条件的 WS 新行
   const [filteredRx, setFilteredRx] = useState(0);
   const seenMaxIdRef = useRef(0);
@@ -809,6 +820,36 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth}) {
     if (ruleFilter) q.push(`rule_code=${encodeURIComponent(ruleFilter)}`);
     if (eventFilter) q.push(`event=${encodeURIComponent(eventFilter)}`);
     return q.length ? '&' + q.join('&') : '';
+  };
+
+  // datetime-local（YYYY-MM-DDTHH:MM）转接口时间格式 YYYY-MM-DD HH:MM:SS
+  const toApiTs = v => {
+    if (!v) return '';
+    const s = v.replace('T', ' ');
+    return s.length === 16 ? `${s}:00` : s;
+  };
+
+  // 按日期/区间导出 CSV：走 GET 附件下载，cookie 自动携带，无需前端拼接内容
+  const exportCsv = () => {
+    let q = '';
+    let name = '';
+    if (exportMode === 'day') {
+      if (!exportDate) return;
+      q = `date=${encodeURIComponent(exportDate)}`;
+      name = `alarms_${exportDate}.csv`;
+    } else {
+      const st = toApiTs(exportStart);
+      const en = toApiTs(exportEnd);
+      if (!st || !en) return;
+      q = `start=${encodeURIComponent(st)}&end=${encodeURIComponent(en)}`;
+      name = `alarms_${st.replace(/[ :]/g, '-')}_${en.replace(/[ :]/g, '-')}.csv`;
+    }
+    const a = document.createElement('a');
+    a.href = `api/alarms/export?${q}`;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   };
 
   // 测点下拉选项：从 WS 实时列表与历史页响应中累积去重（按编码排序）。
@@ -982,6 +1023,28 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth}) {
       ${filterActive && html`<button type="button" class="alarm-filter-clear"
         onclick=${() => { setPointFilter(''); setRuleFilter(''); setEventFilter(''); }}>清除筛选<//>`}
       ${filterActive && page === 1 && html`<span class="alarm-filter-hint">第 1 页为内存实时过滤，历史页由服务端按相同条件查询<//>`}
+      <span class="alarm-export-group">
+        ${exportMode === 'day' ? html`
+          <span class="alarm-filter-label">按日期导出</span>
+          <input type="date" class="alarm-export-date" value=${exportDate}
+                 onchange=${e => setExportDate(e.target.value)}
+                 title="选择导出哪一天的告警（本地日期）" />
+        ` : html`
+          <span class="alarm-filter-label">区间导出</span>
+          <input type="datetime-local" step="1" class="alarm-export-date"
+                 value=${exportStart}
+                 onchange=${e => setExportStart(e.target.value)} title="开始时刻" />
+          <span class="alarm-export-tilde">~</span>
+          <input type="datetime-local" step="1" class="alarm-export-date"
+                 value=${exportEnd}
+                 onchange=${e => setExportEnd(e.target.value)} title="结束时刻" />
+        `}
+        <button type="button" class="alarm-filter-clear" onclick=${exportCsv}
+                title="导出所选范围为 CSV（UTF-8 BOM，Excel 可直接打开）">导出 CSV<//>
+        <button type="button" class="alarm-export-mode"
+                onclick=${() => setExportMode(m => (m === 'day' ? 'range' : 'day'))}
+                title="切换 单日 / 自定义区间">${exportMode === 'day' ? '切到区间' : '切到单日'}<//>
+      <//>
     <//>
     ${showBanner && html`<div class="alarm-new-banner" onclick=${revealNew}>↑ ${pendingNew} 条新告警，点击查看<//>`}
     <div class="flex-1 min-h-0 overflow-auto scrollbar-force bg-white ind-lightbox ind-darktable" ref=${scrollRef}>
