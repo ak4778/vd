@@ -121,6 +121,7 @@ FROZEN_MIN_SPAN = 2700    # 规则02窗口实际跨度下限(秒)。须≤W_FROZ
                           # 导致lag>900的"断采>15min"恢复分支不可达。取2700=W_FROZEN-C02_STALE_RECOVER对齐
 FROZEN_MIN_POINTS = 100   # 规则02最少样本数
 EPS = 1e-9
+ZERO_FAULT_EPS = 1e-6     # 温度测点读数≈0 视为传感器恒0故障（发电机运行温度不可能为0℃）
 W_FLUCT = 20              # 规则03窗口(秒)
 FLUCT_MIN_SPAN = 15       # 规则03窗口实际跨度下限(秒)
 FLUCT_MIN_POINTS = 3      # 规则03最少样本数（实测平均8.3s间隔，防两点毛刺）
@@ -674,6 +675,9 @@ def write_exceed_points(exceed, dev, pc, new_records):
 def classify_rule01(value, pc_cfg):
     """规则01：返回命中的规则码（优先级 故障>高温>低温），未命中返回 None。
     阈值取自该测点的 POINT_CONFIG（pc_cfg['c01_fault'/'c01_high'/'c01_low']）。"""
+    if abs(value) <= ZERO_FAULT_EPS:
+        # 恒 0 值：发电机/齿轮箱温度不可能为 0℃，属传感器或通讯故障
+        return 'C01_FAULT'
     if value >= pc_cfg['c01_fault']:
         return 'C01_FAULT'
     if value > pc_cfg['c01_high']:
@@ -888,17 +892,12 @@ def run():
         fetched, fail = fetch_all(time.time() - BOOTSTRAP_HOURS * 3600)
         now_epoch = time.time()
         ok = 0
-        for idx, (d, pc) in enumerate(tasks, 1):
+        for d, pc in tasks:
             wid = d['wid']
             items = fetched.get((wid, pc), [])
             new_recs = buffers[(wid, pc)].add_raw(items, now_epoch)
             exceed_total += write_exceed_points(exceed, dev_map[wid], pc, new_recs)
             ok += 1
-            if not items:
-                log(f"  [{idx}/{n_tasks}] {make_tag(wid, pc)}  (no data)")
-            else:
-                log(f"  [{idx}/{n_tasks}] {make_tag(wid, pc)}  "
-                    f"-> fetched={len(items)} rows, new={len(new_recs)}")
         log(f"回灌完成：序列 {ok}，拉取错误 {fail}，超温点 {exceed_total} 条，"
             f"开始实时监控（每 {POLL_INTERVAL}s 一轮）")
 
@@ -910,17 +909,12 @@ def run():
             fetched, fetch_errs = fetch_all(t0 - FETCH_LOOKBACK, t0)
 
             log(f"=== round {tick + 1} 拉取最近 {FETCH_LOOKBACK}s 数据 ===")
-            for idx, (d, pc) in enumerate(tasks, 1):
+            for d, pc in tasks:
                 wid = d['wid']
                 items = fetched.get((wid, pc), [])
                 buf = buffers[(wid, pc)]
                 new_recs = buf.add_raw(items, now_epoch)
                 exceed_total += write_exceed_points(exceed, dev_map[wid], pc, new_recs)
-                if not items:
-                    log(f"  [{idx}/{n_tasks}] {make_tag(wid, pc)}  (no data)")
-                else:
-                    log(f"  [{idx}/{n_tasks}] {make_tag(wid, pc)}  "
-                        f"-> fetched={len(items)} rows, new={len(new_recs)}")
                 latest = buf.latest()
 
                 # 无任何数据点：跳过
@@ -939,7 +933,13 @@ def run():
 
                 # 规则02：数据中断防误报 + 卡死
                 lag = now_epoch - latest[0]
-                if lag <= FROZEN_FRESHNESS:
+                if abs(latest[1]) <= ZERO_FAULT_EPS:
+                    # 恒 0 值已由 C01_FAULT 表达，C02 不再重复判定，
+                    # 否则同一故障会在样本数阈值上下抖动，反复 ALARM/RECOVER 刷屏
+                    if engine.is_active(wid, pc, 'C02_FROZEN'):
+                        engine.update(wid, pc, 'C02_FROZEN', False, now_epoch, stats=stats,
+                                      detail='恒0值改判C01_FAULT')
+                elif lag <= FROZEN_FRESHNESS:
                     active, meta = eval_frozen(buf.window_values(now_epoch, W_FROZEN), now_epoch)
                     engine.update(wid, pc, 'C02_FROZEN', active, now_epoch, stats=stats)
                 elif lag > C02_STALE_RECOVER and engine.is_active(wid, pc, 'C02_FROZEN'):

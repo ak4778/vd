@@ -235,7 +235,9 @@ INTEGRITY_MIN_RATIO = 0.5
 # 实时采集只入库 3010 行，71 分钟后同一接口能拉到 664285 行。
 # 因此在空闲期把「已过发布稳定期」的历史块按同一接口重新回拉，由 upsert
 # 幂等补齐。只在非采集时段执行，避免与实时采集抢接口和数据库连接。
-REFETCH_DELAYS = (120 * 60,)      # 块结束需早于 now-该值（秒）；可配多轮
+REFETCH_DELAYS = (75 * 60,)       # 块结束需早于 now-该值（秒）；可配多轮
+                                  # 75 分钟：实测上游约 71 分钟完成发布，10-27 对比
+                                  # 108 分钟与 150 分钟两次拉取条数完全一致
 REFETCH_BLOCK_SECONDS = 60        # 每个回补块 1 分钟（块小、可随时中断续补）
 REFETCH_WORKERS = 4               # 回补并发上限（与实时采集 FETCH_WORKERS 一致，实测上游可承受）
 REFETCH_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
