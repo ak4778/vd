@@ -69,28 +69,28 @@ DATA_SOURCE = 'db'
 POINT_CONFIG = {
     'TEMGENDRIEND': {'suffix': 'WGEN.TEMGENDRIEND', 'column': 'tem_gen_driend',
                      'name': '驱动端温度',
-                     'c01_fault': 850.0, 'c01_high': 85.0, 'c01_low': -50.0},
+                     'c01_fault': 850.0, 'c01_high': 85.0, 'c01_low': -40.0},
     'TEMGENNONDE':  {'suffix': 'WGEN.TEMGENNONDE',  'column': 'tem_gen_nonde',
                      'name': '非驱动端温度',
-                     'c01_fault': 850.0, 'c01_high': 85.0, 'c01_low': -50.0},
+                     'c01_fault': 850.0, 'c01_high': 85.0, 'c01_low': -40.0},
     'TEMGENSEN1':   {'suffix': 'WGEN.GENSENTMP1',   'column': 'tem_gen_sen1',
                      'name': '定子U相线圈温度',
-                     'c01_fault': 850.0, 'c01_high': 135.0, 'c01_low': -50.0},
+                     'c01_fault': 850.0, 'c01_high': 135.0, 'c01_low': -40.0},
     'TEMGENSEN2':   {'suffix': 'WGEN.GENSENTMP2',   'column': 'tem_gen_sen2',
                      'name': '定子V相线圈温度',
-                     'c01_fault': 850.0, 'c01_high': 135.0, 'c01_low': -50.0},
+                     'c01_fault': 850.0, 'c01_high': 135.0, 'c01_low': -40.0},
     'TEMGENSEN3':   {'suffix': 'WGEN.GENSENTMP3',   'column': 'tem_gen_sen3',
                      'name': '定子W相线圈温度',
-                     'c01_fault': 850.0, 'c01_high': 135.0, 'c01_low': -50.0},
+                     'c01_fault': 850.0, 'c01_high': 135.0, 'c01_low': -40.0},
     'TEMGENSTAU':   {'suffix': 'WGEN.TEMGENSTAU',   'column': 'tem_gen_stau',
                      'name': '定子U相线圈温度',
-                     'c01_fault': 850.0, 'c01_high': 135.0, 'c01_low': -50.0},
+                     'c01_fault': 850.0, 'c01_high': 135.0, 'c01_low': -40.0},
     'TEMGENSTAV':   {'suffix': 'WGEN.TEMGENSTAV',   'column': 'tem_gen_stav',
                      'name': '定子V相线圈温度',
-                     'c01_fault': 850.0, 'c01_high': 135.0, 'c01_low': -50.0},
+                     'c01_fault': 850.0, 'c01_high': 135.0, 'c01_low': -40.0},
     'TEMGENSTAW':   {'suffix': 'WGEN.TEMGENSTAW',   'column': 'tem_gen_staw',
                      'name': '定子W相线圈温度',
-                     'c01_fault': 850.0, 'c01_high': 135.0, 'c01_low': -50.0},
+                     'c01_fault': 850.0, 'c01_high': 135.0, 'c01_low': -40.0},
 }
 POINT_CODES = tuple(POINT_CONFIG.keys())
 
@@ -134,10 +134,10 @@ HEARTBEAT_TICKS = 5       # 每5轮(约5分钟)打印一次心跳
 
 # 报警类型统一格式：01-绝对值报警 / 02-死值校验 / 03-突变报警
 ALARM_TYPE_MAP = {
-    'C01_FAULT': '01-绝对值报警',
-    'C01_HIGH': '01-绝对值报警',
-    'C01_LOW': '01-绝对值报警',
-    'C02_FROZEN': '02-死值校验',
+    'C01_FAULT': '01-绝对值报警',   # 故障码阈值越限（>= c01_fault 如 850℃）
+    'C01_HIGH':  '01-绝对值报警',   # 高温越限（> c01_high）
+    'C01_LOW':   '01-绝对值报警',   # 低温越限（<= c01_low）
+    'C02_FROZEN':'02-死值校验',
     'C03_FLUCT': '03-突变报警',
 }
 
@@ -673,11 +673,11 @@ def write_exceed_points(exceed, dev, pc, new_records):
 
 # ============================== 规则判定 ==============================
 def classify_rule01(value, pc_cfg):
-    """规则01：返回命中的规则码（优先级 故障>高温>低温），未命中返回 None。
-    阈值取自该测点的 POINT_CONFIG（pc_cfg['c01_fault'/'c01_high'/'c01_low']）。"""
+    """规则01：返回命中的规则码（故障码阈值 > 高温 > 低温），未命中返回 None。
+    恒0值（abs(value) <= ZERO_FAULT_EPS）独立为 C01_ZERO（04-传感器故障），
+    不并入绝对值报警，因为发电机运行温度不可能为 0℃，属传感器/通讯故障而非温度越限。"""
     if abs(value) <= ZERO_FAULT_EPS:
-        # 恒 0 值：发电机/齿轮箱温度不可能为 0℃，属传感器或通讯故障
-        return 'C01_FAULT'
+        return 'C01_ZERO'
     if value >= pc_cfg['c01_fault']:
         return 'C01_FAULT'
     if value > pc_cfg['c01_high']:
@@ -930,6 +930,9 @@ def run():
                 stats = compute_stats(buf, now_epoch)
 
                 # 规则01：越限（阈值取自该测点 POINT_CONFIG）
+                # 注意：恒0传感器故障（C01_ZERO / 04-传感器故障）不输出到 CSV/PG，
+                # classify_rule01 仍能识别它但这里跳过，仅内部逻辑（C02 防抖动）
+                # 通过 abs(value) <= ZERO_FAULT_EPS 直接判断，不依赖引擎状态。
                 pc_cfg = POINT_CONFIG[pc]
                 hit_code = classify_rule01(latest[1], pc_cfg)
                 for code in ('C01_FAULT', 'C01_HIGH', 'C01_LOW'):
@@ -939,11 +942,11 @@ def run():
                 # 规则02：数据中断防误报 + 卡死
                 lag = now_epoch - latest[0]
                 if abs(latest[1]) <= ZERO_FAULT_EPS:
-                    # 恒 0 值已由 C01_FAULT 表达，C02 不再重复判定，
+                    # 恒0值属传感器故障，不触发 C02 死值校验（也不单独输出告警），
                     # 否则同一故障会在样本数阈值上下抖动，反复 ALARM/RECOVER 刷屏
                     if engine.is_active(wid, pc, 'C02_FROZEN'):
                         engine.update(wid, pc, 'C02_FROZEN', False, now_epoch, stats=stats,
-                                      detail='恒0值改判C01_FAULT')
+                                      detail='恒0传感器故障，不判死值')
                 elif lag <= FROZEN_FRESHNESS:
                     # 以最新数据点 epoch 为窗口参考，补偿采集延迟
                     active, meta = eval_frozen(
