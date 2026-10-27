@@ -9,8 +9,8 @@
 --   输出粒度: 设备 × 时次（每行 = 一台逆变器在一个 1 小时窗口的异常汇总）
 --
 -- ★ 复用说明（换日期只改这里）:
---   本文件日期硬编码为 2026-10-19, 复用只需改 v CTE 内的 8 处 TIMESTAMPTZ 字面量:
---     · 2 处日分区边界:   ts >= '2026-10-19 10:00:00+08' / ts < '2026-10-19 16:00:00+08'
+--   本文件日期硬编码为 2026-10-26, 复用只需改 v CTE 内的 8 处 TIMESTAMPTZ 字面量:
+--     · 2 处日分区边界:   ts >= '2026-10-26 10:00:00+08' / ts < '2026-10-26 16:00:00+08'
 --       (与 3 个窗口的外边界重合, 仅用于收紧分区裁剪; 实际过滤仍由下方 3 个窗口决定)
 --     · 6 处时间窗口边界: 3 个窗口 × 起止各 1 (10-11 / 14-15 / 15-16)
 --   跨多日查询: 把 pv_string_branch 换成具体日分区表 pv_string_branch_YYYYMMDD 并逐日跑,
@@ -53,20 +53,20 @@ v AS (                                                          -- 秒级事实�
         b.point_value
     FROM pv_string_branch b
     WHERE b.point_code ~ '^STRING_BRANCH[0-9]{1,4}_A$'          -- 大写正则; 对应 ODPS 的 4 个 GLOB
-      AND b.ts >= TIMESTAMPTZ '2026-10-19 10:00:00+08'          -- ★事实表日分区下界 (含)
-      AND b.ts <  TIMESTAMPTZ '2026-10-19 16:00:00+08'          -- ★事实表日分区上界 (不含)
-      AND ( (b.ts >= TIMESTAMPTZ '2026-10-19 10:00:00+08'
-             AND b.ts <  TIMESTAMPTZ '2026-10-19 11:00:00+08')   -- 窗口1: 10-11
-         OR (b.ts >= TIMESTAMPTZ '2026-10-19 14:00:00+08'
-             AND b.ts <  TIMESTAMPTZ '2026-10-19 15:00:00+08')   -- 窗口2: 14-15
-         OR (b.ts >= TIMESTAMPTZ '2026-10-19 15:00:00+08'
-             AND b.ts <  TIMESTAMPTZ '2026-10-19 16:00:00+08') ) -- 窗口3: 15-16
+      AND b.ts >= TIMESTAMPTZ '2026-10-26 10:00:00+08'          -- ★事实表日分区下界 (含)
+      AND b.ts <  TIMESTAMPTZ '2026-10-26 16:00:00+08'          -- ★事实表日分区上界 (不含)
+      AND ( (b.ts >= TIMESTAMPTZ '2026-10-26 10:00:00+08'
+             AND b.ts <  TIMESTAMPTZ '2026-10-26 11:00:00+08')   -- 窗口1: 10-11
+         OR (b.ts >= TIMESTAMPTZ '2026-10-26 14:00:00+08'
+             AND b.ts <  TIMESTAMPTZ '2026-10-26 15:00:00+08')   -- 窗口2: 14-15
+         OR (b.ts >= TIMESTAMPTZ '2026-10-26 15:00:00+08'
+             AND b.ts <  TIMESTAMPTZ '2026-10-26 16:00:00+08') ) -- 窗口3: 15-16
 ),
 bm AS (                                                         -- ★1小时窗口桶化: 每支路在每个1小时窗口内把多秒聚合
     SELECT
         v.device_id,
         v.point_code,
-        date_trunc('hour', v.ts AT TIME ZONE 'Asia/Shanghai') AS ts,  -- 1小时桶: 分秒归零 (如 2026-10-19 10:00:00)
+        date_trunc('hour', v.ts AT TIME ZONE 'Asia/Shanghai') AS ts,  -- 1小时桶: 分秒归零 (如 2026-10-26 10:00:00)
         AVG(v.point_value) FILTER (WHERE v.point_value <= 15)
             AS point_value,                                     -- 支路窗口均值: x<=15 (含 0A 与负值) 的秒平均; >15A 剔除
         COUNT(*) FILTER (WHERE v.point_value < 0)
@@ -125,7 +125,7 @@ SELECT
     site_id,
     device_id,
     inverter_name,
-    ts,                                                         -- 窗口起始时刻 (如 2026-10-19 10:00:00)
+    ts,                                                         -- 窗口起始时刻 (如 2026-10-26 10:00:00)
     time_window,                                                -- 时次标签 ('10:00-11:00' 等)
     total_branch_cnt,                                           -- 上报支路总数
     neg_branch_cnt,                                             -- (1) 有负值电流的支路数

@@ -51,7 +51,7 @@ API_URL = 'http://10.65.78.65:18082/queryData'
 API_TOKEN = '775823708c6a807f3fe2eb801287cf71ff31ba00976045788497045348eddcf9'
 DATA_STB = 'ods_ly_data_hub_gfmjsj_new'          # type=1029 数据表（光伏）
 PAGE_SIZE = 1000   # 服务端对大响应中途断连，1000 实测稳定
-TIMEOUT = 60        # 32 个 pattern 下回补块数据量翻倍，上游单查询需 60s+，放宽超时减少无意义重试
+TIMEOUT = 60        # 40 个 pattern 下回补块数据量翻倍，上游单查询需 60s+，放宽超时减少无意义重试
 MAX_RETRIES = 3
 RETRY_INTERVAL = 5
 
@@ -59,11 +59,12 @@ RETRY_INTERVAL = 5
 # 测点 LIKE 模式列表（不含 GFMJ1_ 前缀），接口 parameter = GFMJ1_%{pattern}
 # 每个 pattern 中的字面前缀（% 之前的部分）用于 parse_tag 定位 inverter_id
 #
-# 拆成 32 个精确组串号（不用单通配 STRING_BRANCH%_A）：
+# 拆成 40 个精确组串号（不用单通配 STRING_BRANCH%_A）：
 # 单通配模式下一个请求匹配全部 14037 台逆变器的所有组串，响应体过大，
-# 早上数据高峰期触发 API 大响应断连/ReadTimeout；拆分后单请求响应小 32 倍，
+# 早上数据高峰期触发 API 大响应断连/ReadTimeout；拆分后单请求响应小 40 倍，
 # 与 wind_fetch 的 19 后缀分散模式一致。
-POINT_PATTERNS = [f'STRING_BRANCH{i}_A' for i in range(1, 33)]  # 组串电流 1~32
+# 2026-10 确认接口存在 33~40 号组串（24 台 8 位短码逆变器，均在白名单内），扩展到 40。
+POINT_PATTERNS = [f'STRING_BRANCH{i}_A' for i in range(1, 41)]  # 组串电流 1~40
 # 从 patterns 自动提取测点前缀（% 之前的字面部分），用于 tagName 解析
 POINT_PREFIXES = [p[:p.index('%')] if '%' in p else p for p in POINT_PATTERNS]
 
@@ -135,6 +136,11 @@ def ingest_messages(messages, wl=None):
             continue
         dev, pc, val, ts = parsed
         if dev not in wl:
+            continue
+        # 33 号及以上组串仅绥中屋顶场站（load_extended_whitelist）入库，其余丢弃
+        m = _BRANCH_RE.match(pc)
+        if m and int(m.group(1)) > BASE_MAX_BRANCH \
+                and dev not in load_extended_whitelist():
             continue
         # 未来时间防御 + 采集时段硬过滤
         try:
@@ -321,8 +327,38 @@ def load_whitelist():
     return ids
 
 
-# ---------------- 分区维护（30 天保留） ----------------
-RETENTION_DAYS = 30
+# ---------------- 扩展组串（33~40）仅限绥中屋顶分布式场站 ----------------
+# 该场站（3 箱变 × 8 台 = 24 台）为 40 路组串机型；其他场站只采 1~32 号组串，
+# 即便将来其他场站出现 >32 号组串的数据也直接丢弃，不入库。
+EXTENDED_BRANCH_STATION_ID = 'c12sYPBD'   # 绥中电厂场内屋顶分布式光伏
+BASE_MAX_BRANCH = 32
+_BRANCH_RE = re.compile(r'^STRING_BRANCH(\d+)_A$')
+_extended_wl_cache = None
+
+
+def load_extended_whitelist():
+    """读取允许 33~40 号组串的逆变器集合（绥中屋顶场站，进程内缓存）。"""
+    global _extended_wl_cache
+    if _extended_wl_cache is not None:
+        return _extended_wl_cache
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(f'SELECT inverter_id FROM {TABLE_DEVICE} WHERE station_id = %s',
+                    (EXTENDED_BRANCH_STATION_ID,))
+        ids = {r[0].strip().upper() for r in cur.fetchall()
+               if r[0] and r[0].strip()}
+        cur.close()
+    finally:
+        conn.close()
+    _extended_wl_cache = ids
+    log.info('扩展组串白名单: 场站 %s 共 %s 台逆变器可采 33~%d 号组串',
+             EXTENDED_BRANCH_STATION_ID, len(ids), len(POINT_PATTERNS))
+    return ids
+
+
+# ---------------- 分区维护（7 天保留） ----------------
+RETENTION_DAYS = 7
 
 
 def ensure_partitions(future_days=7):
@@ -534,6 +570,7 @@ def fetch_and_ingest_window(start, end, workers=None):
     if not jobs:
         return 0, 0
     wl = load_whitelist()  # 提前填充缓存，避免子线程首次 ingest 时竞争查询
+    load_extended_whitelist()
     total_fetched = 0
     total_ingested = 0
     with ThreadPoolExecutor(max_workers=min(w, len(jobs))) as pool:
