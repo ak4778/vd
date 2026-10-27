@@ -1,0 +1,3 @@
+SELECT usename, client_addr, count(*) AS conn_count
+FROM pg_stat_activity
+GROUP BY usename, client_addr;
