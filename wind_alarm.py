@@ -708,7 +708,10 @@ def compute_stats(buf, now_epoch):
     latest = buf.latest()
     if not latest:
         return None
-    pts = buf.window_values(now_epoch, W_FROZEN) or []
+    # 以最新数据点的 epoch 作为窗口参考，而非 now_epoch：
+    # 数据采集有秒~分钟级延迟（p99≈188s），用 now_epoch 会让小窗口（20s）取不到数据
+    ref_epoch = latest[0]
+    pts = buf.window_values(ref_epoch, W_FROZEN) or []
     # 温升速率：当前值 vs 前一个点的差值/时间差
     rate = None
     if len(pts) >= 2:
@@ -721,7 +724,7 @@ def compute_stats(buf, now_epoch):
     if pts:
         r1h = max(v for _, v in pts) - min(v for _, v in pts)
     # 20秒极差
-    pts20 = buf.window_values(now_epoch, W_FLUCT) or []
+    pts20 = buf.window_values(ref_epoch, W_FLUCT) or []
     r20s = None
     if pts20:
         r20s = max(v for _, v in pts20) - min(v for _, v in pts20)
@@ -737,8 +740,10 @@ def compute_stats(buf, now_epoch):
 def eval_fluct_tick(buf, now_epoch, engine, wid, pc, stats):
     """规则03：20秒 max-min>10 且持续>=5秒（按数据点ts计量，连续状态保存在引擎上）。"""
     key = (wid, pc, 'C03_FLUCT')
-    win = buf.window_values(now_epoch, W_FLUCT)
     latest = buf.latest()
+    # 以最新数据点 epoch 为窗口参考，补偿采集延迟（p99≈188s）
+    ref_epoch = latest[0] if latest else now_epoch
+    win = buf.window_values(ref_epoch, W_FLUCT)
     if not win or latest is None:
         cond = False
     else:
@@ -748,7 +753,7 @@ def eval_fluct_tick(buf, now_epoch, engine, wid, pc, stats):
         n = len(win)
         cond = span >= FLUCT_MIN_SPAN and n >= FLUCT_MIN_POINTS and (max(vals) - min(vals)) > FLUCT_RANGE
 
-    latest_epoch = latest[0] if latest else now_epoch
+    latest_epoch = ref_epoch
     if cond:
         start = engine.streak_start.get(key)
         if start is None:
@@ -940,7 +945,9 @@ def run():
                         engine.update(wid, pc, 'C02_FROZEN', False, now_epoch, stats=stats,
                                       detail='恒0值改判C01_FAULT')
                 elif lag <= FROZEN_FRESHNESS:
-                    active, meta = eval_frozen(buf.window_values(now_epoch, W_FROZEN), now_epoch)
+                    # 以最新数据点 epoch 为窗口参考，补偿采集延迟
+                    active, meta = eval_frozen(
+                        buf.window_values(latest[0], W_FROZEN), now_epoch)
                     engine.update(wid, pc, 'C02_FROZEN', active, now_epoch, stats=stats)
                 elif lag > C02_STALE_RECOVER and engine.is_active(wid, pc, 'C02_FROZEN'):
                     # 断采超15分钟：显式恢复，避免告警永久挂起（滞后5~15分钟保持状态防抖动）
