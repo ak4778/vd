@@ -1889,6 +1889,24 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
       } else {
         mg_http_reply(c, 200, s_json_header, "{\"mode\":\"%s\",\"available\":%d}", DS_MODE, ds_is_available());
       }
+      // /api/time is PUBLIC: the frontend header clock syncs to the server's
+      // wall clock (and therefore the server's TZ, e.g. Asia/Shanghai) instead
+      // of trusting the browser's local timezone, which may differ.
+    } else if (mg_match(hm->uri, mg_str("/api/time"), NULL)) {
+      if (mg_strcmp(hm->method, mg_str("GET")) != 0) {
+        mg_http_reply(c, 405, s_json_header, "{\"error\":\"Method Not Allowed\"}");
+      } else {
+        time_t now = time(NULL);
+        struct tm tmv;
+#if defined(_WIN32)
+        localtime_s(&tmv, &now);
+#else
+        localtime_r(&now, &tmv);
+#endif
+        char tb[32];
+        strftime(tb, sizeof(tb), "%Y-%m-%d %H:%M:%S", &tmv);
+        mg_http_reply(c, 200, s_json_header, "{\"now\":\"%s\",\"epoch\":%ld}", tb, (long) now);
+      }
       // ALL OTHER /api/* ENDPOINTS REQUIRE AUTHENTICATION: reject u==NULL here,
       // BEFORE any route handler runs (prevents "route order accidentally skips auth" bugs).
     } else if (mg_match(hm->uri, mg_str("/api/#"), NULL) && u == NULL) {

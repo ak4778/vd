@@ -18,7 +18,48 @@ function fetchWithTimeout(url, options = {}) {
 
 const Logo = props => html`<svg class=${props.class} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12.87 12.85"><defs><style>.ll-cls-1{fill:none;stroke:#000;stroke-miterlimit:10;stroke-width:0.5px;}</style></defs><g id="Layer_2" data-name="Layer 2"><g id="Layer_1-2" data-name="Layer 1"><path class="ll-cls-1" d="M12.62,1.82V8.91A1.58,1.58,0,0,1,11,10.48H4a1.44,1.44,0,0,1-1-.37A.69.69,0,0,1,2.84,10l-.1-.12a.81.81,0,0,1-.15-.48V5.57a.87.87,0,0,1,.86-.86H4.73V7.28a.86.86,0,0,0,.86.85H9.42a.85.85,0,0,0,.85-.85V3.45A.86.86,0,0,0,10.13,3,.76.76,0,0,0,10,2.84a.29.29,0,0,0-.12-.1,1.49,1.49,0,0,0-1-.37H2.39V1.82A1.57,1.57,0,0,1,4,.25H11A1.57,1.57,0,0,1,12.62,1.82Z"/><path class="ll-cls-1" d="M10.48,10.48V11A1.58,1.58,0,0,1,8.9,12.6H1.82A1.57,1.57,0,0,1,.25,11V3.94A1.57,1.57,0,0,1,1.82,2.37H8.9a1.49,1.49,0,0,1,1,.37l.12.1a.76.76,0,0,1,.11.14.86.86,0,0,1,.14.47V7.28a.85.85,0,0,1-.85.85H8.13V5.57a.86.86,0,0,0-.85-.86H3.45a.87.87,0,0,0-.86.86V9.4a.81.81,0,0,0,.15.48l.1.12a.69.69,0,0,0,.13.11,1.44,1.44,0,0,0,1,.37Z"/></g></g></svg>`;
 
+// 服务器时钟：以 /api/time 返回的 epoch（服务端 UTC 时间戳，与时区无关）为计时基准，
+// 固定按 UTC+08:00 渲染成北京时间。这样无论服务器 systemd/OS 的 TZ 是 Asia/Shanghai
+// 还是 UTC、也无论浏览器本地时区是什么，顶部显示的都是北京时间，不会差 8 小时。
+// 每秒自增显示、每 30 秒重新对齐（同步成功后立即刷新，避免首屏空 1 秒）。
+function useServerClock() {
+  const [text, setText] = useState('');
+  const baseRef = useRef({ serverMs: 0, localMs: 0 });
+  useEffect(() => {
+    let alive = true;
+    const BEIJING_OFFSET_MS = 8 * 3600 * 1000;
+    const p = n => String(n).padStart(2, '0');
+    const fmt = ms => {
+      const d = new Date(ms + BEIJING_OFFSET_MS);
+      return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} `
+        + `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+    };
+    const paint = () => {
+      const { serverMs, localMs } = baseRef.current;
+      if (alive && serverMs) setText(fmt(serverMs + (Date.now() - localMs)));
+    };
+    const sync = async () => {
+      try {
+        const r = await fetch('api/time', { cache: 'no-store' });
+        if (!r.ok) return;
+        const j = await r.json();
+        const ms = Number(j.epoch) * 1000;
+        if (alive && ms > 0) {
+          baseRef.current = { serverMs: ms, localMs: Date.now() };
+          paint();
+        }
+      } catch (e) { /* 忽略：网络抖动时继续用上一次基准自增 */ }
+    };
+    sync();
+    const syncTimer = setInterval(sync, 30000);
+    const tickTimer = setInterval(paint, 1000);
+    return () => { alive = false; clearInterval(syncTimer); clearInterval(tickTimer); };
+  }, []);
+  return text;
+}
+
 function Header({logout, user, setShowSidebar, showSidebar, theme, toggleTheme}) {
+  const serverTime = useServerClock();
   return html`
 <div class="bg-white ind-header sticky top-0 z-[48] xw-full border-b py-2 ${showSidebar && 'pl-40'} transition-all duration-300 transform">
   <div class="px-2 w-full py-0 my-0 flex items-center">
@@ -28,6 +69,8 @@ function Header({logout, user, setShowSidebar, showSidebar, theme, toggleTheme})
     <div class="flex flex-1 gap-x-4 self-stretch lg:gap-x-6">
       <div class="relative flex flex-1"><//>
       <div class="flex items-center gap-x-4 lg:gap-x-6">
+        <span class="text-sm text-slate-400 tabular-nums" title="服务器时间">${serverTime}<//>
+        <div class="hidden lg:block lg:h-4 lg:w-px lg:bg-gray-200" aria-hidden="true"><//>
         <span class="text-sm text-slate-400">logged in as: ${user}<//>
         <div class="hidden lg:block lg:h-4 lg:w-px lg:bg-gray-200" aria-hidden="true"><//>
         <${Button} title=${theme === 'ind' ? '经典风格' : '工业风格'} icon=${theme === 'ind' ? Icons.desktop : Icons.bolt} onclick=${toggleTheme} />
