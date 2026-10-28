@@ -15,7 +15,7 @@
   01 越限：v >= c01_fault(传感器故障) / v > c01_high(高温) / v <= c01_low(探头失效码)，逐点即时判定
   02 卡死：1 小时内所有点完全相同(max-min=0)，且窗口真实覆盖近1小时、数据新鲜
   03 波动：20 秒内 max-min > 10℃，且该状态持续 >= 5 秒（按数据点 ts 计量）
-  数据中断：不单独输出告警；断采>15分钟时显式恢复 C02_FROZEN，防止告警永久挂起
+  数据中断：不单独输出告警；断采>30分钟时显式恢复 C02_FROZEN，防止告警永久挂起
 
 数据存放：
   - 原始测点：内存滑窗（每台×测点 deque 保留近 1 小时），不落盘
@@ -105,6 +105,10 @@ EXCEED_CSV = os.path.join(OUTPUT_DIR, "fjmjsj_temgende_exceed.csv")  # 超温原
 
 POLL_INTERVAL = 30        # 主循环轮询周期（秒）
 FETCH_LOOKBACK = 90       # 每轮拉取最近多少秒（重叠窗口，防延迟/漏点）
+# 补拉窗口上限（秒）：上游延迟发布时，窗口起点自动回追到「最落后的活跃序列」，
+# 把迟到的点补进滑窗；滞后超过该上限的序列放弃补拉（超温 CSV 会乱序追加），
+# 防止永久掉线设备把查询窗口无限拉大。只补数据，不改三条规则的判定逻辑。
+CATCHUP_MAX_SECONDS = 1200
 BOOTSTRAP_HOURS = 1       # 启动回灌历史小时数（规则02启动即可判）
 MAX_WORKERS = 24          # 拉取并发数
 MAX_RETRIES = 3
@@ -116,9 +120,9 @@ PAGE_SIZE = 5000
 # C01 绝对值阈值（c01_fault/high/low）已迁入 POINT_CONFIG，按测点独立配置。
 # 以下为检测时序类参数，各测点共享。
 W_FROZEN = 3600           # 规则02窗口(秒)
-FROZEN_MIN_SPAN = 2700    # 规则02窗口实际跨度下限(秒)。须≤W_FROZEN-FROZEN_FRESHNESS(=3300)：
-                          # 断采时span=3600-lag，阈值过高会在lag≈100s先跌破阈值提前RECOVER，
-                          # 导致lag>900的"断采>15min"恢复分支不可达。取2700=W_FROZEN-C02_STALE_RECOVER对齐
+FROZEN_MIN_SPAN = 2700    # 规则02窗口实际跨度下限(秒)：1小时窗口内必须有≥45分钟的真实数据
+                          # 才判定，防稀疏/断采数据凑够点数就误判。窗口以最新数据点 ts 回溯
+                          # （见 compute_stats），跨度与采集延迟 lag 无关，故与新鲜度阈值解耦。
 FROZEN_MIN_POINTS = 100   # 规则02最少样本数
 EPS = 1e-9
 ZERO_FAULT_EPS = 1e-6     # 温度测点读数≈0 视为传感器恒0故障（发电机运行温度不可能为0℃）
@@ -127,8 +131,14 @@ FLUCT_MIN_SPAN = 15       # 规则03窗口实际跨度下限(秒)
 FLUCT_MIN_POINTS = 3      # 规则03最少样本数（实测平均8.3s间隔，防两点毛刺）
 FLUCT_RANGE = 10.0        # max-min 阈值(℃)
 SUSTAIN_SEC = 5           # 规则03持续秒数
-FROZEN_FRESHNESS = 300    # 规则02仅在最新点滞后<5分钟时判定（正常gap p99≈188s）
-C02_STALE_RECOVER = 900   # C02告警后断采超过15分钟 -> 显式恢复（滞后5~15分钟保持状态防抖动）
+# 规则02新鲜度阈值(秒)：最新点滞后不超过该值才判定。
+# 上游发布延迟实测 p99≈188s、慢发布设备可达 10~20 分钟（如峰岳 2C04），
+# 取 1200 与补拉上限 CATCHUP_MAX_SECONDS 对齐：滞后期内数据能被补进滑窗，
+# 判定窗口按最新点 ts 回溯，判的就是同一段真实数据，只是结论晚到。
+FROZEN_FRESHNESS = 1200
+# C02告警后最新点滞后超过该值 -> 显式恢复，避免告警永久挂起。
+# 须明显大于 FROZEN_FRESHNESS：中间区间（1200~1800s）保持状态防抖动。
+C02_STALE_RECOVER = 1800
 ALARM_COOLDOWN = 600      # 同类告警冷却(秒)，恢复后可重新告警
 HEARTBEAT_TICKS = 5       # 每5轮(约5分钟)打印一次心跳
 
@@ -775,13 +785,15 @@ def fetch_one(dev, pc, start_str, end_str=None):
         return dev['wid'], pc, [], e
 
 
-def fetch_round_db(conn, start_dt, end_dt, wid_upper, upper2wid):
+def fetch_round_db(conn, start_dt, end_dt, wid_upper, upper2wid, skip_upto=None):
     """db 模式：一条 SQL 拉窗口内全部白名单设备的两个温度固定列。
 
     相比 api 模式的「设备×测点」N*2 个请求，这里只有一次查询；宽表行
     (device_id, ts, tem_gen_driend, tem_gen_nonde) 在 Python 侧按非 NULL
     列 unpivot 成与接口一致的 {'ts', 'pointValue'} 列表。
     device_id 入库统一大写，经 upper2wid 映射回 wind_device 白名单原始 id。
+    skip_upto：{(wid, pc): epoch}，该序列已见过的最新点 epoch，
+    ts <= 它的点直接跳过（补拉窗口内绝大多数是旧点，提前跳过省解析）。
     返回 {(wid_原始, pc): [{'ts','pointValue'}, ...]}（无数据的 key 不出现）。
     """
     cols = [POINT_CONFIG[pc]['column'] for pc in POINT_CODES]  # 内部配置，无注入面
@@ -801,11 +813,19 @@ def fetch_round_db(conn, start_dt, end_dt, wid_upper, upper2wid):
             if wid is None:
                 continue
             ts_str = ts.strftime(TS_FMT)
-            for pc, value in zip(POINT_CODES, values):
-                if value is None:
-                    continue
-                grouped.setdefault((wid, pc), []).append(
-                    {'ts': ts_str, 'pointValue': float(value)})
+            if skip_upto is not None:
+                ts_ep = ts.timestamp()
+                for pc, value in zip(POINT_CODES, values):
+                    if value is None or ts_ep <= skip_upto.get((wid, pc), 0):
+                        continue
+                    grouped.setdefault((wid, pc), []).append(
+                        {'ts': ts_str, 'pointValue': float(value)})
+            else:
+                for pc, value in zip(POINT_CODES, values):
+                    if value is None:
+                        continue
+                    grouped.setdefault((wid, pc), []).append(
+                        {'ts': ts_str, 'pointValue': float(value)})
     finally:
         cur.close()
     return grouped
@@ -840,9 +860,10 @@ def run():
     log(f"数据来源 DATA_SOURCE={DATA_SOURCE}"
         + (f"（{TABLE_SECONDS} 固定列）" if DATA_SOURCE == 'db' else '（queryData 接口）'))
 
-    def fetch_all(start_epoch, end_epoch=None):
+    def fetch_all(start_epoch, end_epoch=None, skip_upto=None):
         """统一拉取入口，返回 ({(wid, pc): items}, 错误数)。
-        无数据的 (wid, pc) 由调用方按空列表处理。"""
+        无数据的 (wid, pc) 由调用方按空列表处理。
+        skip_upto 仅 db 模式使用：{(wid, pc): 已见最新点 epoch}，见 fetch_round_db。"""
         if DATA_SOURCE == 'api':
             start_str = datetime.fromtimestamp(start_epoch).strftime(TS_FMT)
             end_str = (datetime.fromtimestamp(end_epoch).strftime(TS_FMT)
@@ -872,7 +893,8 @@ def run():
                 log(f"PG 重连失败，本轮跳过（下轮重试）: {e}")
                 return {}, 1
         try:
-            return fetch_round_db(pg_conn, start_dt, end_dt, wid_upper, upper2wid), 0
+            return fetch_round_db(pg_conn, start_dt, end_dt, wid_upper, upper2wid,
+                                  skip_upto), 0
         except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
             # 连接失效：关掉旧连接置空，本轮空过，下轮重建（重连失败不崩进程）
             log(f"PG 连接异常，下轮重连重试: {e}")
@@ -911,9 +933,32 @@ def run():
             t0 = time.time()
             now_epoch = t0
 
-            fetched, fetch_errs = fetch_all(t0 - FETCH_LOOKBACK, t0)
+            # 补拉窗口：起点回追到「最落后的活跃序列」的最新点，上限
+            # CATCHUP_MAX_SECONDS；全部序列都在正常节奏时窗口 = FETCH_LOOKBACK，
+            # 与改动前行为一致。滞后超上限的序列不参与起点计算（放弃补拉）。
+            floor_ep = t0 - CATCHUP_MAX_SECONDS
+            lag_most = None
+            skip_upto = {}
+            for (wid_, pc_), b in buffers.items():
+                lt = b.latest()
+                if lt is None:
+                    continue
+                skip_upto[(wid_, pc_)] = lt[0]
+                if lt[0] >= floor_ep and (lag_most is None or lt[0] < lag_most):
+                    lag_most = lt[0]
+            start_ep = t0 - FETCH_LOOKBACK
+            if lag_most is not None and lag_most < start_ep:
+                start_ep = lag_most
 
-            log(f"=== round {tick + 1} 拉取最近 {FETCH_LOOKBACK}s 数据 ===")
+            fetched, fetch_errs = fetch_all(start_ep, t0, skip_upto)
+
+            lookback_used = int(t0 - start_ep)
+            if lookback_used > FETCH_LOOKBACK:
+                log(f"=== round {tick + 1} 补拉窗口 {lookback_used}s"
+                    f"（最落后活跃序列 {time.strftime('%H:%M:%S', time.localtime(lag_most))}，"
+                    f"活跃序列 {len(skip_upto)}）===")
+            else:
+                log(f"=== round {tick + 1} 拉取最近 {FETCH_LOOKBACK}s 数据 ===")
             for d, pc in tasks:
                 wid = d['wid']
                 items = fetched.get((wid, pc), [])
@@ -931,8 +976,8 @@ def run():
 
                 # 规则01：越限（阈值取自该测点 POINT_CONFIG）
                 # 注意：恒0传感器故障（C01_ZERO / 04-传感器故障）不输出到 CSV/PG，
-                # classify_rule01 仍能识别它但这里跳过，仅内部逻辑（C02 防抖动）
-                # 通过 abs(value) <= ZERO_FAULT_EPS 直接判断，不依赖引擎状态。
+                # classify_rule01 仍能识别它，但这里只推进三个正常越限码；
+                # 恒0的读数由规则02（02-死值校验）负责输出。
                 pc_cfg = POINT_CONFIG[pc]
                 hit_code = classify_rule01(latest[1], pc_cfg)
                 for code in ('C01_FAULT', 'C01_HIGH', 'C01_LOW'):
@@ -940,22 +985,18 @@ def run():
                                   stats=stats)
 
                 # 规则02：数据中断防误报 + 卡死
+                # 恒0值同样走死值校验（02-死值校验）输出：它本质上是一串完全不变化的读数，
+                # 由 C02 表达最贴切，此前的 C01_ZERO（04-传感器故障）保持静默不再输出。
                 lag = now_epoch - latest[0]
-                if abs(latest[1]) <= ZERO_FAULT_EPS:
-                    # 恒0值属传感器故障，不触发 C02 死值校验（也不单独输出告警），
-                    # 否则同一故障会在样本数阈值上下抖动，反复 ALARM/RECOVER 刷屏
-                    if engine.is_active(wid, pc, 'C02_FROZEN'):
-                        engine.update(wid, pc, 'C02_FROZEN', False, now_epoch, stats=stats,
-                                      detail='恒0传感器故障，不判死值')
-                elif lag <= FROZEN_FRESHNESS:
+                if lag <= FROZEN_FRESHNESS:
                     # 以最新数据点 epoch 为窗口参考，补偿采集延迟
                     active, meta = eval_frozen(
                         buf.window_values(latest[0], W_FROZEN), now_epoch)
                     engine.update(wid, pc, 'C02_FROZEN', active, now_epoch, stats=stats)
                 elif lag > C02_STALE_RECOVER and engine.is_active(wid, pc, 'C02_FROZEN'):
-                    # 断采超15分钟：显式恢复，避免告警永久挂起（滞后5~15分钟保持状态防抖动）
+                    # 断采超30分钟：显式恢复，避免告警永久挂起（滞后20~30分钟保持状态防抖动）
                     engine.update(wid, pc, 'C02_FROZEN', False, now_epoch, stats=stats,
-                                  detail='断采>15min')
+                                  detail='断采>30min')
 
                 # 规则03
                 eval_fluct_tick(buf, now_epoch, engine, wid, pc, stats)

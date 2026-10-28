@@ -128,7 +128,7 @@ def main():
         date_obj = date.today()
     day_s = date_obj.strftime('%Y-%m-%d')
     day_compact = date_obj.strftime('%Y%m%d')
-    out_path = f'支路异常{day_compact}.xlsx'
+    out_path = f'光伏电流异常{day_compact}.xlsx'
 
     # 生成 SQL
     sql = SQL_TEMPLATE.format(day=day_s, cols=', '.join(c for c, _ in COLUMNS))
