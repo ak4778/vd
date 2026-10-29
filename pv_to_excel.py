@@ -75,7 +75,7 @@ bm AS (
         v.point_code,
         date_trunc('hour', v.ts AT TIME ZONE 'Asia/Shanghai')       AS ts,
         AVG(v.point_value) FILTER (WHERE v.point_value <= 15)       AS point_value,
-        COUNT(*) FILTER (WHERE v.point_value < 0)                  AS neg_cnt,
+        COUNT(*) FILTER (WHERE v.point_value < -1)                 AS neg_cnt,
         COUNT(*) FILTER (WHERE v.point_value = 0)                  AS zero_cnt,
         COUNT(*) FILTER (WHERE v.point_value <= 15)                AS valid_cnt,
         MAX(v.point_value) FILTER (WHERE v.point_value <= 15)       AS sec_max,

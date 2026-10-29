@@ -19,9 +19,9 @@
 
 数据存放：
   - 原始测点：内存滑窗（每台×测点 deque 保留近 1 小时），不落盘
-  - 告警记录：① 追加写 ALARM_CSV（utf-8-sig），13列：ts, regionCompanyName,
+  - 告警记录：① 追加写 ALARM_CSV（utf-8-sig），12列：ts, regionCompanyName,
     stationName, windDeviceId, windDeviceName, pointCode, pointName, temperature,
-    temp_rate, range_1h, range_20s, alarm_type, alarm_value
+    range_1h, range_20s, alarm_type, alarm_value
     ② 同时 INSERT 到 PG 表 wind_alarm（事件流水：ALARM/RECOVER 各一行，
     含 ts 触发数据点时刻、rule_code、明细数值）；
     PG 写失败仅记日志，不影响 CSV 与监控主循环。启动时从该表最后事件回放
@@ -302,7 +302,6 @@ CREATE TABLE IF NOT EXISTS {TABLE_ALARM} (
     rule_code            text NOT NULL,          -- C01_HIGH / C02_FROZEN / ...
     alarm_type           text,                   -- 01-绝对值报警 / ...
     temperature          double precision,
-    temp_rate            double precision,
     range_1h             double precision,
     range_20s            double precision,
     alarm_value          double precision,
@@ -449,7 +448,7 @@ class AlarmEngine:
     HEADER = ['ts', 'regionCompanyName', 'stationName',
               'windDeviceId', 'windDeviceName',
               'pointCode', 'pointName',
-              'temperature', 'temp_rate',
+              'temperature',
               'range_1h', 'range_20s',
               'alarm_type', 'alarm_value']
 
@@ -457,8 +456,8 @@ class AlarmEngine:
         INSERT INTO {TABLE_ALARM} (
             event, ts, region_company_name, station_name,
             device_id, device_name, point_code, point_name, rule_code, alarm_type,
-            temperature, temp_rate, range_1h, range_20s, alarm_value, detail)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            temperature, range_1h, range_20s, alarm_value, detail)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     def __init__(self, csv_path, dev_map):
@@ -471,7 +470,7 @@ class AlarmEngine:
         self._pg = None                      # PG 连接懒建，与数据源连接独立
 
     def update(self, wid, pc, rule_code, is_active, now_epoch, stats=None, detail=''):
-        """stats 由主循环计算后传入: {'ts','temp','rate','range_1h','range_20s'}"""
+        """stats 由主循环计算后传入: {'ts','temp','range_1h','range_20s'}"""
         key = (wid, pc, rule_code)
         was = self.active.get(key, False)
         with self.lock:
@@ -492,7 +491,6 @@ class AlarmEngine:
         s = stats or {}
         ts_str = s.get('ts') or datetime.now().strftime(TS_FMT)
         temp = s.get('temp')
-        rate = s.get('rate')
         r1h = s.get('range_1h')
         r20s = s.get('range_20s')
         # 按规则类型取报警值
@@ -516,7 +514,6 @@ class AlarmEngine:
             pc,
             pc_cfg.get('name', ''),
             '' if temp is None else round(temp, 2),
-            '' if rate is None else round(rate, 4),
             '' if r1h is None else round(r1h, 2),
             '' if r20s is None else round(r20s, 2),
             ALARM_TYPE_MAP.get(rule_code, rule_code) if event == 'ALARM' else '',
@@ -526,12 +523,12 @@ class AlarmEngine:
         self.fp.flush()
         # PG 流水（ts 取触发数据点时刻）
         self._write_pg(event, wid, pc, rule_code, d, pc_cfg, s,
-                       temp, rate, r1h, r20s, alarm_val, detail)
+                       temp, r1h, r20s, alarm_val, detail)
         color = '\033[91m' if event == 'ALARM' else '\033[92m'
         alarm_type = ALARM_TYPE_MAP.get(rule_code, rule_code)
         log(f"{color}{event}\033[0m {alarm_type}[{rule_code}] {pc_cfg.get('name','')} "
             f"{d.get('station','')} {d.get('name','')} "
-            f"temp={round(temp,2) if temp is not None else '-'} rate={round(rate,4) if rate is not None else '-'} "
+            f"temp={round(temp,2) if temp is not None else '-'} "
             f"r1h={round(r1h,2) if r1h is not None else '-'} r20s={round(r20s,2) if r20s is not None else '-'} {detail}")
 
     def _get_pg(self):
@@ -542,7 +539,7 @@ class AlarmEngine:
         return self._pg
 
     def _write_pg(self, event, wid, pc, rule_code, d, pc_cfg, s,
-                  temp, rate, r1h, r20s, alarm_val, detail):
+                  temp, r1h, r20s, alarm_val, detail):
         """追加一行告警事件；任何失败仅记日志，不影响 CSV 与主循环。"""
         ts = None
         if s.get('ts'):
@@ -556,7 +553,7 @@ class AlarmEngine:
             wid, d.get('name') or None,
             pc, pc_cfg.get('name') or None,
             rule_code, ALARM_TYPE_MAP.get(rule_code, rule_code),
-            temp, rate, r1h, r20s,
+            temp, r1h, r20s,
             alarm_val if event == 'ALARM' else None,
             detail or None,
         )
@@ -714,7 +711,7 @@ def eval_frozen(win, now_epoch):
 
 
 def compute_stats(buf, now_epoch):
-    """计算该风机当前 tick 的各项统计：温度、温升速率、1h极差、20s极差。"""
+    """计算该风机当前 tick 的各项统计：温度、1h极差、20s极差。"""
     latest = buf.latest()
     if not latest:
         return None
@@ -722,13 +719,6 @@ def compute_stats(buf, now_epoch):
     # 数据采集有秒~分钟级延迟（p99≈188s），用 now_epoch 会让小窗口（20s）取不到数据
     ref_epoch = latest[0]
     pts = buf.window_values(ref_epoch, W_FROZEN) or []
-    # 温升速率：当前值 vs 前一个点的差值/时间差
-    rate = None
-    if len(pts) >= 2:
-        prev = pts[-2]
-        dt = latest[0] - prev[0]
-        if dt > 0:
-            rate = (latest[1] - prev[1]) / dt
     # 1小时极差
     r1h = None
     if pts:
@@ -741,7 +731,6 @@ def compute_stats(buf, now_epoch):
     return {
         'ts': datetime.fromtimestamp(latest[0]).strftime(TS_FMT),
         'temp': latest[1],
-        'rate': rate,
         'range_1h': r1h,
         'range_20s': r20s,
     }
