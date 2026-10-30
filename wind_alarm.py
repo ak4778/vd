@@ -14,7 +14,8 @@
 监控规则（每台风机×测点独立判定，绝对值阈值按测点配置）：
   01 越限：v >= c01_fault(传感器故障) / v > c01_high(高温) / v <= c01_low(探头失效码)，逐点即时判定
   02 卡死：1 小时内所有点完全相同(max-min=0)，且窗口真实覆盖近1小时、数据新鲜
-  03 波动：20 秒内 max-min > 10℃，且该状态持续 >= 5 秒（按数据点 ts 计量）
+  03 波动：20 秒内 max-min > 20℃，且最新温度超过测点门槛（驱动端/非驱动端 90℃、
+     定子线圈 100℃），且该状态持续 >= 5 秒（按数据点 ts 计量）
   数据中断：不单独输出告警；断采>30分钟时显式恢复 C02_FROZEN，防止告警永久挂起
 
 数据存放：
@@ -30,11 +31,9 @@
 """
 
 import csv
-import glob
 import json
 import logging
 import os
-import re
 import sys
 import time
 import threading
@@ -129,7 +128,11 @@ ZERO_FAULT_EPS = 1e-6     # 温度测点读数≈0 视为传感器恒0故障（�
 W_FLUCT = 20              # 规则03窗口(秒)
 FLUCT_MIN_SPAN = 15       # 规则03窗口实际跨度下限(秒)
 FLUCT_MIN_POINTS = 3      # 规则03最少样本数（实测平均8.3s间隔，防两点毛刺）
-FLUCT_RANGE = 10.0        # max-min 阈值(℃)
+FLUCT_RANGE = 20.0        # max-min 阈值(℃)
+# 规则03额外要求：突变必须发生在高温区间内（低温时的小幅波动忽略）
+# 驱动端/非驱动端 temp>90℃，定子线圈(SEN/STA 系列) temp>100℃
+FLUCT_TEMP_HIGH = {'TEMGENDRIEND': 90.0, 'TEMGENNONDE': 90.0}
+FLUCT_TEMP_HIGH_DEFAULT = 100.0    # 其他测点默认（定子线圈）
 SUSTAIN_SEC = 5           # 规则03持续秒数
 # 规则02新鲜度阈值(秒)：最新点滞后不超过该值才判定。
 # 上游发布延迟实测 p99≈188s、慢发布设备可达 10~20 分钟（如峰岳 2C04），
@@ -153,55 +156,52 @@ ALARM_TYPE_MAP = {
 
 TS_FMT = "%Y-%m-%d %H:%M:%S"
 
-# 日志轮转：写满 100MB 关闭当前文件、新建 wind_alarm_YYYYMMDD_HHMMSS.log 继续写，保留最近 5 份。
-# 不用 RotatingFileHandler 的 rename 方式：Windows 下外部读句柄（Get-Content/tail 等）
-# 会阻塞 os.rename，异常被 logging 静默吞掉，轮转失效导致单文件无限膨胀（曾涨到 1.5GB）。
+# 日志轮转：最新内容始终写 wind_alarm.log；写满 100MB 后旧文件依次后移为
+# wind_alarm_1.log ~ wind_alarm_5.log（编号越大越旧，_5 最旧并删除），保留最近 5 份。
+# 外部读句柄（Get-Content/tail 等）在 Windows 下可能阻止改名：此时继续追加到
+# wind_alarm.log 并在 stderr 告警，宁可不轮转也不丢日志。
 LOG_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_PREFIX = 'wind_alarm'
+LOG_FILE_NAME = 'wind_alarm.log'
 LOG_MAX_BYTES = 100 * 1024 * 1024
 LOG_BACKUP_COUNT = 5
 
 
-class TimestampRotatingHandler(logging.FileHandler):
-    """写满 max_bytes 即切换到新时间戳文件，全程不 rename，Windows 下无文件锁冲突。
-    旧文件超出 backup_count 份时删最旧的；被外部占用删不掉则跳过，不影响写日志。"""
+class NumberedRotatingHandler(logging.FileHandler):
+    """wind_alarm.log 写满后轮转为 wind_alarm_1..._5.log，最新内容永远写入 wind_alarm.log。"""
 
-    def __init__(self, log_dir, prefix, max_bytes, backup_count, encoding='utf-8'):
-        self.log_dir = log_dir
-        self.prefix = prefix
+    def __init__(self, log_dir, file_name, max_bytes, backup_count, encoding='utf-8'):
+        self.base_path = os.path.join(log_dir, file_name)
+        self.stem = os.path.join(log_dir, os.path.splitext(file_name)[0])
         self.max_bytes = max_bytes
         self.backup_count = backup_count
-        # 启动时复用最近一个未满的日志文件，避免频繁重启产生碎片文件
-        logs = self._logs()
-        path = logs[-1] if logs else None
-        if path is None or os.path.getsize(path) >= max_bytes:
-            path = self._new_log()
-        super().__init__(path, mode='a', encoding=encoding)
+        super().__init__(self.base_path, mode='a', encoding=encoding)
 
-    def _logs(self):
-        # 严格匹配 前缀_YYYYMMDD_HHMMSS.log，排除 wind_alarm_watchdog.log 等同前缀文件
-        rx = re.compile(rf'{re.escape(self.prefix)}_\d{{8}}_\d{{6}}\.log$')
-        pat = os.path.join(self.log_dir, f'{self.prefix}_*.log')
-        return sorted(p for p in glob.glob(pat) if rx.search(os.path.basename(p)))
-
-    def _new_log(self):
-        name = f'{self.prefix}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
-        return os.path.join(self.log_dir, name)
+    def _rotate(self):
+        """删最旧备份，_n-1 移到 _n，最后把当前文件移到 _1。任一步失败返回 False。"""
+        try:
+            oldest = f'{self.stem}_{self.backup_count}.log'
+            if os.path.exists(oldest):
+                os.remove(oldest)
+            for i in range(self.backup_count - 1, 0, -1):
+                src = f'{self.stem}_{i}.log'
+                if os.path.exists(src):
+                    os.replace(src, f'{self.stem}_{i + 1}.log')
+            os.replace(self.base_path, f'{self.stem}_1.log')
+            return True
+        except OSError:
+            return False
 
     def emit(self, record):
         try:
             if self.stream is not None:
                 self.stream.seek(0, 2)      # append 模式初始 offset 为 0，先定位末尾再量大小
                 if self.stream.tell() >= self.max_bytes:
-                    self.close()
-                    self.baseFilename = self._new_log()   # 本次 emit 自动以新文件重开
-                    logs = self._logs()
-                    excess = logs[:-self.backup_count] if self.backup_count else logs
-                    for old in excess:
-                        try:
-                            os.remove(old)
-                        except OSError:
-                            pass            # 被占用删不掉：跳过，磁盘兜底靠人工
+                    self.close()            # 先释放自身句柄，否则 Windows 下无法改名
+                    if not self._rotate():
+                        print(f'[wind_alarm] 日志轮转失败：{self.base_path} 可能被外部程序占用，'
+                              f'继续追加写入本文件', file=sys.stderr, flush=True)
+                    self.baseFilename = self.base_path
+                    self.stream = self._open()   # 轮转成功则重开空文件，失败则继续追加
         except Exception:
             pass                            # 轮转检查任何失败都不丢日志
         super().emit(record)
@@ -211,8 +211,8 @@ _logger = logging.getLogger('wind_alarm')
 _logger.setLevel(logging.INFO)
 _logger.propagate = False
 if not _logger.handlers:
-    _fh = TimestampRotatingHandler(LOG_DIR, LOG_PREFIX, LOG_MAX_BYTES,
-                                   LOG_BACKUP_COUNT, encoding='utf-8')
+    _fh = NumberedRotatingHandler(LOG_DIR, LOG_FILE_NAME, LOG_MAX_BYTES,
+                                  LOG_BACKUP_COUNT, encoding='utf-8')
     _fh.setFormatter(logging.Formatter('%(message)s'))
     _logger.addHandler(_fh)
 
@@ -562,13 +562,27 @@ class AlarmEngine:
             cur.execute(self._INSERT_SQL, params)
             cur.close()
         except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
-            log(f"告警写 PG 连接失效，丢弃本条并在下次事件重连: {e}")
+            log(f"告警写 PG 连接失效，尝试重连后补写: {e}")
             try:
                 if self._pg is not None:
                     self._pg.close()
             except Exception:
                 pass
             self._pg = None
+            # 重连后补写一次，仍失败再丢弃（不阻塞主循环，也不重复滚动回滚）
+            try:
+                cur = self._get_pg().cursor()
+                cur.execute(self._INSERT_SQL, params)
+                cur.close()
+                log("告警写 PG 重连后补写成功")
+            except Exception as e2:
+                log(f"告警写 PG 重连后仍失败，丢弃本条: {e2}")
+                try:
+                    if self._pg is not None:
+                        self._pg.close()
+                except Exception:
+                    pass
+                self._pg = None
         except Exception as e:
             log(f"告警写 PG 失败（不影响 CSV）: {e}")
             try:
@@ -737,12 +751,16 @@ def compute_stats(buf, now_epoch):
 
 
 def eval_fluct_tick(buf, now_epoch, engine, wid, pc, stats):
-    """规则03：20秒 max-min>10 且持续>=5秒（按数据点ts计量，连续状态保存在引擎上）。"""
+    """规则03：20秒 max-min>20 且 最新温度>测点门槛温度 且 持续>=5秒。
+    驱动端/非驱动端 temp>90℃，定子线圈 temp>100℃。"""
     key = (wid, pc, 'C03_FLUCT')
     latest = buf.latest()
     # 以最新数据点 epoch 为窗口参考，补偿采集延迟（p99≈188s）
     ref_epoch = latest[0] if latest else now_epoch
     win = buf.window_values(ref_epoch, W_FLUCT)
+    # 测点门槛温度
+    temp_threshold = FLUCT_TEMP_HIGH.get(pc, FLUCT_TEMP_HIGH_DEFAULT)
+
     if not win or latest is None:
         cond = False
     else:
@@ -750,7 +768,10 @@ def eval_fluct_tick(buf, now_epoch, engine, wid, pc, stats):
         vals = [v for _, v in win]
         span = epochs[-1] - epochs[0]
         n = len(win)
-        cond = span >= FLUCT_MIN_SPAN and n >= FLUCT_MIN_POINTS and (max(vals) - min(vals)) > FLUCT_RANGE
+        cond = (span >= FLUCT_MIN_SPAN
+                and n >= FLUCT_MIN_POINTS
+                and (max(vals) - min(vals)) > FLUCT_RANGE
+                and latest[1] > temp_threshold)   # 必须发生在高温区间内
 
     latest_epoch = ref_epoch
     if cond:

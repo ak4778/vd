@@ -6,7 +6,7 @@ ingest_wind.py（tagName 解析 + 按 (device_id, ts) 归并 + 批量 upsert）�
 输出从「写 CSV」改为「直接 upsert 到 wind_seconds_di」。
 
 不丢数据机制（每秒产生多少条无需预知）：
-1. 水位线文件 fetch_watermark.json（与脚本同目录，*.json 已被 .gitignore
+1. 水位线文件 wind_watermark.json（与脚本同目录，*.json 已被 .gitignore
    忽略）：记录上一轮成功入库的窗口右边界；进程重启后从水位线继续，
    而不是从 now() 开始。只在入库成功后写文件（临时文件 + os.replace
    原子替换）；若崩溃在“入库成功、水位线未写”之间，下一轮重叠重拉，
@@ -286,7 +286,7 @@ LOG_LEVEL = 'INFO'               # DEBUG=打印每条入库/每个查询明细�
 TS_FMT = '%Y-%m-%d %H:%M:%S'
 SOURCE = 'fjmjsj'
 WATERMARK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              'fetch_watermark.json')
+                              'wind_watermark.json')
 ROLLUP_SQL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                'wind_rollup_minute.sql')
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),

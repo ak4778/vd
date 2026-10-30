@@ -777,7 +777,6 @@ const AlarmRow = ({a}) => {
     <//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.rule_code}<//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.temperature != null ? a.temperature.toFixed(1) : '-'}<//>
-    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.temp_rate != null ? a.temp_rate.toFixed(4) : '-'}<//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.range_1h != null ? a.range_1h.toFixed(2) : '-'}<//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.range_20s != null ? a.range_20s.toFixed(2) : '-'}<//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.alarm_type || ''}<//>
@@ -796,7 +795,6 @@ const alarmColumns = [
   {label: '测点', width: '200px'},
   {label: '规则', width: '110px'},
   {label: '温度(°C)', width: '90px'},
-  {label: '温升速率', width: '100px'},
   {label: '1h极差', width: '90px'},
   {label: '20s极差', width: '90px'},
   {label: '告警类型', width: '110px'},

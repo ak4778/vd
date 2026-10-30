@@ -57,6 +57,15 @@ si AS (
         inverter_name
     FROM pv_station_invert
 ),
+ex AS (
+    -- 排除已被 pv_inverter_branch_abnormal 标记的逆变器+支路：
+    -- 支路24 -> STRING_BRANCH24_A，inverter_id 与 device_id 同为大写比对
+    SELECT DISTINCT
+        upper(inverter_id)                                             AS dev_key,
+        'STRING_BRANCH' || substring(branch_name FROM '[0-9]+') || '_A' AS point_code
+    FROM pv_inverter_branch_abnormal
+    WHERE branch_name ~ '^支路[0-9]+$'
+),
 v AS (
     SELECT b.device_id, b.point_code, b.ts, b.point_value
     FROM pv_string_branch b
@@ -67,6 +76,10 @@ v AS (
         (b.ts >= TIMESTAMPTZ '{day} 10:00:00+08' AND b.ts <  TIMESTAMPTZ '{day} 11:00:00+08')
         OR (b.ts >= TIMESTAMPTZ '{day} 14:00:00+08' AND b.ts <  TIMESTAMPTZ '{day} 15:00:00+08')
         OR (b.ts >= TIMESTAMPTZ '{day} 15:00:00+08' AND b.ts <  TIMESTAMPTZ '{day} 16:00:00+08')
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM ex
+        WHERE ex.dev_key = b.device_id AND ex.point_code = b.point_code
       )
 ),
 bm AS (

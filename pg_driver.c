@@ -582,11 +582,11 @@ static void alarm_fill_row(struct ds_alarm *r, PGresult *res, int i) {
   alarm_set_str(r->rule_code, sizeof(r->rule_code), res, i, 9);
   alarm_set_str(r->alarm_type, sizeof(r->alarm_type), res, i, 10);
   r->temperature = alarm_get_num(res, i, 11);
-  r->temp_rate = alarm_get_num(res, i, 12);
-  r->range_1h = alarm_get_num(res, i, 13);
-  r->range_20s = alarm_get_num(res, i, 14);
-  r->alarm_value = alarm_get_num(res, i, 15);
-  alarm_set_str(r->detail, sizeof(r->detail), res, i, 16);
+  r->temp_rate = 0;    // wind_alarm 表无此列，前端暂不展示温升速率
+  r->range_1h = alarm_get_num(res, i, 12);
+  r->range_20s = alarm_get_num(res, i, 13);
+  r->alarm_value = alarm_get_num(res, i, 14);
+  alarm_set_str(r->detail, sizeof(r->detail), res, i, 15);
 }
 
 // 拉取 id > after_id 的新告警事件（按 id 升序，最多 max_rows 行）。
@@ -613,7 +613,7 @@ int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
       " device_id, COALESCE(device_name, ''),"
       " point_code, COALESCE(point_name, ''),"
       " rule_code, COALESCE(alarm_type, ''),"
-      " temperature, temp_rate,"
+      " temperature,"
       " range_1h, range_20s,"
       " alarm_value, COALESCE(detail, '')"
       " FROM wind_alarm WHERE id > $1 ORDER BY id ASC LIMIT $2";
@@ -625,7 +625,7 @@ int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
       " device_id, COALESCE(device_name, ''),"
       " point_code, COALESCE(point_name, ''),"
       " rule_code, COALESCE(alarm_type, ''),"
-      " temperature, temp_rate,"
+      " temperature,"
       " range_1h, range_20s,"
       " alarm_value, COALESCE(detail, '')"
       " FROM wind_alarm WHERE id > $1 AND event = 'ALARM'"
@@ -748,7 +748,7 @@ int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
       " device_id, COALESCE(device_name, ''),"
       " point_code, COALESCE(point_name, ''),"
       " rule_code, COALESCE(alarm_type, ''),"
-      " temperature, temp_rate,"
+      " temperature,"
       " range_1h, range_20s,"
       " alarm_value, COALESCE(detail, '')"
       " FROM wind_alarm";
@@ -831,7 +831,7 @@ int pg_get_alarms_range(const char *start, const char *end,
       " device_id, COALESCE(device_name, ''),"
       " point_code, COALESCE(point_name, ''),"
       " rule_code, COALESCE(alarm_type, ''),"
-      " temperature, temp_rate,"
+      " temperature,"
       " range_1h, range_20s,"
       " alarm_value, COALESCE(detail, '')"
       " FROM wind_alarm"
@@ -846,7 +846,7 @@ int pg_get_alarms_range(const char *start, const char *end,
       " device_id, COALESCE(device_name, ''),"
       " point_code, COALESCE(point_name, ''),"
       " rule_code, COALESCE(alarm_type, ''),"
-      " temperature, temp_rate,"
+      " temperature,"
       " range_1h, range_20s,"
       " alarm_value, COALESCE(detail, '')"
       " FROM wind_alarm"
@@ -894,7 +894,7 @@ int pg_get_recent_alarms(struct ds_alarm *rows, int max_rows) {
       " device_id, COALESCE(device_name, ''),"
       " point_code, COALESCE(point_name, ''),"
       " rule_code, COALESCE(alarm_type, ''),"
-      " temperature, temp_rate,"
+      " temperature,"
       " range_1h, range_20s,"
       " alarm_value, COALESCE(detail, '')"
       " FROM wind_alarm ORDER BY id DESC LIMIT $1";
@@ -906,7 +906,7 @@ int pg_get_recent_alarms(struct ds_alarm *rows, int max_rows) {
       " device_id, COALESCE(device_name, ''),"
       " point_code, COALESCE(point_name, ''),"
       " rule_code, COALESCE(alarm_type, ''),"
-      " temperature, temp_rate,"
+      " temperature,"
       " range_1h, range_20s,"
       " alarm_value, COALESCE(detail, '')"
       " FROM wind_alarm WHERE event = 'ALARM' ORDER BY id DESC LIMIT $1";
