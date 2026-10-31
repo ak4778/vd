@@ -757,14 +757,16 @@ return html`
 // NOTE: AlarmRow 定义在模块作用域，原因见上方 Td/Node 的注释（Preact diffing）。
 const ALARM_CAP = 500;  // 前端最多保留的告警条数（超出丢弃最旧）
 
-const AlarmRow = ({a}) => {
+// compact=true（event_type=false）时不渲染「事件」「规则」两列
+const AlarmRow = ({a, compact}) => {
   const isAlarm = a.event === 'ALARM';
   return html`
   <tr class="hover:bg-slate-50 ind-dark-row">
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.ts}<//>
+    ${!compact && html`
     <td class="border-b border-slate-200 py-1.5 px-4">
       <span class="px-2 py-0.5 rounded text-xs font-bold ${isAlarm ? 'bg-red-100 text-red-700 ind-badge-alarm' : 'bg-green-100 text-green-700 ind-badge-recover'}">${a.event}<//>
-    <//>
+    <//>`}
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 overflow-hidden text-ellipsis whitespace-nowrap" title=${a.region_company_name || ''}>${a.region_company_name || ''}<//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 overflow-hidden text-ellipsis whitespace-nowrap" title=${a.station_name || ''}>${a.station_name || ''}<//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm overflow-hidden text-ellipsis whitespace-nowrap" title=${a.device_name ? `${a.device_name}(${a.device_id})` : a.device_id}>
@@ -775,18 +777,18 @@ const AlarmRow = ({a}) => {
       <span class="text-slate-800">${a.point_name || a.point_code}<//>
       ${a.point_name && html`<span class="text-slate-400 ml-1 text-xs">(${a.point_code})<//>`}
     <//>
-    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.rule_code}<//>
+    ${!compact && html`
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.rule_code}<//>`}
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.temperature != null ? a.temperature.toFixed(1) : '-'}<//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.range_1h != null ? a.range_1h.toFixed(2) : '-'}<//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.range_20s != null ? a.range_20s.toFixed(2) : '-'}<//>
-    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.alarm_type || ''}<//>
+    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.alarm_type ? html`<span class="atype-badge${alarmTypeCls(a.alarm_type)}">${a.alarm_type}</span>` : ''}<//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.alarm_value != null ? a.alarm_value.toFixed(2) : '-'}<//>
-    <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 overflow-hidden text-ellipsis whitespace-nowrap" title=${a.detail || ''}><span>${a.detail || ''}</span></td>
   <//>`;
 };
 
 // 模块作用域表格头（稳定 vnode）
-const alarmColumns = [
+const alarmColumnsAll = [
   {label: '时间', width: '150px'},
   {label: '事件', width: '90px'},
   {label: '公司', width: '160px'},
@@ -799,16 +801,29 @@ const alarmColumns = [
   {label: '20s极差', width: '90px'},
   {label: '告警类型', width: '110px'},
   {label: '告警值', width: '90px'},
-  {label: '详情', width: '260px'},
 ];
+// event_type=false（alarmEventAll=false）时不取「事件」「规则」两列
+const alarmColumnsCompact = alarmColumnsAll.filter(
+  c => c.label !== '事件' && c.label !== '规则');
 
 // 告警页每页条数（与 data_config.defaultPageSize 对齐）
 const ALARM_PAGE_SIZE = 50;
 
-// 告警规则枚举：与 monitor_fj_state.py 的 ALARM_TYPE_MAP 对齐（固定写死）。
-// C03_RATE/C04_JUMP 暂未实现，提前占位以兼容未来规则扩展（过滤时无匹配数据即可）。
-const ALARM_RULE_OPTIONS = ['C01_FAULT', 'C01_HIGH', 'C01_LOW', 'C02_FROZEN', 'C03_FLUCT', 'C03_RATE', 'C04_JUMP'];
 const ALARM_EVENT_OPTIONS = ['ALARM', 'RECOVER'];
+// 告警类型枚举：与 wind_alarm.py 的 ALARM_TYPE_MAP 输出严格对齐（数据库 alarm_type 列）
+const ALARM_TYPE_OPTIONS = ['01-绝对值报警', '02-死值校验', '03-突变报警'];
+// 全部取消勾选时发给服务端的哨兵值：任何行都不会匹配，等价于「0 条」
+const ALARM_TYPE_NONE = '__none__';
+// 绕组温度测点组：TEMGENSEN1/2/3 与 TEMGENSTAU/V/W 统一按「绕组温度」过滤；
+// 选中时下拉值为逗号分隔的编码串，服务端按多值 point_code 展开查询。
+const WINDING_POINTS = ['TEMGENSEN1', 'TEMGENSEN2', 'TEMGENSEN3',
+                        'TEMGENSTAU', 'TEMGENSTAV', 'TEMGENSTAW'];
+const WINDING_POINT_KEY = WINDING_POINTS.join(',');
+// 按告警类型前缀映射底色 class（01/02/03 → atype-01/02/03），表格列与过滤下拉共用
+const alarmTypeCls = t => {
+  const m = String(t || '').match(/^(\d{2})/);
+  return m ? ' atype-' + m[1] : '';
+};
 
 // 本地日期 YYYY-MM-DD（导出默认值；不用 toISOString 以免时区偏移）
 const localDateStr = (d = new Date()) => {
@@ -822,10 +837,24 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
   const [hist, setHist] = useState([]);        // 历史页数据（page >= 2）
   const [histLoading, setHistLoading] = useState(false);
   const [histError, setHistError] = useState('');
-  // 过滤：测点精确匹配（下拉，选项从已见告警累积）+ 规则固定枚举 + 事件类型；跨页生效
+  // 过滤：测点精确匹配（下拉，选项从已见告警累积）+ 事件类型；跨页生效
   const [pointFilter, setPointFilter] = useState('');
-  const [ruleFilter, setRuleFilter] = useState('');
   const [eventFilter, setEventFilter] = useState('');
+  // 告警类型多选（默认全选=不过滤）；与视频设备的设备类型过滤同一交互形态
+  const [alarmTypeFilter, setAlarmTypeFilter] = useState(ALARM_TYPE_OPTIONS);
+  const [showTypeDropdown, setShowTypeDropdown] = useState(false);
+  // 关键字搜索（场站/设备名称/设备ID），与视频设备页搜索语义一致
+  const [searchKw, setSearchKw] = useState('');
+  const typeDdRef = useRef(null);
+  // 点击下拉框以外的区域自动收起
+  useEffect(() => {
+    if (!showTypeDropdown) return;
+    const onDocDown = e => {
+      if (typeDdRef.current && !typeDdRef.current.contains(e.target)) setShowTypeDropdown(false);
+    };
+    document.addEventListener('mousedown', onDocDown);
+    return () => document.removeEventListener('mousedown', onDocDown);
+  }, [showTypeDropdown]);
   // event_type=false（alarmEventAll=false）时整个事件过滤下拉不渲染，eventFilter 恒为 ''
   const [pointOptions, setPointOptions] = useState([]);  // [{code, name}]
   // 按日期导出 CSV：默认当天（本地时区）；区间模式默认当天 00:00 ~ 23:59
@@ -850,17 +879,34 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
   rxRef.current = alarmRx;
   const baseRxRef = useRef(0);
 
-  const filterActive = pointFilter !== '' || ruleFilter !== '' || eventFilter !== '';
+  // 告警类型过滤生效条件：全选 = 不过滤；部分勾选 = 只显示选中类型；
+  // 全部取消 = 0 条（与视频设备「设备类型」清空全部一致）
+  const alarmTypeKey = alarmTypeFilter.join(',');
+  const alarmTypeActive = alarmTypeFilter.length < ALARM_TYPE_OPTIONS.length;
+  const toggleAlarmType = t => setAlarmTypeFilter(prev =>
+    prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t]);
+  // 关键字搜索：场站 / 设备名称 / 设备ID 任一包含即命中（与服务端 LIKE 语义一致）
+  const kw = searchKw.trim();
+  const filterActive = pointFilter !== '' || eventFilter !== '' || alarmTypeActive || kw !== '';
   const matchFilters = a =>
-    (!pointFilter || a.point_code === pointFilter) &&
-    (!ruleFilter || a.rule_code === ruleFilter) &&
-    (!eventFilter || a.event === eventFilter);
+    (!pointFilter || (pointFilter === WINDING_POINT_KEY
+      ? WINDING_POINTS.includes(a.point_code)
+      : a.point_code === pointFilter)) &&
+    (!eventFilter || a.event === eventFilter) &&
+    (!alarmTypeActive || alarmTypeFilter.includes(a.alarm_type)) &&
+    (!kw || ((a.station_name && a.station_name.includes(kw)) ||
+     (a.device_name && a.device_name.includes(kw)) ||
+     (a.device_id && a.device_id.includes(kw))));
   // 过滤参数串：历史分页与总数查询共用（encodeURIComponent 防特殊字符）
   const filterQuery = () => {
     const q = [];
     if (pointFilter) q.push(`point_code=${encodeURIComponent(pointFilter)}`);
-    if (ruleFilter) q.push(`rule_code=${encodeURIComponent(ruleFilter)}`);
     if (eventFilter) q.push(`event=${encodeURIComponent(eventFilter)}`);
+    // 全部取消时传一个必然不存在的类型，让服务端同样返回 0 条
+    if (alarmTypeActive) {
+      q.push(`alarm_type=${encodeURIComponent(alarmTypeFilter.length ? alarmTypeFilter.join(',') : ALARM_TYPE_NONE)}`);
+    }
+    if (kw) q.push(`keyword=${encodeURIComponent(kw)}`);
     return q.length ? '&' + q.join('&') : '';
   };
 
@@ -896,14 +942,19 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
 
   // 测点下拉选项：从 WS 实时列表与历史页响应中累积去重（按编码排序）。
   // 仅"出现过告警的测点"才有意义——未告警的测点过滤结果必然为空。
+  // 绕组温度组（TEMGENSEN1/2/3、TEMGENSTAU/V/W）折叠为单个「绕组温度」选项。
   useEffect(() => {
     setPointOptions(prev => {
       const map = new Map(prev.map(o => [o.code, o.name]));
       let changed = false;
       for (const src of [items, hist]) {
         for (const a of src) {
-          if (a.point_code && !map.has(a.point_code)) {
-            map.set(a.point_code, a.point_name || '');
+          if (!a.point_code) continue;
+          const isWinding = WINDING_POINTS.includes(a.point_code);
+          const key = isWinding ? WINDING_POINT_KEY : a.point_code;
+          const name = isWinding ? '绕组温度' : (a.point_name || '');
+          if (!map.has(key)) {
+            map.set(key, name);
             changed = true;
           }
         }
@@ -919,7 +970,7 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
     setPage(1);
     seenMaxIdRef.current = latestIdRef.current;
     setFilteredRx(0);
-  }, [pointFilter, ruleFilter, eventFilter]);
+  }, [pointFilter, eventFilter, alarmTypeKey, searchKw]);
 
   // 过滤激活时，累加 WS 新行中匹配过滤的行数（items 按 id 倒序，新行在头部）
   useEffect(() => {
@@ -937,7 +988,7 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
     }
     seenMaxIdRef.current = maxId;
     if (add > 0) setFilteredRx(c => c + add);
-  }, [items, pointFilter, ruleFilter, eventFilter]);
+  }, [items, pointFilter, eventFilter, alarmTypeKey, searchKw]);
 
   // 总数：进入页面 / WS 重连成功 / 过滤条件变化时向服务端取一次；失败时用已加载条数兜底
   useEffect(() => {
@@ -945,7 +996,7 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
       .then(r => (r.ok ? r.json() : null))
       .then(r => { if (r && typeof r.total === 'number') { baseRxRef.current = rxRef.current; setTotal(r.total); } })
       .catch(() => {});
-  }, [wsOk, pointFilter, ruleFilter, eventFilter]);
+  }, [wsOk, pointFilter, eventFilter, alarmTypeKey, searchKw]);
 
   // 第 1 页直接用 WS 内存列表（实时）；第 2 页起向服务端按 id 倒序取历史
   useEffect(() => {
@@ -975,7 +1026,7 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
         setHistLoading(false);
       });
     return () => { cancelled = true; };
-  }, [page, pointFilter, ruleFilter, eventFilter]);
+  }, [page, pointFilter, eventFilter, alarmTypeKey, searchKw]);
 
   // 自动滚动：items 前插新告警后把滚动条拉回顶部（仅实时页）
   useEffect(() => {
@@ -1014,6 +1065,9 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
   // 实时页（第 1 页）走内存过滤；历史页已由服务端按相同条件过滤
   const filtered = filterActive ? visibleAll.filter(matchFilters) : visibleAll;
   const rows = page === 1 ? filtered.slice(0, ALARM_PAGE_SIZE) : hist;
+  // event_type=false（alarmEventAll=false）时不取「事件」「规则」两列
+  const compact = !alarmEventAll;
+  const columns = compact ? alarmColumnsCompact : alarmColumnsAll;
   // 实时总数：基数 + 取数后实收的 WS 增量（过滤激活时仅统计匹配行）；
   // 条数下限由内存列表兜底
   const liveTotal = filterActive
@@ -1046,15 +1100,37 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
               onchange=${e => setPointFilter(e.target.value)}
               title="按测点编码精确过滤（选项来自已出现的告警）">
         <option value="">全部测点</option>
-        ${pointOptions.map(o => html`<option key=${o.code} value=${o.code}>${o.code}${o.name ? ' · ' + o.name : ''}</option>`)}
+        ${pointOptions.map(o => html`<option key=${o.code} value=${o.code}>${o.code === WINDING_POINT_KEY ? o.name : o.code + (o.name ? ' · ' + o.name : '')}</option>`)}
       </select>
-      <span class="alarm-filter-label">规则</span>
-      <select class="alarm-filter-select" value=${ruleFilter}
-              onchange=${e => setRuleFilter(e.target.value)}
-              title="按告警规则精确过滤">
-        <option value="">全部规则</option>
-        ${ALARM_RULE_OPTIONS.map(r => html`<option key=${r} value=${r}>${r}</option>`)}
-      </select>
+      <span class="alarm-filter-label">告警类型</span>
+      <div class="alarm-type-dd" ref=${typeDdRef}>
+        <button type="button" class="alarm-filter-select alarm-type-btn"
+                onclick=${() => setShowTypeDropdown(v => !v)}
+                title="按告警类型过滤（01-绝对值报警 / 02-死值校验 / 03-突变报警）">
+          <span>${alarmTypeFilter.length === 0 ? '未选类型（0 条）' : (alarmTypeActive ? `已选 ${alarmTypeFilter.length} 类` : '全部类型')}</span>
+          <svg class="alarm-type-caret" style=${showTypeDropdown ? 'transform: rotate(180deg)' : ''}
+               viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M6 9l6 6 6-6" />
+          </svg>
+        </button>
+        ${showTypeDropdown && html`
+          <div class="alarm-type-panel">
+            <label class="alarm-type-item">
+              <input type="checkbox" checked=${!alarmTypeActive}
+                     onclick=${() => setAlarmTypeFilter(alarmTypeFilter.length === ALARM_TYPE_OPTIONS.length ? [] : ALARM_TYPE_OPTIONS)} />
+              <span class="alarm-type-text alarm-type-all">全部</span>
+            </label>
+            ${ALARM_TYPE_OPTIONS.map(t => html`
+              <label class="alarm-type-item" key=${t}>
+                <input type="checkbox" checked=${alarmTypeFilter.includes(t)} onclick=${() => toggleAlarmType(t)} />
+              <span class="alarm-type-text atype-badge${alarmTypeCls(t)}">${t}</span>
+              </label>`)}
+          </div>`}
+      </div>
+      <span class="alarm-filter-label">搜索</span>
+      <input class="alarm-filter-select alarm-search-input" type="text"
+             placeholder="场站 / 设备" title="按场站、设备名称或设备ID模糊搜索"
+             value=${searchKw} oninput=${e => setSearchKw(e.target.value)} />
       ${alarmEventAll && html`
       <span class="alarm-filter-label">事件</span>
       <select class="alarm-filter-select" value=${eventFilter}
@@ -1064,7 +1140,7 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
         ${ALARM_EVENT_OPTIONS.map(ev => html`<option key=${ev} value=${ev}>${ev}</option>`)}
       </select>`}
       ${filterActive && html`<button type="button" class="alarm-filter-clear"
-        onclick=${() => { setPointFilter(''); setRuleFilter(''); setEventFilter(''); }}>清除筛选<//>`}
+        onclick=${() => { setPointFilter(''); setEventFilter(''); setAlarmTypeFilter(ALARM_TYPE_OPTIONS); setSearchKw(''); }}>清除筛选<//>`}
       ${filterActive && page === 1 && html`<span class="alarm-filter-hint">第 1 页为内存实时过滤，历史页由服务端按相同条件查询<//>`}
       <span class="alarm-export-group">
         ${exportMode === 'day' ? html`
@@ -1094,18 +1170,18 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
       <table class="border-separate border-spacing-0 bg-white ind-darktable" style="table-layout: fixed; width: 100%;">
         <thead>
           <tr>
-            ${alarmColumns.map(c => html`
+            ${columns.map(c => html`
               <th scope="col" class="sticky top-0 z-10 border-b border-slate-300 bg-white bg-opacity-75 ind-dark-th py-1.5 px-4 text-left text-sm font-semibold text-slate-900" style=${c.width ? `width:${c.width}` : ''}>${c.label}<//>
             `)}
           <//>
         <//>
         <tbody>
-          ${rows.length === 0 ? html`<tr><td colspan="14" class="text-center py-8 text-gray-500">
+          ${rows.length === 0 ? html`<tr><td colspan=${columns.length} class="text-center py-8 text-gray-500">
             ${page === 1
               ? (wsOk ? '暂无告警，等待新事件...' : '未连接告警服务，等待重连...')
               : (histLoading ? '加载中...' : (histError || '本页暂无数据'))}
           <//></tr>` :
-          rows.map(a => h(AlarmRow, {key: a.id, a}))}
+          rows.map(a => h(AlarmRow, {key: a.id, a, compact}))}
         <//>
       <//>
     <//>

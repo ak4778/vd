@@ -1172,9 +1172,7 @@ static int alarm_row_json(char *out, int pos, int cap, const struct ds_alarm *r)
   pos = json_escape_append(out, pos, cap, r->alarm_type);
   pos = alarm_append(out, pos, cap, "\",\"alarm_value\":");
   pos = alarm_append_num(out, pos, cap, "%.2f", r->alarm_value);
-  pos = alarm_append(out, pos, cap, ",\"detail\":\"");
-  pos = json_escape_append(out, pos, cap, r->detail);
-  pos = alarm_append(out, pos, cap, "\"}");
+  pos = alarm_append(out, pos, cap, "}");
   return pos;
 }
 
@@ -1344,9 +1342,11 @@ struct alarm_page_work {
   unsigned long long conn_id;
   int page;
   int page_size;
-  char point_code[96];  // 可选精确过滤；空串 = 不过滤
+  char point_code[96];  // 可选过滤，支持逗号多值（绕组温度组）；空串 = 不过滤
   char rule_code[48];   // 可选精确过滤；空串 = 不过滤
   char event[16];       // 可选精确过滤；空串 = 不过滤（ALARM / RECOVER）
+  char alarm_type[160]; // 可选多值过滤（逗号分隔 01/02/03）；空串 = 不过滤
+  char keyword[128];    // 可选模糊搜索（场站/设备名称/设备ID）；空串 = 不过滤
   int n;                    // worker 填：行数，<0 查询失败
   unsigned long long total; // worker 填：匹配总数
   struct ds_alarm rows[ALARM_PAGE_MAX];
@@ -1360,7 +1360,9 @@ static void alarm_page_thread(void *param) {
                              ALARM_PAGE_MAX,
                              w->point_code[0] ? w->point_code : NULL,
                              w->rule_code[0] ? w->rule_code : NULL,
-                             w->event[0] ? w->event : NULL);
+                             w->event[0] ? w->event : NULL,
+                             w->alarm_type[0] ? w->alarm_type : NULL,
+                             w->keyword[0] ? w->keyword : NULL);
   w->n = n;
   w->total = total;
 
@@ -1447,7 +1449,7 @@ static void handle_alarms_get(struct mg_connection *c,
   w->conn_id = c->id;
   w->page = page;
   w->page_size = page_size;
-  // 可选过滤：测点 / 规则 / 事件 精确匹配。mg_http_get_var 已做 URL 解码；
+  // 可选过滤：测点 / 规则 / 事件 / 告警类型。mg_http_get_var 已做 URL 解码；
   // 长度被缓冲截断时值不再完整，最多匹配不到行，无注入面（值走参数化）。
   mg_http_get_var(&hm->query, "point_code", w->point_code,
                   sizeof(w->point_code));
@@ -1455,6 +1457,10 @@ static void handle_alarms_get(struct mg_connection *c,
                   sizeof(w->rule_code));
   mg_http_get_var(&hm->query, "event", w->event,
                   sizeof(w->event));
+  mg_http_get_var(&hm->query, "alarm_type", w->alarm_type,
+                  sizeof(w->alarm_type));
+  mg_http_get_var(&hm->query, "keyword", w->keyword,
+                  sizeof(w->keyword));
   start_thread(alarm_page_thread, w);
 }
 
@@ -1544,13 +1550,17 @@ static void csv_sep(struct csv_out *o) {
   csv_put(o, ",", 1);
 }
 
-static void csv_alarm_row(struct csv_out *o, const struct ds_alarm *r) {
+// event_all=0（event_type=false）时不输出「事件类型」「规则」两列
+static void csv_alarm_row(struct csv_out *o, const struct ds_alarm *r,
+                          int event_all) {
   char idbuf[24];
   snprintf(idbuf, sizeof(idbuf), "%llu", r->id);
   csv_put_str(o, idbuf);
   csv_sep(o);
-  csv_field(o, r->event);
-  csv_sep(o);
+  if (event_all) {
+    csv_field(o, r->event);
+    csv_sep(o);
+  }
   csv_field(o, r->ts);
   csv_sep(o);
   csv_field(o, r->region_company_name);
@@ -1565,8 +1575,10 @@ static void csv_alarm_row(struct csv_out *o, const struct ds_alarm *r) {
   csv_sep(o);
   csv_field(o, r->point_name);
   csv_sep(o);
-  csv_field(o, r->rule_code);
-  csv_sep(o);
+  if (event_all) {
+    csv_field(o, r->rule_code);
+    csv_sep(o);
+  }
   csv_field(o, r->alarm_type);
   csv_sep(o);
   csv_num(o, r->temperature, "%.2f");
@@ -1578,8 +1590,6 @@ static void csv_alarm_row(struct csv_out *o, const struct ds_alarm *r) {
   csv_num(o, r->range_20s, "%.2f");
   csv_sep(o);
   csv_num(o, r->alarm_value, "%.2f");
-  csv_sep(o);
-  csv_field(o, r->detail);
   csv_put(o, "\r\n", 2);
 }
 
@@ -1589,6 +1599,8 @@ static void alarm_export_thread(void *param) {
   char *body = NULL;
   size_t len = 0;
   char *headers = NULL;
+
+  int event_all = alarm_event_all();  // event_type=false 时 CSV 不含事件/规则列
 
   struct ds_alarm *rows =
       (struct ds_alarm *) calloc(ALARM_EXPORT_MAX, sizeof(*rows));
@@ -1602,10 +1614,16 @@ static void alarm_export_thread(void *param) {
     struct csv_out o;
     memset(&o, 0, sizeof(o));
     csv_put(&o, "\xEF\xBB\xBF", 3);  // UTF-8 BOM：Excel 直接识别中文
-    csv_put_str(&o, "事件ID,事件类型,触发时刻,区域公司,场站,设备ID,设备名称,"
-                    "测点编码,测点名称,规则,告警类型,温度,温升速率,"
-                    "1h极差,20s极差,告警值,详情\r\n");
-    for (int i = 0; i < n; i++) csv_alarm_row(&o, &rows[i]);
+    if (event_all) {
+      csv_put_str(&o, "事件ID,事件类型,触发时刻,区域公司,场站,设备ID,设备名称,"
+                      "测点编码,测点名称,规则,告警类型,温度,温升速率,"
+                      "1h极差,20s极差,告警值\r\n");
+    } else {
+      csv_put_str(&o, "事件ID,触发时刻,区域公司,场站,设备ID,设备名称,"
+                      "测点编码,测点名称,告警类型,温度,温升速率,"
+                      "1h极差,20s极差,告警值\r\n");
+    }
+    for (int i = 0; i < n; i++) csv_alarm_row(&o, &rows[i], event_all);
     if (o.failed) {
       free(o.buf);
       status = 500;

@@ -586,7 +586,7 @@ static void alarm_fill_row(struct ds_alarm *r, PGresult *res, int i) {
   r->range_1h = alarm_get_num(res, i, 12);
   r->range_20s = alarm_get_num(res, i, 13);
   r->alarm_value = alarm_get_num(res, i, 14);
-  alarm_set_str(r->detail, sizeof(r->detail), res, i, 15);
+  // detail 字段已从前端展示与接口输出中移除，不再查询填充
 }
 
 // 拉取 id > after_id 的新告警事件（按 id 升序，最多 max_rows 行）。
@@ -615,7 +615,7 @@ int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
       " rule_code, COALESCE(alarm_type, ''),"
       " temperature,"
       " range_1h, range_20s,"
-      " alarm_value, COALESCE(detail, '')"
+      " alarm_value"
       " FROM wind_alarm WHERE id > $1 ORDER BY id ASC LIMIT $2";
 
   static const char *SQL_ALARM_ONLY =
@@ -627,7 +627,7 @@ int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
       " rule_code, COALESCE(alarm_type, ''),"
       " temperature,"
       " range_1h, range_20s,"
-      " alarm_value, COALESCE(detail, '')"
+      " alarm_value"
       " FROM wind_alarm WHERE id > $1 AND event = 'ALARM'"
       " ORDER BY id ASC LIMIT $2";
 
@@ -650,13 +650,15 @@ int pg_get_new_alarms(unsigned long long after_id, struct ds_alarm *rows,
 }
 
 // 按 id 倒序分页查询告警历史（最新在前），供 /api/alarms/get 使用。
-// point_code / rule_code 为可选精确过滤（NULL 或空串 = 不过滤），值全部
-// 走 PQexecParams 参数化，列名硬编码，无注入面。
+// point_code / rule_code / event / alarm_type 为可选过滤（NULL 或空串 = 不过滤），
+// alarm_type 支持逗号分隔多值（如 "01-绝对值报警,02-死值校验"）。
+// 值全部走 PQexecParams 参数化，列名硬编码，无注入面。
 // total_out 返回过滤后匹配总数（前端分页器用）；返回行数，空页 0，失败 -1。
 int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
                        struct ds_alarm *rows, int max_rows,
                        const char *point_code, const char *rule_code,
-                       const char *event) {
+                       const char *event, const char *alarm_type,
+                       const char *keyword) {
   if (total_out != NULL) *total_out = 0;
   if (s_conn == NULL || rows == NULL || max_rows <= 0 ||
       page < 1 || page_size < 1) {
@@ -670,6 +672,47 @@ int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
   // event 过滤始终生效；alarm_only 时额外强制 event='ALARM'，
   // 用户若选 RECOVER 则 WHERE event='ALARM' AND event='RECOVER' 返回空。
   const int use_event = (event != NULL && event[0] != '\0');
+  // 告警类型多值过滤：逗号分隔，最多 3 类（01/02/03）。值为固定中文标签，
+  // 走参数化传递，无注入面。
+  char types[3][64];
+  int ntypes = 0;
+  if (alarm_type != NULL && alarm_type[0] != '\0') {
+    const char *p = alarm_type;
+    while (*p != '\0' && ntypes < 3) {
+      const char *comma = strchr(p, ',');
+      size_t len = comma != NULL ? (size_t) (comma - p) : strlen(p);
+      if (len > 0 && len < sizeof(types[0])) {
+        memcpy(types[ntypes], p, len);
+        types[ntypes][len] = '\0';
+        ntypes++;
+      }
+      if (comma == NULL) break;
+      p = comma + 1;
+    }
+  }
+  // 关键字模糊搜索：场站/设备名称/设备ID 任一匹配（与视频设备 keyword 语义一致）。
+  // 走参数化 LIKE，keyword 中的 %/_ 视为通配符，属预期行为。
+  const int use_keyword = (keyword != NULL && keyword[0] != '\0');
+  char like_pattern[256] = "";
+  if (use_keyword) snprintf(like_pattern, sizeof(like_pattern), "%%%s%%", keyword);
+  // point_code 支持逗号分隔多值（前端「绕组温度」组 = 6 个测点编码一起过滤），
+  // 单值保持 point_code = $n，多值用 (point_code = $n OR ...)。全部参数化。
+  char points[8][40];
+  int npoints = 0;
+  if (use_point) {
+    const char *p = point_code;
+    while (*p != '\0' && npoints < 8) {
+      const char *comma = strchr(p, ',');
+      size_t len = comma != NULL ? (size_t) (comma - p) : strlen(p);
+      if (len > 0 && len < sizeof(points[0])) {
+        memcpy(points[npoints], p, len);
+        points[npoints][len] = '\0';
+        npoints++;
+      }
+      if (comma == NULL) break;
+      p = comma + 1;
+    }
+  }
 
   pg_mutex_lock();
   if (s_conn == NULL) {
@@ -679,23 +722,39 @@ int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
 
   // 先取总数（带相同过滤条件）：wind_alarm 为只追加的告警流水表，
   // 规模远小于秒级明细表。过滤列参数编号从 $1 起。
-  char count_sql[256];
-  const char *cvals[3];
+  char count_sql[768];
+  const char *cvals[16];
   int cn = 0;
   strcpy(count_sql, "SELECT count(*) FROM wind_alarm");
-  char cwhere[200] = "";
+  char cwhere[448] = "";
   int cidx = 1;
   int has_where = 0;
   if (alarm_only) {
     strcpy(cwhere, " WHERE event = 'ALARM'");
     has_where = 1;
   }
-  if (use_point) {
+  if (npoints == 1) {
     const char *conj = has_where ? " AND" : " WHERE";
     snprintf(cwhere + strlen(cwhere), sizeof(cwhere) - strlen(cwhere),
              "%s point_code = $%d", conj, cidx);
     cidx++;
-    cvals[cn++] = point_code;
+    cvals[cn++] = points[0];
+    has_where = 1;
+  } else if (npoints > 1) {
+    char pcond[256];
+    int plen = snprintf(pcond, sizeof(pcond), "(point_code = $%d", cidx);
+    cvals[cn++] = points[0];
+    cidx++;
+    for (int t = 1; t < npoints; t++) {
+      plen += snprintf(pcond + plen, sizeof(pcond) - plen,
+                       " OR point_code = $%d", cidx);
+      cvals[cn++] = points[t];
+      cidx++;
+    }
+    snprintf(pcond + plen, sizeof(pcond) - plen, ")");
+    const char *conj = has_where ? " AND" : " WHERE";
+    snprintf(cwhere + strlen(cwhere), sizeof(cwhere) - strlen(cwhere),
+             "%s %s", conj, pcond);
     has_where = 1;
   }
   if (use_rule) {
@@ -712,6 +771,34 @@ int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
              "%s event = $%d", conj, cidx);
     cidx++;
     cvals[cn++] = event;
+    has_where = 1;
+  }
+  if (ntypes > 0) {
+    char atype[256];
+    int alen = snprintf(atype, sizeof(atype), "(alarm_type = $%d", cidx);
+    cvals[cn++] = types[0];
+    cidx++;
+    for (int t = 1; t < ntypes; t++) {
+      alen += snprintf(atype + alen, sizeof(atype) - alen,
+                       " OR alarm_type = $%d", cidx);
+      cvals[cn++] = types[t];
+      cidx++;
+    }
+    snprintf(atype + alen, sizeof(atype) - alen, ")");
+    const char *conj = has_where ? " AND" : " WHERE";
+    snprintf(cwhere + strlen(cwhere), sizeof(cwhere) - strlen(cwhere),
+             "%s %s", conj, atype);
+    has_where = 1;
+  }
+  if (use_keyword) {
+    const char *conj = has_where ? " AND" : " WHERE";
+    snprintf(cwhere + strlen(cwhere), sizeof(cwhere) - strlen(cwhere),
+             "%s (station_name LIKE $%d OR device_name LIKE $%d"
+             " OR device_id LIKE $%d)", conj, cidx, cidx + 1, cidx + 2);
+    cidx += 3;
+    cvals[cn++] = like_pattern;
+    cvals[cn++] = like_pattern;
+    cvals[cn++] = like_pattern;
     has_where = 1;
   }
   strcat(count_sql, cwhere);
@@ -737,7 +824,9 @@ int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
   char limitbuf[16], offsetbuf[32];
   snprintf(limitbuf, sizeof(limitbuf), "%d", page_size);
   snprintf(offsetbuf, sizeof(offsetbuf), "%lld", offset);
-  const char *vals[5] = {limitbuf, offsetbuf, NULL, NULL, NULL};
+  const char *vals[18] = {limitbuf, offsetbuf, NULL, NULL, NULL, NULL,
+                          NULL, NULL, NULL, NULL, NULL, NULL,
+                          NULL, NULL, NULL, NULL, NULL, NULL};
   int vn = 2;
 
   // 分页查询：$1=LIMIT $2=OFFSET，过滤列从 $3 起
@@ -750,23 +839,39 @@ int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
       " rule_code, COALESCE(alarm_type, ''),"
       " temperature,"
       " range_1h, range_20s,"
-      " alarm_value, COALESCE(detail, '')"
+      " alarm_value"
       " FROM wind_alarm";
-  char sql[1024];
+  char sql[1152];
   strcpy(sql, SELECT_COLS);
-  char where[200] = "";
+  char where[448] = "";
   int widx = 3;
   int whas = 0;
   if (alarm_only) {
     strcpy(where, " WHERE event = 'ALARM'");
     whas = 1;
   }
-  if (use_point) {
+  if (npoints == 1) {
     const char *conj = whas ? " AND" : " WHERE";
     snprintf(where + strlen(where), sizeof(where) - strlen(where),
              "%s point_code = $%d", conj, widx);
     widx++;
-    vals[vn++] = point_code;
+    vals[vn++] = points[0];
+    whas = 1;
+  } else if (npoints > 1) {
+    char pcond[256];
+    int plen = snprintf(pcond, sizeof(pcond), "(point_code = $%d", widx);
+    vals[vn++] = points[0];
+    widx++;
+    for (int t = 1; t < npoints; t++) {
+      plen += snprintf(pcond + plen, sizeof(pcond) - plen,
+                       " OR point_code = $%d", widx);
+      vals[vn++] = points[t];
+      widx++;
+    }
+    snprintf(pcond + plen, sizeof(pcond) - plen, ")");
+    const char *conj = whas ? " AND" : " WHERE";
+    snprintf(where + strlen(where), sizeof(where) - strlen(where),
+             "%s %s", conj, pcond);
     whas = 1;
   }
   if (use_rule) {
@@ -783,6 +888,34 @@ int pg_get_alarms_page(int page, int page_size, unsigned long long *total_out,
              "%s event = $%d", conj, widx);
     widx++;
     vals[vn++] = event;
+    whas = 1;
+  }
+  if (ntypes > 0) {
+    char atype[256];
+    int alen = snprintf(atype, sizeof(atype), "(alarm_type = $%d", widx);
+    vals[vn++] = types[0];
+    widx++;
+    for (int t = 1; t < ntypes; t++) {
+      alen += snprintf(atype + alen, sizeof(atype) - alen,
+                       " OR alarm_type = $%d", widx);
+      vals[vn++] = types[t];
+      widx++;
+    }
+    snprintf(atype + alen, sizeof(atype) - alen, ")");
+    const char *conj = whas ? " AND" : " WHERE";
+    snprintf(where + strlen(where), sizeof(where) - strlen(where),
+             "%s %s", conj, atype);
+    whas = 1;
+  }
+  if (use_keyword) {
+    const char *conj = whas ? " AND" : " WHERE";
+    snprintf(where + strlen(where), sizeof(where) - strlen(where),
+             "%s (station_name LIKE $%d OR device_name LIKE $%d"
+             " OR device_id LIKE $%d)", conj, widx, widx + 1, widx + 2);
+    widx += 3;
+    vals[vn++] = like_pattern;
+    vals[vn++] = like_pattern;
+    vals[vn++] = like_pattern;
     whas = 1;
   }
   strcat(sql, where);
@@ -833,7 +966,7 @@ int pg_get_alarms_range(const char *start, const char *end,
       " rule_code, COALESCE(alarm_type, ''),"
       " temperature,"
       " range_1h, range_20s,"
-      " alarm_value, COALESCE(detail, '')"
+      " alarm_value"
       " FROM wind_alarm"
       " WHERE ts >= $1::timestamp"
       " AND ts < ($2::timestamp + interval '1 second')"
@@ -848,7 +981,7 @@ int pg_get_alarms_range(const char *start, const char *end,
       " rule_code, COALESCE(alarm_type, ''),"
       " temperature,"
       " range_1h, range_20s,"
-      " alarm_value, COALESCE(detail, '')"
+      " alarm_value"
       " FROM wind_alarm"
       " WHERE ts >= $1::timestamp"
       " AND ts < ($2::timestamp + interval '1 second')"
@@ -896,7 +1029,7 @@ int pg_get_recent_alarms(struct ds_alarm *rows, int max_rows) {
       " rule_code, COALESCE(alarm_type, ''),"
       " temperature,"
       " range_1h, range_20s,"
-      " alarm_value, COALESCE(detail, '')"
+      " alarm_value"
       " FROM wind_alarm ORDER BY id DESC LIMIT $1";
 
   static const char *SQL_ALARM_ONLY =
@@ -908,7 +1041,7 @@ int pg_get_recent_alarms(struct ds_alarm *rows, int max_rows) {
       " rule_code, COALESCE(alarm_type, ''),"
       " temperature,"
       " range_1h, range_20s,"
-      " alarm_value, COALESCE(detail, '')"
+      " alarm_value"
       " FROM wind_alarm WHERE event = 'ALARM' ORDER BY id DESC LIMIT $1";
 
   const char *sql = s_alarm_include_recover ? SQL_ALL : SQL_ALARM_ONLY;
