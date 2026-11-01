@@ -1553,10 +1553,6 @@ static void csv_sep(struct csv_out *o) {
 // event_all=0（event_type=false）时不输出「事件类型」「规则」两列
 static void csv_alarm_row(struct csv_out *o, const struct ds_alarm *r,
                           int event_all) {
-  char idbuf[24];
-  snprintf(idbuf, sizeof(idbuf), "%llu", r->id);
-  csv_put_str(o, idbuf);
-  csv_sep(o);
   if (event_all) {
     csv_field(o, r->event);
     csv_sep(o);
@@ -1615,11 +1611,11 @@ static void alarm_export_thread(void *param) {
     memset(&o, 0, sizeof(o));
     csv_put(&o, "\xEF\xBB\xBF", 3);  // UTF-8 BOM：Excel 直接识别中文
     if (event_all) {
-      csv_put_str(&o, "事件ID,事件类型,触发时刻,区域公司,场站,设备ID,设备名称,"
+      csv_put_str(&o, "事件类型,触发时刻,区域公司,场站,设备ID,设备名称,"
                       "测点编码,测点名称,规则,告警类型,温度,温升速率,"
                       "1h极差,20s极差,告警值\r\n");
     } else {
-      csv_put_str(&o, "事件ID,触发时刻,区域公司,场站,设备ID,设备名称,"
+      csv_put_str(&o, "触发时刻,区域公司,场站,设备ID,设备名称,"
                       "测点编码,测点名称,告警类型,温度,温升速率,"
                       "1h极差,20s极差,告警值\r\n");
     }

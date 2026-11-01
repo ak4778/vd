@@ -103,7 +103,7 @@ function Sidebar({url, show, alarmUnread, videoEnabled}) {
     <//>
     <div class="flex flex-1 flex-col gap-y-1">
       ${videoEnabled && html`<${NavLink} title="视频设备" icon=${Icons.camera} href="/events" url=${url} />`}
-      <${NavLink} title="实时告警" icon=${Icons.exclamationTriangle} href="/alarms" url=${url} badge=${url === '/alarms' ? 0 : alarmUnread} />
+      <${NavLink} title="风机告警" icon=${Icons.exclamationTriangle} href="/alarms" url=${url} badge=${url === '/alarms' ? 0 : alarmUnread} />
     <//>
   <//>
 <//>`;
@@ -753,7 +753,7 @@ return html`
 <//>`;
 };
 
-// ---- 实时告警页（数据来自 /api/alarms/ws 推送，App 持有 state） ----
+// ---- 风机告警页（数据来自 /api/alarms/ws 推送，App 持有 state） ----
 // NOTE: AlarmRow 定义在模块作用域，原因见上方 Td/Node 的注释（Preact diffing）。
 const ALARM_CAP = 500;  // 前端最多保留的告警条数（超出丢弃最旧）
 
@@ -1080,7 +1080,7 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
   <div class="flex-1 min-h-0 flex flex-col p-2">
     <div class="ind-panel flex-1 min-h-0 flex flex-col">
     <div class="ind-titlebar">
-      <span class="text-lg font-bold text-slate-700 ind-text">实时告警</span>
+      <span class="text-lg font-bold text-slate-700 ind-text">风机告警</span>
       <span class="flex items-center gap-1.5 text-sm ${wsOk ? 'text-green-600 ind-ok' : (authLost ? 'text-amber-600' : 'text-red-500 ind-bad')}">
         <span class="lamp ${wsOk ? 'lamp-green' : 'lamp-red'}"><//>
         ${wsOk ? '已连接' : (authLost ? '登录已失效' : '重连中...')}
