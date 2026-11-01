@@ -1575,15 +1575,13 @@ static void csv_alarm_row(struct csv_out *o, const struct ds_alarm *r,
     csv_field(o, r->rule_code);
     csv_sep(o);
   }
-  csv_field(o, r->alarm_type);
-  csv_sep(o);
   csv_num(o, r->temperature, "%.2f");
-  csv_sep(o);
-  csv_num(o, r->temp_rate, "%.4f");
   csv_sep(o);
   csv_num(o, r->range_1h, "%.2f");
   csv_sep(o);
   csv_num(o, r->range_20s, "%.2f");
+  csv_sep(o);
+  csv_field(o, r->alarm_type);
   csv_sep(o);
   csv_num(o, r->alarm_value, "%.2f");
   csv_put(o, "\r\n", 2);
@@ -1611,13 +1609,13 @@ static void alarm_export_thread(void *param) {
     memset(&o, 0, sizeof(o));
     csv_put(&o, "\xEF\xBB\xBF", 3);  // UTF-8 BOM：Excel 直接识别中文
     if (event_all) {
-      csv_put_str(&o, "事件类型,触发时刻,区域公司,场站,设备ID,设备名称,"
-                      "测点编码,测点名称,规则,告警类型,温度,温升速率,"
-                      "1h极差,20s极差,告警值\r\n");
+      csv_put_str(&o, "事件类型,时间戳,公司,场站,机组编号,机组名称,"
+                      "测点编码,测点名称,规则,温度,1小时温度极差,"
+                      "20秒温度极差,报警类型,报警值\r\n");
     } else {
-      csv_put_str(&o, "触发时刻,区域公司,场站,设备ID,设备名称,"
-                      "测点编码,测点名称,告警类型,温度,温升速率,"
-                      "1h极差,20s极差,告警值\r\n");
+      csv_put_str(&o, "时间戳,公司,场站,机组编号,机组名称,"
+                      "测点编码,测点名称,温度,1小时温度极差,"
+                      "20秒温度极差,报警类型,报警值\r\n");
     }
     for (int i = 0; i < n; i++) csv_alarm_row(&o, &rows[i], event_all);
     if (o.failed) {

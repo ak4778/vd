@@ -130,6 +130,10 @@
       .ind-theme svg .ll-cls-1 { stroke: #7fb3ff; }
       /* ===== 风机告警页：自动滚动开关 + 新告警提示条 + 历史页标记 ===== */
       .alarm-auto-scroll { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; font-size: 12px; color: #64748b; cursor: pointer; user-select: none; }
+      /* 自动滚动左侧的旋转风机图标 */
+      .turbine-icon { width: 16px; height: 16px; flex: none; }
+      .turbine-icon .turbine-blades { transform-box: fill-box; transform-origin: center; animation: turbine-rot 2.4s linear infinite; }
+      @keyframes turbine-rot { to { transform: rotate(360deg); } }
       .alarm-auto-scroll input[type="checkbox"] { width: 13px; height: 13px; margin: 0; cursor: pointer; accent-color: #2563eb; }
       .ind-theme .alarm-auto-scroll { color: #8aa2ba; }
       .alarm-new-banner { display: flex; align-items: center; gap: 6px; padding: 5px 12px; background: #fef3c7; color: #92400e; border-bottom: 1px solid #fcd34d; font-size: 12px; font-weight: 600; cursor: pointer; user-select: none; }
@@ -192,5 +196,5 @@
   <body class="h-full"></body>
   <link rel="stylesheet" href="dist/tailwind.css">
   <script src="history.min.js"></script>
-  <script type="module" src="main.js?v=20261101a"></script>
+  <script type="module" src="main.js?v=20261101b"></script>
 </html>

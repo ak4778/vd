@@ -1090,6 +1090,16 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
       ${latest && html`<span class="text-sm ind-dim">最新: ${latest}<//>`}
       ${page > 1 && html`<span class="alarm-hist-hint" title="新告警仍会实时进入第 1 页">历史浏览中<//>`}
       <label class="alarm-auto-scroll ${page > 1 ? 'opacity-40' : ''}" title=${page > 1 ? '仅第 1 页实时视图可用' : '勾选：新告警自动滚到顶部；取消：冻结当前列表，只提示新告警数量'}>
+        <svg class="turbine-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+          <path d="M12 12.6 L12 21" />
+          <path d="M9 21 L15 21" />
+          <g class="turbine-blades" fill="currentColor" stroke="none">
+            <path d="M12 10.8 L11 2.8 L13 2.8 Z" />
+            <path d="M12 10.8 L11 2.8 L13 2.8 Z" transform="rotate(120 12 11)" />
+            <path d="M12 10.8 L11 2.8 L13 2.8 Z" transform="rotate(240 12 11)" />
+            <circle cx="12" cy="11" r="1.4" />
+          </g>
+        </svg>
         <input type="checkbox" checked=${autoScroll} disabled=${page > 1} onchange=${e => toggleAutoScroll(e.target.checked)} />
         自动滚动
       <//>
