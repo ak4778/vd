@@ -192,6 +192,9 @@ MAX_WINDOW_SECONDS = 240
 FETCH_INTERVAL_SECONDS = 30
 FETCH_WORKERS = 4
 FUTURE_FILTER_SECONDS = 30 * 60
+# 数据源断流检测：连续该时长拉不到任何数据即判定断流，按间隔重复告警，恢复时记一条 INFO
+OUTAGE_ALERT_SECONDS = 1200     # 20 分钟无数据判定为断流
+OUTAGE_REPEAT_SECONDS = 1800    # 断流期间每 30 分钟提醒一次
 _empty_streak = 0                           # 连续「拉取 0 条」的轮数（仅用于告警计数）
 
 # ---------------- 采集时段（每天仅此时段采集，其余时间空闲；支持多段） ----------------
@@ -214,7 +217,7 @@ WATERMARK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               'pv_watermark.json')
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         'pv_fetch.log')
-LOG_TO_FILE = False
+LOG_TO_FILE = True              # True=同时写文件+控制台；断流等告警必须落盘可追溯
 LOG_BACKUP_DAYS = 30
 
 # ---------------- 历史分区空间回收 ----------------
@@ -845,6 +848,9 @@ def main():
     except Exception as e:
         log.warning('分区维护失败（不影响采集）: %r', e)
     last_integrity = time.time()
+    last_data_time = time.time()  # 最近一次拉到非空数据的时刻（断流检测基线）
+    outage_warned_at = 0.0        # 上次断流告警时刻
+    outage_active = False         # 当前是否处于断流状态
     threading.Thread(target=_refetch_worker, name='refetch', daemon=True).start()
     idle = None  # None=未知, True=空闲中, False=采集时段内
     idle_cycles = 0  # 空闲循环累计轮数，用于周期性心跳
@@ -880,6 +886,21 @@ def main():
             start, end, fetched, ingested, caught_up = tick(now)
             log.info('窗口 [%s, %s) 拉取 %s 条，入库 %s 条，水位线 -> %s',
                      start, end, fetched, ingested, end)
+            # 断流检测：采集时段内连续无数据超过阈值判定源端断流，按间隔重复告警
+            now_ts = time.time()
+            if fetched > 0:
+                if outage_active:
+                    log.info('数据源恢复：断流 %s 分钟后重新拉到数据',
+                             int((now_ts - last_data_time) // 60))
+                    outage_active = False
+                last_data_time = now_ts
+            elif now_ts - last_data_time >= OUTAGE_ALERT_SECONDS:
+                outage_active = True
+                if now_ts - outage_warned_at >= OUTAGE_REPEAT_SECONDS:
+                    log.warning('数据源断流：已 %s 分钟没拉到任何数据（当前采集时段内），'
+                                '请检查上游采集/发布',
+                                int((now_ts - last_data_time) // 60))
+                    outage_warned_at = now_ts
         except Exception as e:
             caught_up = True
             log.warning('本轮失败，水位线不推进，%ss 后从原位重拉: %r',

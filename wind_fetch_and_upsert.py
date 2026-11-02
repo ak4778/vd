@@ -280,6 +280,9 @@ MAX_WINDOW_SECONDS = 600        # 追历史时单窗上限；过大的窗口易�
 FETCH_INTERVAL_SECONDS = 30     # 每轮间隔
 FETCH_WORKERS = 8               # 并发拉取 tag 的线程数
 FUTURE_FILTER_SECONDS = 30 * 60  # 未来时间防御阈值：ts 超过 now+30min 的点丢弃
+# 数据源断流检测：连续该时长拉不到任何数据即判定断流，按间隔重复告警，恢复时记一条 INFO
+OUTAGE_ALERT_SECONDS = 1200     # 20 分钟无数据判定为断流
+OUTAGE_REPEAT_SECONDS = 1800    # 断流期间每 30 分钟提醒一次
 MOCK = False                    # True = 不请求真实接口，用模拟数据
 LOG_LEVEL = 'INFO'               # DEBUG=打印每条入库/每个查询明细；INFO=只留主干；WARNING=只留异常
 
@@ -290,8 +293,8 @@ WATERMARK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 ROLLUP_SQL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                'wind_rollup_minute.sql')
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        'fetch.log')
-LOG_TO_FILE = False             # True=同时写文件+控制台；False=只打印到屏幕
+                        'wind_fetch.log')
+LOG_TO_FILE = True              # True=同时写文件+控制台；断流等告警必须落盘可追溯
 LOG_BACKUP_DAYS = 30
 
 
@@ -820,12 +823,30 @@ def main():
     except Exception as e:
         log.warning('启动初始化失败（不影响采集，下轮跨分钟重试）: %r', e)
     last_integrity = time.time()  # 启动满一个自检周期后开始
+    last_data_time = time.time()  # 最近一次拉到非空数据的时刻（断流检测基线）
+    outage_warned_at = 0.0        # 上次断流告警时刻
+    outage_active = False         # 当前是否处于断流状态
     while True:
         stamp = datetime.now().strftime(TS_FMT)
         try:
             start, end, fetched, ingested, caught_up = tick()
             log.info('窗口 [%s, %s) 拉取 %s 条，入库 %s 条，水位线 -> %s',
                      start, end, fetched, ingested, end)
+            # 断流检测：连续无数据超过阈值判定源端断流，按间隔重复告警
+            now_ts = time.time()
+            if fetched > 0:
+                if outage_active:
+                    log.info('数据源恢复：断流 %s 分钟后重新拉到数据',
+                             int((now_ts - last_data_time) // 60))
+                    outage_active = False
+                last_data_time = now_ts
+            elif now_ts - last_data_time >= OUTAGE_ALERT_SECONDS:
+                outage_active = True
+                if now_ts - outage_warned_at >= OUTAGE_REPEAT_SECONDS:
+                    log.warning('数据源断流：已 %s 分钟没拉到任何数据，'
+                                '请检查上游采集/发布（水位线仍在推进）',
+                                int((now_ts - last_data_time) // 60))
+                    outage_warned_at = now_ts
             this_min = stamp[:16]  # 'YYYY-MM-DD HH:MM'
             if this_min != last_rollup_min:  # 跨分钟即触发，失败不影响水位线
                 last_rollup_min = this_min

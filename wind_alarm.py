@@ -144,6 +144,9 @@ FROZEN_FRESHNESS = 1200
 C02_STALE_RECOVER = 1800
 ALARM_COOLDOWN = 600      # 同类告警冷却(秒)，恢复后可重新告警
 HEARTBEAT_TICKS = 5       # 每5轮(约5分钟)打印一次心跳
+# 数据源断流检测：所有序列连续该时长无新数据即判定断流，按间隔重复告警，恢复时记一条
+OUTAGE_ALERT_SECONDS = 1200   # 20 分钟无新数据判定为断流
+OUTAGE_REPEAT_SECONDS = 1800  # 断流期间每 30 分钟提醒一次
 
 # 报警类型统一格式：01-绝对值报警 / 02-死值校验 / 03-突变报警
 ALARM_TYPE_MAP = {
@@ -304,8 +307,7 @@ CREATE TABLE IF NOT EXISTS {TABLE_ALARM} (
     temperature          double precision,
     range_1h             double precision,
     range_20s            double precision,
-    alarm_value          double precision,
-    detail               text
+    alarm_value          double precision
 )
 """
 
@@ -317,8 +319,7 @@ def ensure_alarm_table():
     try:
         cur = conn.cursor()
         cur.execute(DDL_ALARM)
-        # 旧表可能残留 event_time 列：统一改用时序 ts，这里幂等清理
-        cur.execute(f'ALTER TABLE {TABLE_ALARM} DROP COLUMN IF EXISTS event_time')
+        cur.execute(f'ALTER TABLE {TABLE_ALARM} DROP COLUMN IF EXISTS detail')
         cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{TABLE_ALARM}_device_ts '
                     f'ON {TABLE_ALARM} (device_id, ts DESC)')
         cur.execute(f'CREATE INDEX IF NOT EXISTS idx_{TABLE_ALARM}_rule_ts '
@@ -456,8 +457,8 @@ class AlarmEngine:
         INSERT INTO {TABLE_ALARM} (
             event, ts, region_company_name, station_name,
             device_id, device_name, point_code, point_name, rule_code, alarm_type,
-            temperature, range_1h, range_20s, alarm_value, detail)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            temperature, range_1h, range_20s, alarm_value)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     def __init__(self, csv_path, dev_map):
@@ -555,7 +556,6 @@ class AlarmEngine:
             rule_code, ALARM_TYPE_MAP.get(rule_code, rule_code),
             temp, r1h, r20s,
             alarm_val if event == 'ALARM' else None,
-            detail or None,
         )
         try:
             cur = self._get_pg().cursor()
@@ -938,6 +938,9 @@ def run():
         log(f"回灌完成：序列 {ok}，拉取错误 {fail}，超温点 {exceed_total} 条，"
             f"开始实时监控（每 {POLL_INTERVAL}s 一轮）")
 
+        last_data_epoch = time.time()   # 最近一次有新数据的时刻（断流检测基线）
+        outage_warned_at = 0.0          # 上次断流告警时刻
+        outage_active = False           # 当前是否处于断流状态
         tick = 0
         while True:
             t0 = time.time()
@@ -969,11 +972,13 @@ def run():
                     f"活跃序列 {len(skip_upto)}）===")
             else:
                 log(f"=== round {tick + 1} 拉取最近 {FETCH_LOOKBACK}s 数据 ===")
+            round_new = 0
             for d, pc in tasks:
                 wid = d['wid']
                 items = fetched.get((wid, pc), [])
                 buf = buffers[(wid, pc)]
                 new_recs = buf.add_raw(items, now_epoch)
+                round_new += len(new_recs)
                 exceed_total += write_exceed_points(exceed, dev_map[wid], pc, new_recs)
                 latest = buf.latest()
 
@@ -1010,6 +1015,20 @@ def run():
 
                 # 规则03
                 eval_fluct_tick(buf, now_epoch, engine, wid, pc, stats)
+
+            # 断流检测：所有序列连续无新数据超过阈值判定数据源断流，按间隔重复告警
+            if round_new > 0:
+                if outage_active:
+                    log(f"数据源恢复：断流 {int((now_epoch - last_data_epoch) // 60)} 分钟后"
+                        f"重新获取到数据")
+                    outage_active = False
+                last_data_epoch = now_epoch
+            elif now_epoch - last_data_epoch >= OUTAGE_ALERT_SECONDS:
+                outage_active = True
+                if now_epoch - outage_warned_at >= OUTAGE_REPEAT_SECONDS:
+                    log(f"数据源断流：已 {int((now_epoch - last_data_epoch) // 60)} 分钟无新数据，"
+                        f"请检查上游采集/发布；活跃告警按最后状态挂起")
+                    outage_warned_at = now_epoch
 
             tick += 1
             if tick % HEARTBEAT_TICKS == 0:
