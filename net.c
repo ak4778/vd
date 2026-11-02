@@ -1550,13 +1550,8 @@ static void csv_sep(struct csv_out *o) {
   csv_put(o, ",", 1);
 }
 
-// event_all=0（event_type=false）时不输出「事件类型」「规则」两列
-static void csv_alarm_row(struct csv_out *o, const struct ds_alarm *r,
-                          int event_all) {
-  if (event_all) {
-    csv_field(o, r->event);
-    csv_sep(o);
-  }
+// 导出固定 12 列，不输出「事件类型」「规则」两列（与 event_type 配置无关）
+static void csv_alarm_row(struct csv_out *o, const struct ds_alarm *r) {
   csv_field(o, r->ts);
   csv_sep(o);
   csv_field(o, r->region_company_name);
@@ -1571,10 +1566,6 @@ static void csv_alarm_row(struct csv_out *o, const struct ds_alarm *r,
   csv_sep(o);
   csv_field(o, r->point_name);
   csv_sep(o);
-  if (event_all) {
-    csv_field(o, r->rule_code);
-    csv_sep(o);
-  }
   csv_num(o, r->temperature, "%.2f");
   csv_sep(o);
   csv_num(o, r->range_1h, "%.2f");
@@ -1594,8 +1585,6 @@ static void alarm_export_thread(void *param) {
   size_t len = 0;
   char *headers = NULL;
 
-  int event_all = alarm_event_all();  // event_type=false 时 CSV 不含事件/规则列
-
   struct ds_alarm *rows =
       (struct ds_alarm *) calloc(ALARM_EXPORT_MAX, sizeof(*rows));
   int n = rows == NULL ? -1 : ds_get_alarms_range(w->start, w->end, rows,
@@ -1608,16 +1597,10 @@ static void alarm_export_thread(void *param) {
     struct csv_out o;
     memset(&o, 0, sizeof(o));
     csv_put(&o, "\xEF\xBB\xBF", 3);  // UTF-8 BOM：Excel 直接识别中文
-    if (event_all) {
-      csv_put_str(&o, "事件类型,时间戳,公司,场站,机组编号,机组名称,"
-                      "测点编码,测点名称,规则,温度,1小时温度极差,"
-                      "20秒温度极差,报警类型,报警值\r\n");
-    } else {
-      csv_put_str(&o, "时间戳,公司,场站,机组编号,机组名称,"
-                      "测点编码,测点名称,温度,1小时温度极差,"
-                      "20秒温度极差,报警类型,报警值\r\n");
-    }
-    for (int i = 0; i < n; i++) csv_alarm_row(&o, &rows[i], event_all);
+    csv_put_str(&o, "时间戳,公司,场站,机组编号,机组名称,"
+                    "测点编码,测点名称,温度,1小时温度极差,"
+                    "20秒温度极差,报警类型,报警值\r\n");
+    for (int i = 0; i < n; i++) csv_alarm_row(&o, &rows[i]);
     if (o.failed) {
       free(o.buf);
       status = 500;
