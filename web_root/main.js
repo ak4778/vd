@@ -857,11 +857,11 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
   }, [showTypeDropdown]);
   // event_type=false（alarmEventAll=false）时整个事件过滤下拉不渲染，eventFilter 恒为 ''
   const [pointOptions, setPointOptions] = useState([]);  // [{code, name}]
-  // 按日期导出 CSV：默认当天（本地时区）；区间模式默认当天 00:00 ~ 23:59
+  // 按日期导出 CSV：默认当天（本地时区）；区间模式默认当天 00:00:00 ~ 23:59:59
   const [exportMode, setExportMode] = useState('day');  // 'day' | 'range'
   const [exportDate, setExportDate] = useState(() => localDateStr());
-  const [exportStart, setExportStart] = useState(() => `${localDateStr()}T00:00`);
-  const [exportEnd, setExportEnd] = useState(() => `${localDateStr()}T23:59`);
+  const [exportStart, setExportStart] = useState(() => `${localDateStr()} 00:00:00`);
+  const [exportEnd, setExportEnd] = useState(() => `${localDateStr()} 23:59:59`);
   // 过滤激活时的实时总数增量：仅统计匹配过滤条件的 WS 新行
   const [filteredRx, setFilteredRx] = useState(0);
   const seenMaxIdRef = useRef(0);
@@ -910,11 +910,15 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
     return q.length ? '&' + q.join('&') : '';
   };
 
-  // datetime-local（YYYY-MM-DDTHH:MM）转接口时间格式 YYYY-MM-DD HH:MM:SS
+  // 区间输入为 24 小时制文本 YYYY-MM-DD HH:MM[:SS]（避免 datetime-local 在
+  // en-US 环境下渲染成 AM/PM）；转成接口要求的 YYYY-MM-DD HH:MM:SS
   const toApiTs = v => {
-    if (!v) return '';
-    const s = v.replace('T', ' ');
-    return s.length === 16 ? `${s}:00` : s;
+    const s = (v || '').trim().replace('T', ' ');
+    const m = s.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2})(?::(\d{2}))?$/);
+    if (!m) return '';
+    const hh = +m[2], mi = +m[3], ss = m[4] ? +m[4] : 0;
+    if (hh > 23 || mi > 59 || ss > 59) return '';
+    return `${m[1]} ${m[2]}:${m[3]}:${String(ss).padStart(2, '0')}`;
   };
 
   // 按日期/区间导出 CSV：走 GET 附件下载，cookie 自动携带，无需前端拼接内容
@@ -928,7 +932,10 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
     } else {
       const st = toApiTs(exportStart);
       const en = toApiTs(exportEnd);
-      if (!st || !en) return;
+      if (!st || !en) {
+        alert('时间格式应为 YYYY-MM-DD HH:MM:SS（24 小时制，小时 00-23）');
+        return;
+      }
       q = `start=${encodeURIComponent(st)}&end=${encodeURIComponent(en)}`;
       name = `alarms_${st.replace(/[ :]/g, '-')}_${en.replace(/[ :]/g, '-')}.csv`;
     }
@@ -1160,13 +1167,15 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
                  title="选择导出哪一天的告警（本地日期）" />
         ` : html`
           <span class="alarm-filter-label">区间导出</span>
-          <input type="datetime-local" step="1" class="alarm-export-date"
-                 value=${exportStart}
-                 onchange=${e => setExportStart(e.target.value)} title="开始时刻" />
+          <input type="text" class="alarm-export-date" style="width:148px"
+                 value=${exportStart} placeholder="YYYY-MM-DD HH:MM:SS"
+                 oninput=${e => setExportStart(e.currentTarget.value)}
+                 title="开始时刻（24 小时制，小时 00-23）" />
           <span class="alarm-export-tilde">~</span>
-          <input type="datetime-local" step="1" class="alarm-export-date"
-                 value=${exportEnd}
-                 onchange=${e => setExportEnd(e.target.value)} title="结束时刻" />
+          <input type="text" class="alarm-export-date" style="width:148px"
+                 value=${exportEnd} placeholder="YYYY-MM-DD HH:MM:SS"
+                 oninput=${e => setExportEnd(e.currentTarget.value)}
+                 title="结束时刻（24 小时制，小时 00-23）" />
         `}
         <button type="button" class="alarm-filter-clear" onclick=${exportCsv}
                 title="导出所选范围为 CSV（UTF-8 BOM，Excel 可直接打开）">导出 CSV<//>
