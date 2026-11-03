@@ -59,12 +59,13 @@ si AS (
 ),
 ex AS (
     -- 排除已被 pv_inverter_branch_abnormal 标记的逆变器+支路：
-    -- 支路24 -> STRING_BRANCH24_A，inverter_id 与 device_id 同为大写比对
+    -- 匹配 "支路N" 不限定开头，如 "ccc支路1损点击" 也要对应 STRING_BRANCH1_A
+    -- inverter_id 与 device_id 同为大写比对
     SELECT DISTINCT
-        upper(inverter_id)                                             AS dev_key,
-        'STRING_BRANCH' || substring(branch_name FROM '[0-9]+') || '_A' AS point_code
+        upper(inverter_id)                                                         AS dev_key,
+        'STRING_BRANCH' || substring(branch_name FROM '支路([0-9]+)') || '_A'       AS point_code
     FROM pv_inverter_branch_abnormal
-    WHERE branch_name ~ '^支路[0-9]+$'
+    WHERE branch_name ~ '支路[0-9]+'
 ),
 v AS (
     SELECT b.device_id, b.point_code, b.ts, b.point_value

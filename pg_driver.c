@@ -988,7 +988,8 @@ int pg_get_alarms_range(const char *start, const char *end,
       " AND event = 'ALARM'"
       " ORDER BY id ASC LIMIT $3";
 
-  const char *sql = s_alarm_include_recover ? SQL_ALL : SQL_ALARM_ONLY;
+  // CSV 导出固定只取 ALARM（不受 event_type 开关影响）
+  const char *sql = SQL_ALARM_ONLY;
 
   PGresult *res = PQexecParams(s_conn, sql, 3, NULL, vals, NULL, NULL, 0);
   if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK) {

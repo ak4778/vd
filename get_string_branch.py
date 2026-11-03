@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 import psycopg2
+import re
 import requests
 from openpyxl import Workbook
 from psycopg2.extras import execute_values
@@ -217,8 +218,9 @@ def query_one(meta):
         bad = []
         for it in items:
             name = str(it.get('name') or '')
-            # 只保留支路项: 部分逆变器同一接口会混返回 mppt1..mpptN
-            if not name.startswith(BRANCH_NAME_PREFIX):
+            # 只保留含 "支路N" 的项: 不限定开头，允许 "ccc支路1损点击" 这类；
+            # 同时还要排除 mppt1..mpptN、总电流等不含 "支路[数字]" 的项
+            if '支路' not in name or not re.search(r'支路\d+', name):
                 continue
             if it.get('value') == '/':
                 row = dict(meta)          # 拷贝维度信息
