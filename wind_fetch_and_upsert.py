@@ -814,14 +814,14 @@ def main():
         ensure_partitions()
     except Exception as e:
         log.warning('分区维护失败（不影响采集，但跨天可能报错）: %r', e)
-    # 进循环前先执行一次：初始化聚合表；失败不阻断采集（下一轮跨分钟会重试）。
-    startup_min = datetime.now().strftime(TS_FMT)[:16]
-    last_rollup_min = startup_min
-    try:
-        rollup_minute()
-        log.info('启动初始化：聚合表就绪')
-    except Exception as e:
-        log.warning('启动初始化失败（不影响采集，下轮跨分钟重试）: %r', e)
+    # 分钟聚合已停用：不做分钟聚合。
+    # startup_min = datetime.now().strftime(TS_FMT)[:16]
+    # last_rollup_min = startup_min
+    # try:
+    #     rollup_minute()
+    #     log.info('启动初始化：聚合表就绪')
+    # except Exception as e:
+    #     log.warning('启动初始化失败（不影响采集，下轮跨分钟重试）: %r', e)
     last_integrity = time.time()  # 启动满一个自检周期后开始
     last_data_time = time.time()  # 最近一次拉到非空数据的时刻（断流检测基线）
     outage_warned_at = 0.0        # 上次断流告警时刻
@@ -847,14 +847,15 @@ def main():
                                 '请检查上游采集/发布（水位线仍在推进）',
                                 int((now_ts - last_data_time) // 60))
                     outage_warned_at = now_ts
-            this_min = stamp[:16]  # 'YYYY-MM-DD HH:MM'
-            if this_min != last_rollup_min:  # 跨分钟即触发，失败不影响水位线
-                last_rollup_min = this_min
-                try:
-                    rollup_minute()
-                    log.info('分钟聚合完成（重算最近3个已结束分钟）')
-                except Exception as e:
-                    log.warning('分钟聚合失败（下轮跨分钟时重试）: %r', e)
+            # 分钟聚合已停用：不做分钟聚合。
+            # this_min = stamp[:16]  # 'YYYY-MM-DD HH:MM'
+            # if this_min != last_rollup_min:  # 跨分钟即触发，失败不影响水位线
+            #     last_rollup_min = this_min
+            #     try:
+            #         rollup_minute()
+            #         log.info('分钟聚合完成（重算最近3个已结束分钟）')
+            #     except Exception as e:
+            #         log.warning('分钟聚合失败（下轮跨分钟时重试）: %r', e)
         except Exception as e:
             caught_up = True  # 失败时不进入追赶快转
             log.warning('本轮失败，水位线不推进，%ss 后从原位重拉: %r',

@@ -1005,9 +1005,9 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
       .catch(() => {});
   }, [wsOk, pointFilter, eventFilter, alarmTypeKey, searchKw]);
 
-  // 第 1 页直接用 WS 内存列表（实时）；第 2 页起向服务端按 id 倒序取历史
+  // 第 1 页且无过滤时用 WS 内存列表（实时）；有过滤或第 2 页起向服务端按 id 倒序取历史
   useEffect(() => {
-    if (page === 1) {
+    if (page === 1 && !filterActive) {
       setHist([]);
       setHistError('');
       return undefined;
@@ -1033,14 +1033,14 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
         setHistLoading(false);
       });
     return () => { cancelled = true; };
-  }, [page, pointFilter, eventFilter, alarmTypeKey, searchKw]);
+  }, [page, filterActive, pointFilter, eventFilter, alarmTypeKey, searchKw]);
 
-  // 自动滚动：items 前插新告警后把滚动条拉回顶部（仅实时页）
+  // 自动滚动：items 前插新告警后把滚动条拉回顶部（仅实时页=第1页且无过滤）
   useEffect(() => {
-    if (page !== 1 || !autoScroll) return;
+    if (page !== 1 || filterActive || !autoScroll) return;
     const el = scrollRef.current;
     if (el) el.scrollTop = 0;
-  }, [items, page, autoScroll]);
+  }, [items, page, filterActive, autoScroll]);
 
   const toggleAutoScroll = checked => {
     setAutoScroll(checked);
@@ -1069,9 +1069,9 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
     if (el) el.scrollTop = 0;
   };
 
-  // 实时页（第 1 页）走内存过滤；历史页已由服务端按相同条件过滤
+  // 实时页（第 1 页且无过滤）走内存过滤；有过滤或历史页已由服务端按相同条件过滤
   const filtered = filterActive ? visibleAll.filter(matchFilters) : visibleAll;
-  const rows = page === 1 ? filtered.slice(0, ALARM_PAGE_SIZE) : hist;
+  const rows = (page === 1 && !filterActive) ? filtered.slice(0, ALARM_PAGE_SIZE) : hist;
   // event_type=false（alarmEventAll=false）时不取「事件」「规则」两列
   const compact = !alarmEventAll;
   const columns = compact ? alarmColumnsCompact : alarmColumnsAll;
@@ -1080,9 +1080,10 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
   const liveTotal = filterActive
     ? total + filteredRx
     : total + Math.max(0, alarmRx - baseRxRef.current);
-  const shownTotal = page === 1 ? Math.max(liveTotal, filtered.length) : Math.max(liveTotal, hist.length);
-  const latest = items.length > 0 ? items[0].ts : '';
-  const showBanner = page === 1 && pendingNew > 0;
+  const shownTotal = (page === 1 && !filterActive) ? Math.max(liveTotal, filtered.length) : Math.max(liveTotal, hist.length);
+  const latest = (page === 1 && !filterActive) ? (items.length > 0 ? items[0].ts : '') : (hist.length > 0 ? hist[0].ts : '');
+  const realtimeMode = page === 1 && !filterActive;
+  const showBanner = realtimeMode && pendingNew > 0;
   return html`
   <div class="flex-1 min-h-0 flex flex-col p-2">
     <div class="ind-panel flex-1 min-h-0 flex flex-col">
@@ -1095,8 +1096,8 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
       ${!wsOk && authLost && html`<button type="button" class="alarm-reauth text-sm px-2 py-0.5 rounded border border-amber-400 text-amber-600 hover:bg-amber-50" onclick=${onReauth}>重新登录<//>`}
       <span class="text-sm ind-dim">共 ${shownTotal} 条</span>
       ${latest && html`<span class="text-sm ind-dim">最新: ${latest}<//>`}
-      ${page > 1 && html`<span class="alarm-hist-hint" title="新告警仍会实时进入第 1 页">历史浏览中<//>`}
-      <label class="alarm-auto-scroll ${page > 1 ? 'opacity-40' : ''}" title=${page > 1 ? '仅第 1 页实时视图可用' : '勾选：新告警自动滚到顶部；取消：冻结当前列表，只提示新告警数量'}>
+      ${!realtimeMode && html`<span class="alarm-hist-hint" title="新告警仍会实时进入第 1 页">历史浏览中<//>`}
+      <label class="alarm-auto-scroll ${!realtimeMode ? 'opacity-40' : ''}" title=${!realtimeMode ? '仅第 1 页无过滤时实时视图可用' : '勾选：新告警自动滚到顶部；取消：冻结当前列表，只提示新告警数量'}>
         <svg class="turbine-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
           <path d="M12 12.6 L12 21" />
           <path d="M9 21 L15 21" />
@@ -1107,7 +1108,7 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
             <circle cx="12" cy="11" r="1.4" />
           </g>
         </svg>
-        <input type="checkbox" checked=${autoScroll} disabled=${page > 1} onchange=${e => toggleAutoScroll(e.target.checked)} />
+        <input type="checkbox" checked=${autoScroll} disabled=${!realtimeMode} onchange=${e => toggleAutoScroll(e.target.checked)} />
         自动滚动
       <//>
     <//>
@@ -1158,7 +1159,7 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
       </select>`}
       ${filterActive && html`<button type="button" class="alarm-filter-clear"
         onclick=${() => { setPointFilter(''); setEventFilter(''); setAlarmTypeFilter(ALARM_TYPE_OPTIONS); setSearchKw(''); }}>清除筛选<//>`}
-      ${filterActive && page === 1 && html`<span class="alarm-filter-hint">第 1 页为内存实时过滤，历史页由服务端按相同条件查询<//>`}
+      ${filterActive && html`<span class="alarm-filter-hint">当前为过滤模式，分页数据全部由服务端按条件查询<//>`}
       <span class="alarm-export-group">
         ${exportMode === 'day' ? html`
           <span class="alarm-filter-label">按日期导出</span>
