@@ -57,7 +57,6 @@ CREATE TABLE IF NOT EXISTS pv_string_branch_5min (
     bucket      timestamptz NOT NULL,   -- 5 分钟桶起点 :00/:05/...
     sample_cnt  int         NOT NULL,   -- point_value <> 0 的采样数（参与均值，无上限）
     zero_cnt    int         NOT NULL,   -- point_value = 0 的采样数（仅记录，不参与计算）
-    over_cnt    int         NOT NULL,   -- point_value > 15 的采样数（已计入 sample_cnt，仅记录）
     i_avg       float8,                 -- 支路桶均值；全零 / 全脏 -> NULL
     sec_max     float8,                 -- 桶内非零有效采样最大值
     sec_min     float8,                 -- 桶内非零有效采样最小值
@@ -86,8 +85,6 @@ $$;
 COMMENT ON TABLE  pv_string_branch_5min IS '光伏支路 5 分钟汇总：非零电流参与统计，零电流仅计数用于断路清单';
 COMMENT ON COLUMN pv_string_branch_5min.i_avg      IS '支路桶均值，来源 point_value<>0；可含负值、可>15A';
 COMMENT ON COLUMN pv_string_branch_5min.zero_cnt   IS 'point_value=0 的采样数，不参与任何均值/偏差率计算';
-COMMENT ON COLUMN pv_string_branch_5min.over_cnt   IS 'point_value>15 的采样数（已计入 sample_cnt，仅记录）';
-
 
 -- ============================================================================
 -- 2. 汇总表刷新
@@ -101,7 +98,7 @@ SELECT pv_string_branch_5min_ensure_partition(CURRENT_DATE - 1);
 
 INSERT INTO pv_string_branch_5min AS t
 SELECT device_id, point_code, bucket,
-       sample_cnt, zero_cnt, over_cnt, i_avg, sec_max, sec_min
+       sample_cnt, zero_cnt, i_avg, sec_max, sec_min
 FROM (
     SELECT
         device_id,
@@ -109,7 +106,6 @@ FROM (
         to_timestamp(floor(extract(epoch FROM ts) / 300) * 300) AS bucket,
         count(*) FILTER (WHERE point_value <> 0) AS sample_cnt,
         count(*) FILTER (WHERE point_value  = 0) AS zero_cnt,
-        count(*) FILTER (WHERE point_value  > 15) AS over_cnt,  -- 仅记录，不影响 sample_cnt
         avg(point_value) FILTER (WHERE point_value <> 0) AS i_avg,
         max(point_value) FILTER (WHERE point_value <> 0) AS sec_max,
         min(point_value) FILTER (WHERE point_value <> 0) AS sec_min
@@ -122,7 +118,6 @@ FROM (
 ON CONFLICT (device_id, point_code, bucket) DO UPDATE SET
     sample_cnt = EXCLUDED.sample_cnt,
     zero_cnt   = EXCLUDED.zero_cnt,
-    over_cnt   = EXCLUDED.over_cnt,
     i_avg      = EXCLUDED.i_avg,
     sec_max    = EXCLUDED.sec_max,
     sec_min    = EXCLUDED.sec_min;
@@ -135,13 +130,12 @@ ON CONFLICT (device_id, point_code, bucket) DO UPDATE SET
 -- ----------------------------------------------------------------------------
 -- INSERT INTO pv_string_branch_5min AS t
 -- SELECT device_id, point_code, bucket,
---        sample_cnt, zero_cnt, over_cnt, i_avg, sec_max, sec_min
+--        sample_cnt, zero_cnt, i_avg, sec_max, sec_min
 -- FROM (
 --     SELECT device_id, point_code,
 --            to_timestamp(floor(extract(epoch FROM ts) / 300) * 300) AS bucket,
 --            count(*) FILTER (WHERE point_value <> 0) AS sample_cnt,
 --            count(*) FILTER (WHERE point_value  = 0) AS zero_cnt,
---            count(*) FILTER (WHERE point_value  > 15) AS over_cnt,
 --            avg(point_value) FILTER (WHERE point_value <> 0) AS i_avg,
 --            max(point_value) FILTER (WHERE point_value <> 0) AS sec_max,
 --            min(point_value) FILTER (WHERE point_value <> 0) AS sec_min
@@ -153,7 +147,7 @@ ON CONFLICT (device_id, point_code, bucket) DO UPDATE SET
 -- ) s
 -- ON CONFLICT (device_id, point_code, bucket) DO UPDATE SET
 --     sample_cnt = EXCLUDED.sample_cnt, zero_cnt = EXCLUDED.zero_cnt,
---     over_cnt   = EXCLUDED.over_cnt,   i_avg     = EXCLUDED.i_avg,
+--     i_avg     = EXCLUDED.i_avg,
 --     sec_max    = EXCLUDED.sec_max,    sec_min   = EXCLUDED.sec_min;
 
 -- ★ 大批量回填完成后必须收集一次统计信息；否则规划器误判行数会选嵌套循环，
@@ -527,6 +521,7 @@ win AS (                                        -- 支路 × 窗口：特征汇�
         count(*) FILTER (WHERE dev_pct >= 5 AND dev_pct < 10)   AS ge5_cnt,   -- ★ 互斥 5%~10%
         count(*) FILTER (WHERE dev_pct >= 10)                   AS ge10_cnt,
         count(*) FILTER (WHERE dev_pct <= -5)                   AS le_neg5_cnt,
+        count(*) FILTER (WHERE abs(dev_pct) >= 5)               AS abn_win_cnt,  -- 异常条数（|偏差率|>=5%）
         count(*) FILTER (WHERE dev_pct < 0)                     AS neg_cnt,
         count(*) FILTER (WHERE dev_pct >= 100)                  AS over100_cnt,
         count(*) FILTER (WHERE i = i_mean AND abn_cnt > 0)      AS zero_cnt   -- 严格相等 + 同组串有异常支路
@@ -611,6 +606,7 @@ SELECT
     COALESCE(w.ge5_cnt, 0)                                            AS "偏差率>=5%且<10%条数",
     COALESCE(w.ge10_cnt, 0)                                           AS "偏差率>=10%条数",
     COALESCE(w.le_neg5_cnt, 0)                                        AS "偏差率<=-5%条数",
+    COALESCE(w.abn_win_cnt, 0)                                        AS "异常数据条数",     -- |偏差率|>=5% 的条数
     COALESCE(j.jump_cnt, 0)                                           AS "突变数据条数",     -- 20分钟块触发次数
     COALESCE(w.neg_cnt, 0)                                            AS "负值数据条数",
     COALESCE(w.over100_cnt, 0)                                        AS "超限数据条数",
