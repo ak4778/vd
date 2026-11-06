@@ -116,7 +116,7 @@ FROM (
     FROM pv_string_branch                       -- ★ 换日期时保留父表名即可自动裁剪分区
     WHERE ts >= to_timestamp(floor(extract(epoch FROM now()) / 300) * 300) - interval '90 min'
       AND ts <  to_timestamp(floor(extract(epoch FROM now()) / 300) * 300)
-      AND point_code ~ '^STRING_BRANCH[1-40]_A$'
+      AND point_code ~ '^STRING_BRANCH([1-9]|[1-3][0-9]|40)_A$'   -- 1~40（[1-40] 是字符类, 只匹配单数字 1-4）
     GROUP BY 1, 2, 3
 ) s
 ON CONFLICT (device_id, point_code, bucket) DO UPDATE SET
@@ -148,7 +148,7 @@ ON CONFLICT (device_id, point_code, bucket) DO UPDATE SET
 --     FROM pv_string_branch_20261104              -- ★ 指定日分区
 --     WHERE ts >= TIMESTAMPTZ '2026-11-04 10:00:00+08'
 --       AND ts <  TIMESTAMPTZ '2026-11-04 16:00:00+08'
---       AND point_code ~ '^STRING_BRANCH[1-40]_A$'
+--       AND point_code ~ '^STRING_BRANCH([1-9]|[1-3][0-9]|40)_A$'   -- 1~40
 --     GROUP BY 1, 2, 3
 -- ) s
 -- ON CONFLICT (device_id, point_code, bucket) DO UPDATE SET
