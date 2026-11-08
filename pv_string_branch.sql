@@ -751,3 +751,61 @@ ORDER BY
     z.device_id,
     z.block_20m,
     substring(z.point_code FROM 'STRING_BRANCH([0-9]+)_A')::int;
+
+-- ============================================================================
+-- 6. 三特征独立查询（已验证：Excel 源头重算 288/288 一致，详见会话验证记录）
+--    特征1 单支路偏差率 = (支路电流 - 组串平均电流) / 组串平均电流 * 100%
+--    特征2 整体偏差率   = stddev_pop(支路电流) / 组串平均电流 * 100%   （总体标准差 ÷n）
+--    特征3 相对极差     = (组串最大电流 - 组串最小电流) / 组串平均电流 * 100%
+--    口径：剔除 0A（i_avg IS NOT NULL）、单桶有效采样 ≥3、
+--          快照 ≥2 条支路且 |组串均值| ≥0.5A（低电流防御，与 §3 ds 一致）
+--    时区：过滤用显式 +08 timestamptz，显示固定 Asia/Shanghai
+-- ============================================================================
+
+-- 6.1 支路级明细（每快照 × 每支路一行，含三个特征）
+WITH br AS (
+    SELECT device_id, point_code, bucket, i_avg AS i
+    FROM pv_string_branch_5min
+    WHERE device_id = 'AUFP24YH'                                  -- ← 设备
+      AND bucket >= timestamptz '2026-11-04 10:00:00+08'          -- ← 时间范围（半开区间）
+      AND bucket <  timestamptz '2026-11-04 11:00:00+08'
+      AND i_avg IS NOT NULL
+      AND sample_cnt >= 3
+),
+ds AS (
+    SELECT device_id, bucket,
+           avg(i)        AS i_mean,
+           stddev_pop(i) AS i_std,
+           min(i)        AS i_min,
+           max(i)        AS i_max,
+           count(*)      AS branch_cnt
+    FROM br
+    GROUP BY device_id, bucket
+)
+SELECT to_char(br.bucket AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI') AS "快照",
+       substring(br.point_code FROM 'STRING_BRANCH([0-9]+)_A')::int          AS "支路",
+       round(br.i::numeric, 3)                                              AS "支路电流(A)",
+       round(d.i_mean::numeric, 3)                                          AS "组串平均电流(A)",
+       round(((br.i - d.i_mean) / d.i_mean * 100)::numeric, 2)               AS "单支路偏差率(%)",
+       round((d.i_std / d.i_mean * 100)::numeric, 2)                         AS "整体偏差率(%)",
+       round(((d.i_max - d.i_min) / d.i_mean * 100)::numeric, 2)             AS "相对极差(%)"
+FROM br
+JOIN ds d USING (device_id, bucket)
+WHERE d.branch_cnt >= 2 AND abs(d.i_mean) >= 0.5
+ORDER BY br.bucket, "支路";
+
+-- 6.2 组串级汇总（每快照一行，仅特征 2、3）
+SELECT to_char(bucket AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI') AS "快照",
+       count(*)                                                            AS "支路数",
+       round(avg(i_avg)::numeric, 3)                                       AS "组串平均电流(A)",
+       round((stddev_pop(i_avg) / avg(i_avg) * 100)::numeric, 2)           AS "整体偏差率(%)",
+       round(((max(i_avg) - min(i_avg)) / avg(i_avg) * 100)::numeric, 2)   AS "相对极差(%)"
+FROM pv_string_branch_5min
+WHERE device_id = 'AUFP24YH'                                  -- ← 设备
+  AND bucket >= timestamptz '2026-11-04 10:00:00+08'          -- ← 时间范围（半开区间）
+  AND bucket <  timestamptz '2026-11-04 11:00:00+08'
+  AND i_avg IS NOT NULL
+  AND sample_cnt >= 3
+GROUP BY bucket
+HAVING count(*) >= 2 AND abs(avg(i_avg)) >= 0.5
+ORDER BY bucket;

@@ -104,6 +104,11 @@ function Sidebar({url, show, alarmUnread, videoEnabled}) {
     <div class="flex flex-1 flex-col gap-y-1">
       ${videoEnabled && html`<${NavLink} title="视频设备" icon=${Icons.camera} href="/events" url=${url} />`}
       <${NavLink} title="风机告警" icon=${Icons.exclamationTriangle} href="/alarms" url=${url} badge=${url === '/alarms' ? 0 : alarmUnread} />
+      <a href="bigscreen.html" target="_blank" rel="noopener" title="在新窗口打开大屏"
+         class="text-gray-700 hover:text-blue-600 hover:bg-gray-50 group ind-navlink flex gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold">
+        <${Icons.desktop} class="w-6 h-6"/>
+        大屏
+      </a>
     <//>
   <//>
 <//>`;
@@ -758,10 +763,12 @@ return html`
 const ALARM_CAP = 500;  // 前端最多保留的告警条数（超出丢弃最旧）
 
 // compact=true（event_type=false）时不渲染「事件」「规则」两列
-const AlarmRow = ({a, compact}) => {
+// sel/onPick：点击行把该行的温度/极差载入上方仪表盘（再次点击取消，回到最新一条）
+const AlarmRow = ({a, compact, sel, onPick}) => {
   const isAlarm = a.event === 'ALARM';
   return html`
-  <tr class="hover:bg-slate-50 ind-dark-row">
+  <tr class="hover:bg-slate-50 ind-dark-row alarm-row ${sel ? 'alarm-sel' : ''}"
+      onclick=${onPick} title="点击在仪表盘中查看该行的温度 / 1h 极差 / 20s 极差">
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.ts}<//>
     ${!compact && html`
     <td class="border-b border-slate-200 py-1.5 px-4">
@@ -825,6 +832,137 @@ const alarmTypeCls = t => {
   return m ? ' atype-' + m[1] : '';
 };
 
+// ---- 告警图表区（类型占比环形图 + 最新温度仪表盘，echarts 本地 UMD，免构建） ----
+// 数据始终来自内存实时列表（filtered），与表格当前过滤条件联动；echarts 缺失时静默降级不渲染。
+// onTypeClick(告警类型)：点击环形图扇区时回调，由父组件联动告警类型过滤。
+// pick：表格中被点击选中的行；非空时仪表盘显示该行的温度/极差，空则回落到最新一条。
+const AlarmCharts = ({items, pick, onTypeClick}) => {
+  const ringRef = useRef(null);
+  const gaugeRef = useRef(null);
+  const chartsRef = useRef(null);
+  const cbRef = useRef(null);
+  cbRef.current = onTypeClick;  // 每次渲染同步最新回调，避免 echarts 闭包捕获旧引用
+  const hasEcharts = typeof window.echarts !== 'undefined';
+  // 仪表盘数据源：选中行优先，否则最新一条；右侧信息栏显示该行的场站名 · 设备名与两个极差
+  const gaugeRow = pick || items.find(a => a.temperature != null) || null;
+  const gaugeCap = gaugeRow
+    ? [gaugeRow.station_name, gaugeRow.device_name].filter(Boolean).join(' · ')
+    : '';
+  const g1h = gaugeRow && gaugeRow.range_1h != null ? Number(gaugeRow.range_1h) : 0;
+  const g20s = gaugeRow && gaugeRow.range_20s != null ? Number(gaugeRow.range_20s) : 0;
+  useEffect(() => {
+    if (!hasEcharts) return undefined;
+    const ring = window.echarts.init(ringRef.current);
+    const gauge = window.echarts.init(gaugeRef.current);
+    chartsRef.current = {ring, gauge};
+    const onResize = () => { ring.resize(); gauge.resize(); };
+    window.addEventListener('resize', onResize);
+    // 点击扇区 → 联动过滤（p.name 即 ALARM_TYPE_OPTIONS 中的类型串）
+    ring.on('click', p => {
+      if (p && p.componentType === 'series' && p.name && cbRef.current) cbRef.current(p.name);
+    });
+    return () => {
+      window.removeEventListener('resize', onResize);
+      ring.dispose();
+      gauge.dispose();
+      chartsRef.current = null;
+    };
+  }, [hasEcharts]);
+  useEffect(() => {
+    const ch = chartsRef.current;
+    if (!ch) return;
+    const dark = document.documentElement.classList.contains('ind-theme');
+    const txt = dark ? '#8aa2ba' : '#64748b';
+    // 环形图：三类告警占比（渐变与 atype 徽标色系一致）
+    const counts = {};
+    for (const a of items) if (a.alarm_type) counts[a.alarm_type] = (counts[a.alarm_type] || 0) + 1;
+    const GRAD = {'01': ['#ef4444', '#f87171'], '02': ['#d97706', '#fbbf24'], '03': ['#7c3aed', '#c084fc']};
+    const data = ALARM_TYPE_OPTIONS.map(t => {
+      const [c0, c1] = GRAD[t.slice(0, 2)] || ['#3a7bd5', '#00d2ff'];
+      return {name: t, value: counts[t] || 0,
+              itemStyle: {color: new window.echarts.graphic.LinearGradient(0, 0, 0, 1,
+                [{offset: 0, color: c1}, {offset: 1, color: c0}])}};
+    });
+    const total = data.reduce((s, d) => s + d.value, 0);
+    ch.ring.setOption({
+      backgroundColor: 'transparent',
+      tooltip: {trigger: 'item', formatter: '{b}: {c} 条'},
+      // 图例紧贴环形图右侧竖排（left 用百分比，贴着环而不是贴图表右边缘）
+      legend: {orient: 'vertical', left: '44%', top: 'middle', itemGap: 6, icon: 'circle',
+               itemWidth: 8, itemHeight: 8, textStyle: {color: txt, fontSize: 11}},
+      series: [{
+        type: 'pie', radius: ['50%', '70%'], center: ['32%', '50%'],
+        label: {show: true, position: 'center', formatter: `{a|${total}}\n{b|告警}`,
+                rich: {a: {color: txt, fontSize: 16, fontWeight: 700}, b: {color: txt, fontSize: 10}}},
+        labelLine: {show: false},
+        itemStyle: {borderColor: 'rgba(0,0,0,0.25)', borderWidth: 1, shadowBlur: 8, shadowColor: 'rgba(0,0,0,0.35)'},
+        emphasis: {scale: true, scaleSize: 4},
+        data,
+      }],
+    });
+    // 仪表盘：选中行优先，否则取最新一条；外圈=温度（阈值分档与 wind_alarm.py
+    // POINT_CONFIG 对齐 90/130），中圈=1h 温度极差（青色），内圈=20s 温度极差（琥珀色）；
+    // 两者各用独立动态量程，避免与温度共用 0-150 刻度被压扁。
+    const latest = pick || items.find(a => a.temperature != null) || null;
+    const rv = latest && latest.range_1h != null ? latest.range_1h : 0;
+    const rmax = Math.max(5, Math.ceil(rv / 5) * 5);
+    const rv20 = latest && latest.range_20s != null ? latest.range_20s : 0;
+    const rmax20 = Math.max(2, Math.ceil(rv20 / 2) * 2);
+    ch.gauge.setOption({
+      backgroundColor: 'transparent',
+      series: [{
+        type: 'gauge', startAngle: 210, endAngle: -30, min: 0, max: 150,
+        radius: '100%', center: ['50%', '60%'],
+        axisLine: {lineStyle: {width: 9, color: [[0.6, '#4ade80'], [0.8667, '#fbbf24'], [1, '#f87171']]}},
+        axisTick: {distance: -12, length: 4, lineStyle: {color: txt, width: 1}},
+        splitLine: {distance: -14, length: 9, lineStyle: {color: txt, width: 2}},
+        axisLabel: {distance: -2, color: txt, fontSize: 9},
+        pointer: {width: 3, length: '58%', itemStyle: {color: '#3a7bd5', shadowBlur: 6, shadowColor: 'rgba(0,0,0,0.4)'}},
+        anchor: {show: true, size: 8, itemStyle: {color: '#3a7bd5'}},
+        title: {show: true, offsetCenter: [0, '-42%'], color: txt, fontSize: 11},
+        detail: {valueAnimation: true, fontSize: 16, fontWeight: 600, color: txt,
+                 offsetCenter: [0, '28%'], formatter: v => v.toFixed(1) + ' °C'},
+        data: [{value: latest ? latest.temperature : 0, name: latest ? (pick ? '选中行温度' : '最新温度') : '暂无数据'}],
+      }, {
+        type: 'gauge', startAngle: 210, endAngle: -30, min: 0, max: rmax,
+        radius: '64%', center: ['50%', '60%'],
+        axisLine: {lineStyle: {width: 4, color: [[1, dark ? '#1e3a5f' : '#cbd5e1']]}},
+        axisTick: {show: false}, splitLine: {show: false}, axisLabel: {show: false},
+        pointer: {width: 2, length: '68%', itemStyle: {color: '#00d2ff', shadowBlur: 4, shadowColor: 'rgba(0,0,0,0.4)'}},
+        anchor: {show: false},
+        title: {show: false},
+        detail: {show: false},
+        data: [{value: rv, name: '1h极差'}],
+      }, {
+        type: 'gauge', startAngle: 210, endAngle: -30, min: 0, max: rmax20,
+        radius: '44%', center: ['50%', '60%'],
+        axisLine: {lineStyle: {width: 3, color: [[1, dark ? '#1e3a5f' : '#e2e8f0']]}},
+        axisTick: {show: false}, splitLine: {show: false}, axisLabel: {show: false},
+        pointer: {width: 2, length: '72%', itemStyle: {color: '#fbbf24', shadowBlur: 4, shadowColor: 'rgba(0,0,0,0.4)'}},
+        anchor: {show: false},
+        title: {show: false},
+        detail: {show: false},
+        data: [{value: rv20, name: '20s极差'}],
+      }],
+      // 两个极差数值改由右侧信息栏展示（HTML），此处不再画在图表内
+      graphic: [],
+    });
+  }, [items, pick, hasEcharts]);
+  if (!hasEcharts) return null;
+  return html`
+  <div class="alarm-charts">
+    <div class="alarm-chart-box"><div class="alarm-chart" ref=${ringRef}></div></div>
+    <div class="alarm-chart-box alarm-gauge-box">
+      <div class="alarm-chart" ref=${gaugeRef}></div>
+      <div class="alarm-gauge-info">
+        <div class="gi-dev" title=${gaugeCap}>${gaugeCap}</div>
+        <div class="gi-row"><span class="gi-dot gi-cy"></span>1h极差 <b class="gi-cy">${g1h.toFixed(2)}</b></div>
+        <div class="gi-row"><span class="gi-dot gi-am"></span>20s极差 <b class="gi-am">${g20s.toFixed(2)}</b></div>
+      </div>
+    </div>
+  <//>`;
+};
+
 // 本地日期 YYYY-MM-DD（导出默认值；不用 toISOString 以免时区偏移）
 const localDateStr = (d = new Date()) => {
   const p = n => String(n).padStart(2, '0');
@@ -843,6 +981,8 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
   // 告警类型多选（默认全选=不过滤）；与视频设备的设备类型过滤同一交互形态
   const [alarmTypeFilter, setAlarmTypeFilter] = useState(ALARM_TYPE_OPTIONS);
   const [showTypeDropdown, setShowTypeDropdown] = useState(false);
+  // 图表选中行：点击表格某行后仪表盘显示该行数据，再次点击同一行取消（回到最新一条）
+  const [selId, setSelId] = useState(null);
   // 关键字搜索（场站/设备名称/设备ID），与视频设备页搜索语义一致
   const [searchKw, setSearchKw] = useState('');
   const typeDdRef = useRef(null);
@@ -977,7 +1117,10 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
     setPage(1);
     seenMaxIdRef.current = latestIdRef.current;
     setFilteredRx(0);
+    setSelId(null);          // 过滤条件变化：清空图表选中行
   }, [pointFilter, eventFilter, alarmTypeKey, searchKw]);
+  // 翻页后选中行不再属于当前视图，清空选择（仪表盘回到最新一条）
+  useEffect(() => { setSelId(null); }, [page]);
 
   // 过滤激活时，累加 WS 新行中匹配过滤的行数（items 按 id 倒序，新行在头部）
   useEffect(() => {
@@ -1072,6 +1215,8 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
   // 实时页（第 1 页且无过滤）走内存过滤；有过滤或历史页已由服务端按相同条件过滤
   const filtered = filterActive ? visibleAll.filter(matchFilters) : visibleAll;
   const rows = (page === 1 && !filterActive) ? filtered.slice(0, ALARM_PAGE_SIZE) : hist;
+  // 图表选中行：只按当前表格行查找；翻页/过滤/新数据把它挤出列表时自动回落到最新一条
+  const selRow = selId == null ? null : (rows.find(r => r.id === selId) || null);
   // event_type=false（alarmEventAll=false）时不取「事件」「规则」两列
   const compact = !alarmEventAll;
   const columns = compact ? alarmColumnsCompact : alarmColumnsAll;
@@ -1112,6 +1257,8 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
         自动滚动
       <//>
     <//>
+    <${AlarmCharts} items=${filtered} pick=${selRow} onTypeClick=${t => setAlarmTypeFilter(prev =>
+      (prev.length === 1 && prev[0] === t) ? ALARM_TYPE_OPTIONS : [t])} />
     <div class="alarm-filterbar">
       <span class="alarm-filter-label">测点</span>
       <select class="alarm-filter-select" value=${pointFilter}
@@ -1201,7 +1348,9 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
               ? (wsOk ? '暂无告警，等待新事件...' : '未连接告警服务，等待重连...')
               : (histLoading ? '加载中...' : (histError || '本页暂无数据'))}
           <//></tr>` :
-          rows.map(a => h(AlarmRow, {key: a.id, a, compact}))}
+          rows.map(a => h(AlarmRow, {key: a.id, a, compact,
+            sel: a.id === selId,
+            onPick: () => setSelId(prev => (prev === a.id ? null : a.id))}))}
         <//>
       <//>
     <//>

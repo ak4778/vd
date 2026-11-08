@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>风机告警监控大屏</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke-width='1.5' stroke='%237fb3ff'><path stroke-linecap='round' stroke-linejoin='round' d='M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0'/></svg>">
+<script src="echarts.min.js"></script>
+<style>
+  :root{
+    --panel:#0b1b2e; --line:#1b3b5e; --txt:#d9e8f7; --dim:#7e97b0;
+    --cyan:#00d2ff; --blue:#3a7bd5; --red:#f87171; --amber:#fbbf24;
+    --purple:#c084fc; --green:#4ade80;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    color:var(--txt);overflow:hidden;
+    font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    background:radial-gradient(1200px 620px at 50% -12%,#12395f 0%,#0a1e33 42%,#040c16 100%);
+  }
+  /* ---------- 顶栏 ---------- */
+  .hd{
+    height:9vh;min-height:52px;display:flex;align-items:center;justify-content:space-between;
+    padding:0 1.2vw;background:linear-gradient(180deg,rgba(24,68,116,.9),rgba(8,22,38,.15));
+    border-bottom:1px solid rgba(58,123,213,.45);position:relative;
+  }
+  .hd::after{
+    content:"";position:absolute;left:0;bottom:-1px;height:2px;width:100%;
+    background:linear-gradient(90deg,transparent,rgba(0,210,255,.85) 22%,rgba(0,210,255,.85) 78%,transparent);
+  }
+  .hd-l{display:flex;align-items:center;gap:.7vw;min-width:0}
+  .hd-logo{width:clamp(22px,1.9vw,34px);height:clamp(22px,1.9vw,34px);flex:none}
+  .hd-logo path{stroke:#7fb3ff;fill:none;stroke-width:.5px;stroke-miterlimit:10}
+  .hd-title{
+    font-size:clamp(15px,1.45vw,26px);font-weight:700;letter-spacing:3px;white-space:nowrap;
+    background:linear-gradient(180deg,#ffffff,#8ecdff);-webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .hd-sub{font-size:clamp(9px,.68vw,12px);color:var(--dim);letter-spacing:2px;margin-left:.4vw}
+  .hd-r{display:flex;align-items:center;gap:1vw;flex:none}
+  .hd-clock{font-size:clamp(12px,.95vw,17px);font-variant-numeric:tabular-nums;color:#bcd8f2;letter-spacing:1px}
+  .hd-stat{display:flex;align-items:center;gap:6px;font-size:clamp(10px,.75vw,13px);color:var(--dim)}
+  .lamp{width:9px;height:9px;border-radius:50%;flex:none}
+  .lamp-on{background:radial-gradient(circle at 35% 35%,#8bffb9,#16a34a 70%);box-shadow:0 0 7px 1px rgba(34,197,94,.85)}
+  .lamp-off{background:radial-gradient(circle at 35% 35%,#ffb199,#dc2626 70%);box-shadow:0 0 7px 1px rgba(239,68,68,.85);animation:blink 1s step-start infinite}
+  @keyframes blink{50%{opacity:.45}}
+  .hd-btn{
+    font-size:clamp(10px,.75vw,13px);color:#9dc6ea;background:rgba(58,123,213,.14);
+    border:1px solid rgba(58,123,213,.55);border-radius:3px;padding:3px 9px;cursor:pointer;
+  }
+  .hd-btn:hover{background:rgba(58,123,213,.3);color:#dff0ff}
+  /* ---------- 主体三列 ---------- */
+  .main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.45fr) minmax(0,1.1fr);
+        gap:.75vw;padding:.75vw;height:91vh}
+  .col{display:flex;flex-direction:column;gap:.75vw;min-height:0;min-width:0}
+  .panel{
+    position:relative;display:flex;flex-direction:column;min-height:0;min-width:0;
+    background:linear-gradient(180deg,rgba(14,38,62,.94),rgba(9,23,39,.94));
+    border:1px solid var(--line);border-radius:4px;
+    box-shadow:inset 0 0 34px rgba(0,90,170,.14),0 2px 12px rgba(0,0,0,.55);
+  }
+  .panel::before,.panel::after{content:"";position:absolute;width:13px;height:13px;pointer-events:none}
+  .panel::before{left:-1px;top:-1px;border-left:2px solid var(--cyan);border-top:2px solid var(--cyan);opacity:.85}
+  .panel::after{right:-1px;bottom:-1px;border-right:2px solid var(--cyan);border-bottom:2px solid var(--cyan);opacity:.85}
+  .ph{
+    display:flex;align-items:center;gap:.5vw;padding:.55vh .75vw;flex:none;
+    border-bottom:1px solid rgba(30,58,95,.85);font-size:clamp(11px,.82vw,15px);
+    color:#a9c8e6;letter-spacing:1.5px;
+  }
+  .ph i{width:3px;height:12px;background:linear-gradient(180deg,var(--cyan),var(--blue));display:inline-block;flex:none}
+  .ph .phx{margin-left:auto;color:var(--dim);font-size:.8em;letter-spacing:0;white-space:nowrap}
+  .pb{flex:1;min-height:0;padding:.5vh .55vw}
+  .grow{flex:1}
+  /* ---------- KPI ---------- */
+  .kpis{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:.6vw;height:100%}
+  .kpi{
+    display:flex;flex-direction:column;justify-content:center;padding:.4vh .75vw;border-radius:3px;
+    background:linear-gradient(180deg,rgba(24,60,96,.72),rgba(10,26,44,.55));
+    border:1px solid rgba(42,90,138,.75);position:relative;overflow:hidden;
+  }
+  .kpi::after{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--blue)}
+  .kpi.k1::after{background:linear-gradient(180deg,var(--cyan),var(--blue))}
+  .kpi.k2::after{background:var(--red)}
+  .kpi.k3::after{background:var(--amber)}
+  .kpi.k4::after{background:var(--purple)}
+  .kpi b{font-size:clamp(19px,1.9vw,34px);font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}
+  .kpi span{font-size:clamp(9px,.7vw,12px);color:var(--dim);margin-top:.35vh;white-space:nowrap}
+  /* ---------- 图表容器 ---------- */
+  .chart{width:100%;height:100%}
+  /* ---------- 实时告警流（借鉴 Seamless.vue：内容双份 + translateY 无缝滚动，悬停/选中暂停） ---------- */
+  .rows{height:100%;overflow:hidden;position:relative}
+  .rows-inner{display:flex;flex-direction:column;gap:.42vh;will-change:transform}
+  .row{
+    display:grid;grid-template-columns:auto auto minmax(0,1fr) auto;gap:.45vw;align-items:center;
+    padding:.42vh .5vw;border-radius:6px;background:rgba(20,48,76,.6);
+    border-left:3px solid var(--red);
+  }
+  .row.recover{border-left-color:var(--green);background:rgba(20,60,48,.45)}
+  .row.new{animation:rowIn .5s ease both}
+  .row{cursor:pointer}
+  .row:hover{background:rgba(30,70,110,.75)}
+  .row.sel{background:rgba(0,150,220,.22);box-shadow:inset 0 0 0 1px rgba(0,210,255,.55)}
+  /* 借鉴 DynamicList.vue：按类型着色的发光圆点 */
+  .dot{width:7px;height:7px;border-radius:50%;flex:none}
+  .dot01{background:#f87171;box-shadow:0 0 8px 1px rgba(239,68,68,.85)}
+  .dot02{background:#fbbf24;box-shadow:0 0 8px 1px rgba(245,158,11,.85)}
+  .dot03{background:#c084fc;box-shadow:0 0 8px 1px rgba(124,58,237,.85)}
+  .dot99{background:#94a3b8;box-shadow:0 0 8px 1px rgba(148,163,184,.6)}
+  @keyframes rowIn{from{opacity:0;transform:translateX(14px)}to{opacity:1;transform:none}}
+  .row .t{color:var(--dim);font-size:clamp(9px,.68vw,12px);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .row .m{font-size:clamp(10px,.78vw,13px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .m small{color:var(--dim);font-size:.86em;margin-left:.35em}
+  .badge{
+    font-size:clamp(8px,.62vw,11px);padding:1px 6px;border-radius:2px;white-space:nowrap;flex:none;
+    border:1px solid transparent;
+  }
+  .b01{background:rgba(239,68,68,.18);color:#f87171;border-color:rgba(239,68,68,.45)}
+  .b02{background:rgba(245,158,11,.16);color:#fbbf24;border-color:rgba(245,158,11,.45)}
+  .b03{background:rgba(124,58,237,.2);color:#c084fc;border-color:rgba(124,58,237,.5)}
+  .b99{background:rgba(148,163,184,.16);color:#94a3b8;border-color:rgba(148,163,184,.4)}
+  .empty{display:flex;align-items:center;justify-content:center;height:100%;color:#556e88;font-size:clamp(11px,.85vw,14px)}
+  /* ---------- 未登录遮罩 ---------- */
+  .mask{
+    position:fixed;inset:0;z-index:99;display:none;align-items:center;justify-content:center;flex-direction:column;gap:14px;
+    background:rgba(4,12,22,.92);font-size:15px;color:#cfe3f6;
+  }
+  .mask.show{display:flex}
+  .mask a{color:#7fb3ff;text-decoration:none;border:1px solid rgba(58,123,213,.6);border-radius:4px;padding:6px 18px}
+  .mask a:hover{background:rgba(58,123,213,.25)}
+</style>
+</head>
+<body>
+<div class="hd">
+  <div class="hd-l">
+    <svg class="hd-logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12.87 12.85">
+      <path d="M12.62,1.82V8.91A1.58,1.58,0,0,1,11,10.48H4a1.44,1.44,0,0,1-1-.37A.69.69,0,0,1,2.84,10l-.1-.12a.81.81,0,0,1-.15-.48V5.57a.87.87,0,0,1,.86-.86H4.73V7.28a.86.86,0,0,0,.86.85H9.42a.85.85,0,0,0,.85-.85V3.45A.86.86,0,0,0,10.13,3,.76.76,0,0,0,10,2.84a.29.29,0,0,0-.12-.1,1.49,1.49,0,0,0-1-.37H2.39V1.82A1.57,1.57,0,0,1,4,.25H11A1.57,1.57,0,0,1,12.62,1.82Z"/>
+      <path d="M10.48,10.48V11A1.58,1.58,0,0,1,8.9,12.6H1.82A1.57,1.57,0,0,1,.25,11V3.94A1.57,1.57,0,0,1,1.82,2.37H8.9a1.49,1.49,0,0,1,1,.37l.12.1a.76.76,0,0,1,.11.14.86.86,0,0,1,.14.47V7.28a.85.85,0,0,1-.85.85H8.13V5.57a.86.86,0,0,0-.85-.86H3.45a.87.87,0,0,0-.86.86V9.4a.81.81,0,0,0,.15.48l.1.12a.69.69,0,0,0,.13.11,1.44,1.44,0,0,0,1,.37Z"/>
+    </svg>
+    <div class="hd-title">风机告警监控大屏</div>
+    <div class="hd-sub">WIND TURBINE ALARM MONITOR</div>
+  </div>
+  <div class="hd-r">
+    <div class="hd-stat"><span class="lamp lamp-off" id="lamp"></span><span id="wsText">连接中...</span></div>
+    <div class="hd-clock" id="clock">--</div>
+    <button class="hd-btn" id="fsBtn" type="button">全屏</button>
+    <button class="hd-btn" id="backBtn" type="button">返回</button>
+  </div>
+</div>
+
+<div class="main">
+  <div class="col">
+    <div class="panel" style="flex:0 0 32%">
+      <div class="ph"><i></i>告警总览<span class="phx">最近 500 条窗口</span></div>
+      <div class="pb">
+        <div class="kpis">
+          <div class="kpi k1"><b id="kpiAll">0</b><span>当前窗口告警</span></div>
+          <div class="kpi k2"><b id="kpi01">0</b><span>01 · 绝对值报警</span></div>
+          <div class="kpi k3"><b id="kpi02">0</b><span>02 · 死值校验</span></div>
+          <div class="kpi k4"><b id="kpi03">0</b><span>03 · 突变报警</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="panel grow">
+      <div class="ph"><i></i>告警类型占比<span class="phx" id="typeTotal"></span></div>
+      <div class="pb"><div class="chart" id="ringChart"></div></div>
+    </div>
+    <div class="panel grow">
+      <div class="ph"><i></i>场站告警 TOP5</div>
+      <div class="pb"><div class="chart" id="stationChart"></div></div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="panel grow">
+      <div class="ph"><i></i>最新温度态势<span class="phx" id="gaugeHint"></span></div>
+      <div class="pb"><div class="chart" id="gaugeChart"></div></div>
+    </div>
+    <div class="panel" style="flex:0 0 40%">
+      <div class="ph"><i></i>告警趋势<span class="phx">5 分钟粒度 · 近 60 分钟</span></div>
+      <div class="pb"><div class="chart" id="trendChart"></div></div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="panel grow">
+      <div class="ph"><i></i>实时告警流<span class="phx" id="rxHint"></span></div>
+      <div class="pb" style="padding:.5vh .5vw"><div class="rows" id="rowsVp"><div class="rows-inner" id="rows"></div></div></div>
+    </div>
+  </div>
+</div>
+
+<div class="mask" id="mask">
+  <div>登录已失效或尚未登录，请先登录后返回大屏</div>
+  <a href="/">前往登录</a>
+</div>
+
+<script>
+'use strict';
+(function () {
+  var CAP = 500;                 // 本地保留的告警条数（与主界面一致）
+  var ROW_MAX = 40;              // 右侧实时流滚动展示的条数（DOM 双份渲染用于无缝滚动）
+  var TYPE_OPTIONS = ['01-绝对值报警', '02-死值校验', '03-突变报警'];
+  var TYPE_CLS = {'01': 'b01', '02': 'b02', '03': 'b03'};
+  var TYPE_COLOR = {'01': ['#ef4444', '#f87171'], '02': ['#d97706', '#fbbf24'], '03': ['#7c3aed', '#c084fc']};
+
+  var items = [];                // 按 id 倒序（新 -> 旧）
+  var wsOk = false;
+  var failures = 0;              // 连续连接失败次数（module 级，重连退避用）
+  var lastMaxId = 0;             // 已渲染的最大 id：只有比它新的行才播放入场动画
+  var selId = null;              // 选中行：仪表盘显示该行的温度/极差，null=最新一条
+  var charts = {};
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  // ---------------------------------------------------------------- 服务器时钟
+  // 与主界面一致：以 /api/time 的 epoch 为基准，固定按 UTC+08:00 渲染北京时间
+  var clockBase = {serverMs: 0, localMs: 0};
+  function paintClock() {
+    var b = clockBase;
+    var d = new Date(b.serverMs + (Date.now() - b.localMs) + 8 * 3600 * 1000);
+    var p = function (n) { return String(n).padStart(2, '0'); };
+    $('clock').textContent = d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate())
+      + ' ' + p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()) + ':' + p(d.getUTCSeconds());
+  }
+  function syncClock() {
+    fetch('api/time', {cache: 'no-store'}).then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        if (j && Number(j.epoch) > 0) {
+          clockBase = {serverMs: Number(j.epoch) * 1000, localMs: Date.now()};
+          paintClock();
+        }
+      }).catch(function () {});
+  }
+
+  // ---------------------------------------------------------------- 数据推送
+  function pushItems(fresh) {
+    if (!fresh.length) return;
+    items = fresh.slice().reverse().concat(items).slice(0, CAP);
+    render();
+  }
+
+  function connect() {
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var ws = new WebSocket(proto + '//' + location.host + '/api/alarms/ws');
+    ws.onopen = function () { failures = 0; setWs(true); };
+    ws.onmessage = function (ev) {
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.type === 'snapshot') {
+        items = (msg.items || []).slice().reverse().slice(0, CAP);
+        lastMaxId = 0;               // 快照重置：整屏重新入场一次
+        if (selId != null && !items.some(function (x) { return x.id === selId; })) selId = null;
+        render();
+      } else if (msg.type === 'alarm') {
+        pushItems(msg.items || []);
+      }
+    };
+    ws.onclose = function () {
+      setWs(false);
+      failures += 1;
+      if (failures === 3) checkAuth();
+      setTimeout(connect, Math.min(2000 * Math.pow(2, Math.min(failures - 1, 4)), 30000));
+    };
+    ws.onerror = function () {};
+  }
+
+  function setWs(ok) {
+    wsOk = ok;
+    $('lamp').className = 'lamp ' + (ok ? 'lamp-on' : 'lamp-off');
+    $('wsText').textContent = ok ? '实时已连接' : '重连中...';
+  }
+
+  // ---------------------------------------------------------------- 认证探测
+  function checkAuth() {
+    fetch('api/alarms/get?page=1&pageSize=1', {credentials: 'include', cache: 'no-store'})
+      .then(function (r) {
+        if (r.status === 403) { $('mask').classList.add('show'); return null; }
+        $('mask').classList.remove('show');
+        return r.ok ? r.json() : null;
+      })
+      .then(function (j) { if (j && typeof j.total === 'number') $('typeTotal').textContent = '累计 ' + j.total.toLocaleString() + ' 条'; })
+      .catch(function () {});
+  }
+
+  // ---------------------------------------------------------------- 渲染
+  function typeKey(a) {
+    var t = String(a.alarm_type || '');
+    var m = t.match(/^(\d{2})/);
+    return m ? m[1] : '';
+  }
+
+  function render() {
+    renderKpis();
+    renderList();
+    if (!window.echarts) return;
+    renderRing();
+    renderGauge();
+    renderStations();
+    renderTrend();
+  }
+
+  // 借鉴 DynamicList.vue：数值 count-up 滚动（rAF + easeOut 三次方）
+  // 注意：rAF 在页面不可见/被浏览器节流时完全不触发，300ms 无帧则兜底直写终值，保证数值正确
+  var kpiShown = {all: 0, c01: 0, c02: 0, c03: 0};
+  function tween(el, from, to) {
+    if (from === to) { el.textContent = to; return; }
+    var start = null, dur = 600, rafFired = false;
+    function step(ts) {
+      rafFired = true;
+      if (!start) start = ts;
+      var p = Math.min((ts - start) / dur, 1);
+      var e = 1 - Math.pow(1 - p, 3);
+      el.textContent = Math.round(from + (to - from) * e);
+      if (p < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+    setTimeout(function () { if (!rafFired) el.textContent = to; }, 300);
+  }
+
+  function renderKpis() {
+    var c = {'01': 0, '02': 0, '03': 0};
+    for (var i = 0; i < items.length; i++) {
+      var k = typeKey(items[i]);
+      if (c[k] !== undefined) c[k] += 1;
+    }
+    tween($('kpiAll'), kpiShown.all, items.length); kpiShown.all = items.length;
+    tween($('kpi01'), kpiShown.c01, c['01']); kpiShown.c01 = c['01'];
+    tween($('kpi02'), kpiShown.c02, c['02']); kpiShown.c02 = c['02'];
+    tween($('kpi03'), kpiShown.c03, c['03']); kpiShown.c03 = c['03'];
+    $('rxHint').textContent = wsOk ? '共 ' + items.length + ' 条' : '未连接';
+  }
+
+  function rowHtml(a, i, animate) {
+    var k = typeKey(a);
+    var recover = a.event && a.event !== 'ALARM';
+    var time = String(a.ts || '').slice(11, 19) || '--:--:--';
+    var dev = [a.station_name || '--', a.device_name || ''].filter(Boolean).join(' · ');
+    var pt = a.point_name || a.point_code || '';
+    return '<div class="row' + (recover ? ' recover' : '') + (a.id === selId ? ' sel' : '')
+      + (animate ? ' new' : '') + '" data-id="' + a.id + '"'
+      + (animate ? ' style="animation-delay:' + (Math.min(i, 12) * 0.06).toFixed(2) + 's"' : '') + '>'
+      + '<span class="dot dot' + (k || '99') + '"></span>'
+      + '<span class="t">' + time + '</span>'
+      + '<span class="m">' + esc(dev) + ' <small>' + esc(pt) + '</small></span>'
+      + '<span class="badge ' + (TYPE_CLS[k] || 'b99') + '">' + esc((a.alarm_type || '').slice(0, 2) || '--') + '</span>'
+      + '</div>';
+  }
+
+  function renderList() {
+    var box = $('rows');
+    if (!items.length) {
+      box.innerHTML = '<div class="empty">暂无告警，等待新事件...</div>';
+      halfH = 0; scrollY = 0;
+      box.style.transform = 'translateY(0px)';
+      return;
+    }
+    var first = '', second = '';
+    var maxId = lastMaxId;
+    var n = Math.min(items.length, ROW_MAX);
+    for (var i = 0; i < n; i++) {
+      var a = items[i];
+      if (a.id > maxId) maxId = a.id;
+      // 借鉴 Seamless.vue：内容双份渲染，第一份新行带交错入场动画，第二份为滚动衔接副本
+      first += rowHtml(a, i, a.id > lastMaxId);
+      second += rowHtml(a, i, false);
+    }
+    box.innerHTML = first + second;
+    lastMaxId = maxId;
+    recalcHalf();
+  }
+
+  // ---- 无缝滚动（借鉴 Seamless.vue）：匀速上移，滚过半个内容高度时回绕（内容双份，回绕无跳变） ----
+  var scrollY = 0, scrollPaused = false, halfH = 0, gapPx = 0;
+  function recalcHalf() {
+    var el = $('rows');
+    gapPx = parseFloat(getComputedStyle(el).rowGap) || 0;
+    halfH = el.children.length > 1 ? (el.offsetHeight + gapPx) / 2 : 0;
+  }
+  function tickScroll() {
+    var vp = $('rowsVp'), el = $('rows');
+    if (vp && el && halfH > 0) {
+      if (halfH <= vp.clientHeight + 1) {
+        if (scrollY !== 0) { scrollY = 0; el.style.transform = 'translateY(0px)'; }
+      } else if (selId == null && !scrollPaused) {
+        scrollY -= 0.5;
+        if (-scrollY >= halfH) scrollY += halfH;
+        el.style.transform = 'translateY(' + scrollY.toFixed(1) + 'px)';
+      }
+      // 悬停或选中行：冻结在当前位置，方便查看/点击
+    }
+    requestAnimationFrame(tickScroll);
+  }
+  requestAnimationFrame(tickScroll);
+  $('rowsVp').addEventListener('mouseenter', function () { scrollPaused = true; });
+  $('rowsVp').addEventListener('mouseleave', function () { scrollPaused = false; });
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c];
+    });
+  }
+
+  function baseTextStyle() { return {color: '#7e97b0', fontSize: 11}; }
+
+  function renderRing() {
+    var counts = {'01': 0, '02': 0, '03': 0};
+    for (var i = 0; i < items.length; i++) {
+      var k = typeKey(items[i]);
+      if (counts[k] !== undefined) counts[k] += 1;
+    }
+    var data = TYPE_OPTIONS.map(function (t) {
+      var k = t.slice(0, 2);
+      var col = TYPE_COLOR[k];
+      return {
+        name: t, value: counts[k],
+        itemStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            {offset: 0, color: col[1]}, {offset: 1, color: col[0]}
+          ])
+        }
+      };
+    });
+    var total = counts['01'] + counts['02'] + counts['03'];
+    charts.ring.setOption({
+      backgroundColor: 'transparent',
+      tooltip: {trigger: 'item', formatter: '{b}: {c} 条'},
+      legend: {bottom: 0, left: 'center', icon: 'circle', itemWidth: 8, itemHeight: 8,
+               textStyle: baseTextStyle()},
+      series: [{
+        type: 'pie', radius: ['52%', '72%'], center: ['50%', '44%'],
+        label: {
+          show: true, position: 'center',
+          formatter: '{a|' + total + '}\n{b|告警}',
+          rich: {a: {color: '#eaf3ff', fontSize: 24, fontWeight: 700, lineHeight: 30},
+                 b: {color: '#7e97b0', fontSize: 11}}
+        },
+        labelLine: {show: false},
+        itemStyle: {borderColor: 'rgba(0,0,0,.35)', borderWidth: 1, shadowBlur: 10, shadowColor: 'rgba(0,0,0,.5)'},
+        emphasis: {scale: true, scaleSize: 6},
+        data: data
+      }]
+    }, true);
+  }
+
+  function renderGauge() {
+    var latest = null;
+    if (selId != null) {
+      for (var s = 0; s < items.length; s++) {
+        if (items[s].id === selId) { latest = items[s]; break; }
+      }
+    }
+    if (!latest) {
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].temperature != null) { latest = items[i]; break; }
+      }
+    }
+    var temp = latest && latest.temperature != null ? latest.temperature : 0;
+    var r1 = latest && latest.range_1h != null ? latest.range_1h : 0;
+    var r20 = latest && latest.range_20s != null ? latest.range_20s : 0;
+    var max1 = Math.max(5, Math.ceil(r1 / 5) * 5);
+    var max20 = Math.max(2, Math.ceil(r20 / 2) * 2);
+    var isPick = latest && selId != null && latest.id === selId;
+    $('gaugeHint').textContent = latest
+      ? (isPick ? '选中 · ' : '') + (latest.station_name || '') + ' ' + (latest.device_name || '')
+      : '暂无数据';
+    charts.gauge.setOption({
+      backgroundColor: 'transparent',
+      series: [{
+        type: 'gauge', startAngle: 210, endAngle: -30, min: 0, max: 150,
+        radius: '96%', center: ['50%', '58%'],
+        axisLine: {lineStyle: {width: 10, color: [[0.6, '#4ade80'], [0.8667, '#fbbf24'], [1, '#f87171']]}},
+        axisTick: {distance: -13, length: 4, lineStyle: {color: '#7e97b0', width: 1}},
+        splitLine: {distance: -15, length: 10, lineStyle: {color: '#7e97b0', width: 2}},
+        axisLabel: {distance: -2, color: '#7e97b0', fontSize: 10},
+        pointer: {width: 4, length: '58%', itemStyle: {color: '#3a7bd5', shadowBlur: 8, shadowColor: 'rgba(0,0,0,.55)'}},
+        anchor: {show: true, size: 10, itemStyle: {color: '#3a7bd5'}},
+        title: {show: true, offsetCenter: [0, '-44%'], color: '#7e97b0', fontSize: 12},
+        detail: {fontSize: 26, fontWeight: 700, color: '#eaf3ff', offsetCenter: [0, '30%'],
+                 formatter: function (v) { return v.toFixed(1) + ' °C'; }},
+        data: [{value: temp, name: isPick ? '选中行温度' : (latest ? '最新温度' : '暂无数据')}]
+      }, {
+        type: 'gauge', startAngle: 210, endAngle: -30, min: 0, max: max1,
+        radius: '66%', center: ['50%', '58%'],
+        axisLine: {lineStyle: {width: 4, color: [[1, '#1e3a5f']]}},
+        axisTick: {show: false}, splitLine: {show: false}, axisLabel: {show: false},
+        pointer: {width: 3, length: '68%', itemStyle: {color: '#00d2ff', shadowBlur: 5, shadowColor: 'rgba(0,0,0,.5)'}},
+        anchor: {show: false}, title: {show: false}, detail: {show: false},
+        data: [{value: r1, name: '1h极差'}]
+      }, {
+        type: 'gauge', startAngle: 210, endAngle: -30, min: 0, max: max20,
+        radius: '46%', center: ['50%', '58%'],
+        axisLine: {lineStyle: {width: 3, color: [[1, '#1e3a5f']]}},
+        axisTick: {show: false}, splitLine: {show: false}, axisLabel: {show: false},
+        pointer: {width: 3, length: '72%', itemStyle: {color: '#fbbf24', shadowBlur: 5, shadowColor: 'rgba(0,0,0,.5)'}},
+        anchor: {show: false}, title: {show: false}, detail: {show: false},
+        data: [{value: r20, name: '20s极差'}]
+      }],
+      graphic: [
+        {type: 'text', left: '20%', bottom: 2, silent: true,
+         style: {text: '1h极差 ' + r1.toFixed(2), fill: '#00d2ff', fontSize: 13, fontWeight: 600}},
+        {type: 'text', right: '20%', bottom: 2, silent: true,
+         style: {text: '20s极差 ' + r20.toFixed(2), fill: '#fbbf24', fontSize: 13, fontWeight: 600}}
+      ]
+    }, true);
+  }
+
+  function renderStations() {
+    var map = {};
+    for (var i = 0; i < items.length; i++) {
+      var s = items[i].station_name || '未知场站';
+      map[s] = (map[s] || 0) + 1;
+    }
+    var arr = Object.keys(map).map(function (k) { return {name: k, value: map[k]}; })
+      .sort(function (a, b) { return a.value - b.value; }).slice(-5);
+    charts.station.setOption({
+      backgroundColor: 'transparent',
+      grid: {left: 8, right: 40, top: 8, bottom: 6, containLabel: true},
+      xAxis: {type: 'value', show: false, max: function (v) { return Math.ceil(v.max * 1.15); }},
+      yAxis: {
+        type: 'category', data: arr.map(function (d) { return d.name; }),
+        axisLine: {lineStyle: {color: '#1b3b5e'}}, axisTick: {show: false},
+        axisLabel: {color: '#a9c8e6', fontSize: 11, width: 96, overflow: 'truncate'}
+      },
+      tooltip: {trigger: 'axis', axisPointer: {type: 'shadow'}, formatter: '{b}: {c} 条'},
+      series: [{
+        type: 'bar', barWidth: '46%',
+        itemStyle: {
+          borderRadius: [0, 3, 3, 0],
+          color: new echarts.graphic.LinearGradient(0, 0, 1, 0, [
+            {offset: 0, color: '#1d5c96'}, {offset: 1, color: '#00d2ff'}
+          ])
+        },
+        label: {show: true, position: 'right', color: '#8ecdff', fontSize: 11},
+        data: arr.map(function (d) { return d.value; })
+      }]
+    }, true);
+  }
+
+  function renderTrend() {
+    // 以最新一条告警的时间为锚点，回看 12 个 5 分钟桶
+    var anchor = 0;
+    for (var i = 0; i < items.length; i++) {
+      var t = toMs(items[i].ts);
+      if (t > anchor) anchor = t;
+    }
+    var labels = [], values = [], now = anchor || Date.now();
+    var step = 5 * 60 * 1000;
+    var end = Math.floor(now / step) * step;
+    var idx = {};
+    for (var b = 0; b < 12; b++) {
+      var s = end - (11 - b) * step;
+      var d = new Date(s);
+      labels.push(pad(d.getHours()) + ':' + pad(d.getMinutes()));
+      idx[s] = b;
+      values.push(0);
+    }
+    for (var j = 0; j < items.length; j++) {
+      var ms = toMs(items[j].ts);
+      if (!ms) continue;
+      var bucket = Math.floor(ms / step) * step;
+      if (idx[bucket] !== undefined) values[idx[bucket]] += 1;
+    }
+    charts.trend.setOption({
+      backgroundColor: 'transparent',
+      grid: {left: 8, right: 14, top: 14, bottom: 4, containLabel: true},
+      tooltip: {trigger: 'axis', formatter: '{b} · {c} 条'},
+      xAxis: {
+        type: 'category', boundaryGap: false, data: labels,
+        axisLine: {lineStyle: {color: '#1b3b5e'}}, axisTick: {show: false},
+        axisLabel: {color: '#7e97b0', fontSize: 10, interval: 1}
+      },
+      yAxis: {
+        type: 'value', minInterval: 1,
+        splitLine: {lineStyle: {color: 'rgba(27,59,94,.65)'}},
+        axisLabel: {color: '#7e97b0', fontSize: 10}
+      },
+      series: [{
+        type: 'line', smooth: true, symbol: 'circle', symbolSize: 5, showSymbol: false,
+        lineStyle: {width: 2, color: '#00d2ff'},
+        itemStyle: {color: '#00d2ff'},
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            {offset: 0, color: 'rgba(0,210,255,.42)'}, {offset: 1, color: 'rgba(0,210,255,.02)'}
+          ])
+        },
+        data: values
+      }]
+    }, true);
+  }
+
+  function pad(n) { return String(n).padStart(2, '0'); }
+  function toMs(ts) {
+    if (!ts) return 0;
+    var d = new Date(String(ts).replace(' ', 'T'));
+    return isNaN(d.getTime()) ? 0 : d.getTime();
+  }
+
+  // ---------------------------------------------------------------- 初始化
+  function initCharts() {
+    if (!window.echarts) return false;
+    charts.ring = echarts.init($('ringChart'));
+    charts.gauge = echarts.init($('gaugeChart'));
+    charts.station = echarts.init($('stationChart'));
+    charts.trend = echarts.init($('trendChart'));
+    return true;
+  }
+
+  if (initCharts()) {
+    window.addEventListener('resize', function () {
+      Object.keys(charts).forEach(function (k) { charts[k].resize(); });
+      recalcHalf();
+    });
+  }
+
+  $('fsBtn').onclick = function () {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(function () {});
+    } else {
+      document.exitFullscreen();
+    }
+  };
+  $('backBtn').onclick = function () { location.href = '/'; };
+
+  // 点击右侧实时流的任意一行：仪表盘切换到该行的温度 / 1h 极差 / 20s 极差（再次点击取消）
+  $('rows').addEventListener('click', function (e) {
+    var el = e.target && e.target.closest ? e.target.closest('.row') : null;
+    if (!el || !el.dataset.id) return;
+    var id = Number(el.dataset.id);
+    selId = (selId === id) ? null : id;
+    renderList();
+    renderGauge();
+  });
+
+  $('rows').innerHTML = '<div class="empty">等待数据...</div>';
+  syncClock();
+  setInterval(paintClock, 1000);
+  setInterval(syncClock, 30000);
+  checkAuth();
+  setInterval(checkAuth, 60000);
+  connect();
+})();
+</script>
+</body>
+</html>

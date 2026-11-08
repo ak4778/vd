@@ -119,6 +119,12 @@
       .ind-theme .ind-darktable { background: #0f2236; border-color: #1e3a5f; }
       .ind-theme .ind-dark-th { background: #17365a; color: #d5e4f4; border-color: #2a4a73; }
       .ind-theme .ind-dark-row:hover { background: #17365a; }
+      /* 告警表选中行：点击后仪表盘显示该行的温度 / 1h 极差 / 20s 极差 */
+      .alarm-row { cursor: pointer; }
+      .ind-lightbox tr.alarm-sel { background: #dbeafe; }
+      .ind-theme .ind-darktable tr.alarm-sel { background: #1b4a7a; }
+      .ind-theme .ind-darktable tr.alarm-sel:hover { background: #21588c; }
+      .ind-theme .ind-darktable tr.alarm-sel td { color: #eaf3ff; }
       .ind-theme .ind-dark-row td { color: #c9d8e8; border-color: #1e3a5f; }
       .ind-theme .ind-dark-row td .text-slate-800 { color: #eaf3ff; }
       .ind-theme .ind-dark-row td .text-slate-400 { color: #7d95ad; }
@@ -156,6 +162,27 @@
       .alarm-export-tilde { font-size: 12px; color: #94a3b8; }
       .alarm-export-mode { font-size: 11px; color: #2563eb; background: none; border: none; cursor: pointer; padding: 0 2px; }
       .alarm-export-mode:hover { text-decoration: underline; }
+      /* ===== 风机告警页：顶部图表区（环形占比 + 仪表盘，echarts 本地 UMD） ===== */
+      .alarm-charts { display: flex; gap: 8px; padding: 4px 12px; border-bottom: 1px solid #e2e8f0; }
+      .alarm-chart-box { flex: 1; min-width: 0; }
+      .alarm-chart { width: 100%; height: 130px; }
+      /* 仪表盘 + 右侧信息栏（场站·设备名 / 1h极差 / 20s极差） */
+      .alarm-gauge-box { display: flex; align-items: center; justify-content: center; gap: 6px; }
+      .alarm-gauge-box .alarm-chart { flex: none; width: 220px; }
+      .alarm-gauge-info { flex: none; width: 132px; display: flex; flex-direction: column; gap: 2px; font-size: 11px; line-height: 14px; color: #64748b; }
+      .alarm-gauge-info .gi-dev { color: #334155; font-weight: 600; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .alarm-gauge-info .gi-row { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+      .alarm-gauge-info .gi-row b { font-weight: 600; font-variant-numeric: tabular-nums; }
+      .alarm-gauge-info .gi-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+      .alarm-gauge-info .gi-cy { color: #00a6cc; }
+      .alarm-gauge-info .gi-am { color: #d97706; }
+      .alarm-gauge-info .gi-dot.gi-cy { background: #00d2ff; }
+      .alarm-gauge-info .gi-dot.gi-am { background: #fbbf24; }
+      .ind-theme .alarm-gauge-info { color: #8aa2ba; }
+      .ind-theme .alarm-gauge-info .gi-dev { color: #d5e4f4; }
+      .ind-theme .alarm-gauge-info .gi-cy { color: #00d2ff; }
+      .ind-theme .alarm-gauge-info .gi-am { color: #fbbf24; }
+      .ind-theme .alarm-charts { border-bottom-color: #2a4a73; }
       .ind-theme .alarm-filterbar { background: #12283f; border-bottom-color: #2a4a73; }
       .ind-theme .alarm-filter-label { color: #8aa2ba; }
       .ind-theme .alarm-filter-select { color: #d5e4f4; background: #0f2236; border-color: #2a4a73; }
@@ -196,5 +223,6 @@
   <body class="h-full"></body>
   <link rel="stylesheet" href="dist/tailwind.css">
   <script src="history.min.js"></script>
-  <script type="module" src="main.js?v=20261103a"></script>
+  <script src="echarts.min.js"></script>
+  <script type="module" src="main.js?v=20261107l"></script>
 </html>
