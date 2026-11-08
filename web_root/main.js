@@ -766,6 +766,7 @@ const ALARM_CAP = 500;  // 前端最多保留的告警条数（超出丢弃最�
 // sel/onPick：点击行把该行的温度/极差载入上方仪表盘（再次点击取消，回到最新一条）
 const AlarmRow = ({a, compact, sel, onPick}) => {
   const isAlarm = a.event === 'ALARM';
+  const pi = POINT_ICON(a.point_code);
   return html`
   <tr class="hover:bg-slate-50 ind-dark-row alarm-row ${sel ? 'alarm-sel' : ''}"
       onclick=${onPick} title="点击在仪表盘中查看该行的温度 / 1h 极差 / 20s 极差">
@@ -781,8 +782,11 @@ const AlarmRow = ({a, compact, sel, onPick}) => {
       ${a.device_name && html`<span class="text-slate-400 ml-1 text-xs">(${a.device_id})<//>`}
     <//>
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm overflow-hidden text-ellipsis whitespace-nowrap" title=${a.point_name ? `${a.point_name}(${a.point_code})` : a.point_code}>
-      <span class="text-slate-800">${a.point_name || a.point_code}<//>
-      ${a.point_name && html`<span class="text-slate-400 ml-1 text-xs">(${a.point_code})<//>`}
+      <span class="alarm-pt-cell">
+        ${pi && h(Icons[pi.icon], {class: 'alarm-pt-ic ' + pi.cls})}
+        <span class="text-slate-800">${a.point_name || a.point_code}<//>
+        ${a.point_name && html`<span class="text-slate-400 ml-1 text-xs">(${a.point_code})<//>`}
+      <//>
     <//>
     ${!compact && html`
     <td class="border-b border-slate-200 py-1.5 px-4 text-sm text-slate-600 whitespace-nowrap">${a.rule_code}<//>`}
@@ -826,6 +830,11 @@ const ALARM_TYPE_NONE = '__none__';
 const WINDING_POINTS = ['TEMGENSEN1', 'TEMGENSEN2', 'TEMGENSEN3',
                         'TEMGENSTAU', 'TEMGENSTAV', 'TEMGENSTAW'];
 const WINDING_POINT_KEY = WINDING_POINTS.join(',');
+const POINT_ICON = code =>
+  WINDING_POINTS.includes(code) ? {icon: 'winding', cls: 'pt-wind'}        // 定子线圈 / TAU/V/W 绕组
+  : code === 'TEMGENDRIEND'     ? {icon: 'driveEnd', cls: 'pt-drive'}     // 驱动端
+  : code === 'TEMGENNONDE'      ? {icon: 'nonDriveEnd', cls: 'pt-nondrive'} // 非驱动端
+  : null;
 // 按告警类型前缀映射底色 class（01/02/03 → atype-01/02/03），表格列与过滤下拉共用
 const alarmTypeCls = t => {
   const m = String(t || '').match(/^(\d{2})/);

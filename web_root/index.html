@@ -183,6 +183,15 @@
       .ind-theme .alarm-gauge-info .gi-cy { color: #00d2ff; }
       .ind-theme .alarm-gauge-info .gi-am { color: #fbbf24; }
       .ind-theme .alarm-charts { border-bottom-color: #2a4a73; }
+      /* 测点列图标：驱动端 / 非驱动端 / 绕组 */
+      .alarm-pt-cell { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; }
+      .alarm-pt-ic { width: 13px; height: 13px; flex: none; }
+      .alarm-pt-ic.pt-drive { color: #2563eb; }
+      .alarm-pt-ic.pt-nondrive { color: #7c3aed; }
+      .alarm-pt-ic.pt-wind { color: #d97706; }
+      .ind-theme .alarm-pt-ic.pt-drive { color: #60a5fa; }
+      .ind-theme .alarm-pt-ic.pt-nondrive { color: #c4b5fd; }
+      .ind-theme .alarm-pt-ic.pt-wind { color: #fbbf24; }
       .ind-theme .alarm-filterbar { background: #12283f; border-bottom-color: #2a4a73; }
       .ind-theme .alarm-filter-label { color: #8aa2ba; }
       .ind-theme .alarm-filter-select { color: #d5e4f4; background: #0f2236; border-color: #2a4a73; }
@@ -224,5 +233,5 @@
   <link rel="stylesheet" href="dist/tailwind.css">
   <script src="history.min.js"></script>
   <script src="echarts.min.js"></script>
-  <script type="module" src="main.js?v=20261107l"></script>
+  <script type="module" src="main.js?v=20261107m"></script>
 </html>
