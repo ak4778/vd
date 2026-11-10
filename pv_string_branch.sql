@@ -41,7 +41,7 @@
 --   单支路单桶最少采样 3（5 分钟桶通常 15~22 个点）
 --   偏差率分档        5% / 10% / -5%
 --   20 分钟极差阈值   20%
---   20 分钟突变阈值   10 个百分点（rate = 10/20 = 0.5 %/m）
+--   20 分钟突变阈值   10 个百分点（rate = 10/15 ≈ 0.667 %/m，分母取块内首末快照实际跨度 15 分钟）
 -- ============================================================================
 
 
@@ -260,7 +260,7 @@ bb AS (                                         -- 支路 × 20 分钟块：变�
         max(snap)      AS block_end,
         extract(hour FROM block_20m AT TIME ZONE 'Asia/Shanghai') AS hh,
         CASE WHEN max(dev_cnt) >= 2 THEN max(dev_last) - max(dev_first) END AS chg_20m,
-        CASE WHEN max(dev_cnt) >= 2 THEN (max(dev_last) - max(dev_first)) / 20 END AS rate_pm
+        CASE WHEN max(dev_cnt) >= 2 THEN (max(dev_last) - max(dev_first)) / 15 END AS rate_pm
     FROM bb_win
     GROUP BY device_id, point_code, block_20m
 ),
@@ -328,8 +328,7 @@ SELECT
     bb.block_20m AT TIME ZONE 'Asia/Shanghai'                       AS "20分钟块起始",
     round(bb.chg_20m::numeric, 2)                                   AS "20分钟偏差变化(pp)",
     round(bb.rate_pm::numeric, 3)                                   AS "偏差率变化速率(%/m)",
-    round(dd.range20_pct::numeric, 2)                               AS "20分钟相对极差(%)",
-    CASE WHEN bs.snap_flag IS NULL THEN 'ok' ELSE bs.snap_flag END  AS "快照标记"
+    round(dd.range20_pct::numeric, 2)                               AS "20分钟相对极差(%)"
 FROM bs
 LEFT JOIN bb
        ON bb.device_id = bs.device_id
@@ -463,7 +462,7 @@ bb AS (
         max(snap)      AS block_end,
         extract(hour FROM block_20m AT TIME ZONE 'Asia/Shanghai') AS hh,
         CASE WHEN max(dev_cnt) >= 2 THEN max(dev_last) - max(dev_first) END AS chg_20m,
-        CASE WHEN max(dev_cnt) >= 2 THEN (max(dev_last) - max(dev_first)) / 20 END AS rate_pm
+        CASE WHEN max(dev_cnt) >= 2 THEN (max(dev_last) - max(dev_first)) / 15 END AS rate_pm
     FROM bb_win
     GROUP BY device_id, point_code, block_20m
 ),
