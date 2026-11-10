@@ -837,7 +837,7 @@ SELECT to_char(br.bucket AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI') AS 
        st.station_name                                                      AS "场站",
        si.inverter_name                                                     AS "组串编号",
        br.device_id                                                         AS "逆变器ID",
-       substring(br.point_code FROM '^STRING_BRANCH([0-9]+)_A$')::int        AS "支路",
+       substring(br.point_code FROM '^STRING_BRANCH([0-9]+)_A$')::int        AS "支路编号",
        br.point_code                                                        AS "支路点位",
        round(br.i::numeric, 3)                                              AS "支路电流(A)",
        round(d.i_mean::numeric, 3)                                          AS "组串平均电流(A)",
@@ -850,7 +850,7 @@ JOIN ds d USING (device_id, bucket)
 LEFT JOIN si ON si.dev_key = br.device_id
 LEFT JOIN st ON st.station_id = si.station_id
 WHERE d.branch_cnt >= 2 AND abs(d.i_mean) >= 0.5
-ORDER BY br.bucket, "支路";
+ORDER BY br.bucket, "支路编号";
 
 -- 6.2 组串级汇总（每快照一行，仅特征 2、3；br/ds/zbr 与 6.1 完全一致）
 WITH ex AS (                                    -- 已标记异常的逆变器+支路（与 §3 完全一致）
