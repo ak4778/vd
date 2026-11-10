@@ -14,7 +14,8 @@
 --   3. 组串平均电流 = 同一快照下各支路均值的等权平均（一支路一票）。
 --   4. CV 分母带符号：cv = stddev_pop(i_b)/i_mean*100，不做 abs。
 --   5. 异常条数分档互斥：>=5% 列只统计 5%<=dev<10%，>=10% 列单独统计。
---   6. 零值判定严格 i_b = i_mean，且同组串同快照存在其他异常支路才计入。
+--   6. 零值判定 = 偏差率为 0（|dev_pct| <= 1e-6 个百分点，等价于 i_b = i_mean，
+--      留容差以免 float8 累加误差 1e-16~1e-14 造成漏判），且同组串同快照存在其他异常支路才计入。
 --   7. 逆变器即组串（device_id / inverter_name）。
 --   8. 已被 pv_inverter_branch_abnormal 标记的逆变器+支路（branch_name 含"支路N"）
 --      不参与统计计算与输出（参考 pv_to_excel.py）；在查询层 NOT EXISTS 排除，
@@ -263,19 +264,21 @@ bb AS (                                         -- 支路 × 20 分钟块：变�
     FROM bb_win
     GROUP BY device_id, point_code, block_20m
 ),
-dblk AS (                                       -- 设备 × 20 分钟块：跨支路极值
+dblk AS (                                       -- 支路 × 20 分钟块：单支路时间极值
     SELECT
         device_id,
+        point_code,
         block_20m,
         max(i)              AS blk_i_max,
         min(i)              AS blk_i_min,
         count(DISTINCT snap) AS blk_snap_cnt
     FROM bok
-    GROUP BY device_id, block_20m
+    GROUP BY device_id, point_code, block_20m
 ),
 dblk_mean AS (                                  -- 块内组串均值 = 各快照 i_mean 的等权平均
     SELECT
         d.device_id,
+        d.point_code,
         d.block_20m,
         d.blk_i_max,
         d.blk_i_min,
@@ -284,7 +287,7 @@ dblk_mean AS (                                  -- 块内组串均值 = 各快�
     FROM dblk d
     JOIN (SELECT DISTINCT device_id, snap, block_20m, i_mean FROM bok) s
       ON s.device_id = d.device_id AND s.block_20m = d.block_20m
-    GROUP BY 1, 2, 3, 4, 5
+    GROUP BY 1, 2, 3, 4, 5, 6
 ),
 dblk_dev AS (                                   -- 20 分钟固定块相对极差
     SELECT
@@ -320,8 +323,8 @@ SELECT
     round(bs.i::numeric, 3)                                         AS "支路电流",
     round(bs.i_mean::numeric, 3)                                    AS "组串平均电流",
     round(bs.dev_pct::numeric, 2)                                   AS "单支路当前偏差率(%)",
-    round(bs.cv_pct::numeric, 2)                                    AS "整体偏差率(%)",
-    round(bs.range_pct::numeric, 2)                                 AS "电流相对极差(%)",
+    round(bs.cv_pct::numeric, 2)                                    AS "组串整体偏差率(%)",
+    round(bs.range_pct::numeric, 2)                                 AS "组串电流相对极差(%)",
     bb.block_20m AT TIME ZONE 'Asia/Shanghai'                       AS "20分钟块起始",
     round(bb.chg_20m::numeric, 2)                                   AS "20分钟偏差变化(pp)",
     round(bb.rate_pm::numeric, 3)                                   AS "偏差率变化速率(%/m)",
@@ -334,6 +337,7 @@ LEFT JOIN bb
       AND bb.block_20m = bs.block_20m
 LEFT JOIN dblk_dev dd
        ON dd.device_id = bs.device_id
+      AND dd.point_code = bs.point_code
       AND dd.block_20m = bs.block_20m
 LEFT JOIN si ON si.dev_key = bs.device_id
 LEFT JOIN st ON st.station_id = si.station_id
@@ -424,7 +428,9 @@ bok AS (
 snap_abn AS (                                   -- 每个快照的异常支路数（用于零值条件⑥）
     SELECT device_id, snap, count(*) AS abn_cnt
     FROM bok
-    WHERE dev_pct >= 5 OR dev_pct <= -5 OR dev_pct >= 100 OR dev_pct < 0
+    WHERE dev_pct >= 5 OR dev_pct <= -5 OR dev_pct >= 100 OR dev_pct < -1e-6
+                                          -- ★ 负值判定留 1e-6 个百分点容差：
+                                          --   avg(float8) 累加误差可达 1e-14，恒流支路会被误判为负值
     GROUP BY device_id, snap
 ),
 bi AS (
@@ -471,24 +477,26 @@ bwin AS (                                       -- 支路 × 窗口：变化速�
     FROM bb
     GROUP BY device_id, point_code, hh
 ),
-dblk AS (
+dblk AS (                                       -- 支路 × 20 分钟块：单支路时间极值
     SELECT
         device_id,
+        point_code,
         block_20m,
         max(i)               AS blk_i_max,
         min(i)               AS blk_i_min,
         count(DISTINCT snap) AS blk_snap_cnt
     FROM bok
-    GROUP BY device_id, block_20m
+    GROUP BY device_id, point_code, block_20m
 ),
 dblk_mean AS (
     SELECT
-        d.device_id, d.block_20m, d.blk_i_max, d.blk_i_min, d.blk_snap_cnt,
+        d.device_id, d.point_code, d.block_20m,
+        d.blk_i_max, d.blk_i_min, d.blk_snap_cnt,
         avg(s.i_mean) AS blk_mean_i
     FROM dblk d
     JOIN (SELECT DISTINCT device_id, snap, block_20m, i_mean FROM bok) s
       ON s.device_id = d.device_id AND s.block_20m = d.block_20m
-    GROUP BY 1, 2, 3, 4, 5
+    GROUP BY 1, 2, 3, 4, 5, 6
 ),
 dblk_dev AS (
     SELECT
@@ -497,14 +505,15 @@ dblk_dev AS (
              THEN (blk_i_max - blk_i_min) / blk_mean_i * 100 END AS range20_pct
     FROM dblk_mean
 ),
-jump AS (                                       -- 设备 × 窗口：条件③ 触发块数（0~3）
+jump AS (                                       -- 支路 × 窗口：条件③ 触发块数（0~3）
     SELECT
         device_id,
+        point_code,
         extract(hour FROM block_20m AT TIME ZONE 'Asia/Shanghai') AS hh,
         count(*) AS jump_cnt
     FROM dblk_dev
     WHERE range20_pct >= 20                     -- ★ 20 分钟相对极差阈值
-    GROUP BY device_id, hh
+    GROUP BY device_id, point_code, hh
 ),
 win AS (                                        -- 支路 × 窗口：特征汇总
     SELECT
@@ -522,9 +531,11 @@ win AS (                                        -- 支路 × 窗口：特征汇�
         count(*) FILTER (WHERE dev_pct >= 10)                   AS ge10_cnt,
         count(*) FILTER (WHERE dev_pct <= -5)                   AS le_neg5_cnt,
         count(*) FILTER (WHERE abs(dev_pct) >= 5)               AS abn_win_cnt,  -- 异常条数（|偏差率|>=5%）
-        count(*) FILTER (WHERE dev_pct < 0)                     AS neg_cnt,
+        count(*) FILTER (WHERE dev_pct < -1e-6)                 AS neg_cnt,   -- ★ 1e-6 容差，滤掉浮点噪声假负值
         count(*) FILTER (WHERE dev_pct >= 100)                  AS over100_cnt,
-        count(*) FILTER (WHERE i = i_mean AND abn_cnt > 0)      AS zero_cnt   -- 严格相等 + 同组串有异常支路
+        count(*) FILTER (WHERE abs(dev_pct) <= 1e-6 AND abn_cnt > 0) AS zero_cnt
+        -- ★ i = i_mean 的容差等价写法：avg(float8) 累加误差会让 0.6 vs 0.6000000000000001
+        --   判为不等而漏报；dev_pct = 0 与 i = i_mean 同义，1e-6 个百分点容差足够安全
     FROM bi
     GROUP BY device_id, point_code, hh
 ),
@@ -596,10 +607,10 @@ SELECT
     b.point_code                                                      AS "支路点位",
 
     round(w.dev_avg::numeric, 2)                                      AS "单支路当前偏差率(%)",   -- 无有效快照则为 NULL
-    round(w.cv_avg::numeric, 2)                                       AS "整体偏差率(%)",
+    round(w.cv_avg::numeric, 2)                                       AS "组串整体偏差率(%)",
     round(w.dev_max::numeric, 2)                                      AS "最大偏差率(%)",
     round(w.dev_min::numeric, 2)                                      AS "最小偏差率(%)",
-    round(w.cv_max::numeric, 2)                                       AS "最大整体偏差率(%)",
+    round(w.cv_max::numeric, 2)                                       AS "最大组串整体偏差率(%)",
     round(brw.chg_20m_max::numeric, 2)                                AS "20分钟最大偏差变化(pp)",
     round(brw.rate_max_pm::numeric, 3)                                AS "偏差率变化速率(%/m)",
 
@@ -649,18 +660,18 @@ SELECT
             THEN '电流偏高：校验CT精度，对比相邻支路实测电流'
         WHEN COALESCE(j.jump_cnt, 0) >= 1
             THEN '组串严重失配：重点排查偏差率最低的1-2条支路（隐裂、接线盒烧毁）'
+        WHEN COALESCE(w.snap_cnt, 0) >= 2 AND w.dev_max = w.dev_min
+            THEN '数据死值：结合电压判断传感器卡死或通信假数据'
         WHEN w.dev_avg >= 5 AND w.dev_avg < 10
             THEN '轻度偏高（亚健康）：记录在案，下次清洗/巡检重点观察'
         WHEN w.dev_avg > -5 AND w.dev_avg <= 0
             THEN '轻度偏低（亚健康）：记录在案，下次清洗/巡检重点观察'
-        WHEN COALESCE(w.snap_cnt, 0) >= 2 AND w.dev_max = w.dev_min
-            THEN '数据死值：结合电压判断传感器卡死或通信假数据'
         ELSE '正常'
     END                                                               AS "运维建议"
 FROM ball b
 LEFT JOIN win  w   USING (device_id, point_code, hh)
 LEFT JOIN bwin brw USING (device_id, point_code, hh)
-LEFT JOIN jump j   USING (device_id, hh)
+LEFT JOIN jump j   USING (device_id, point_code, hh)
 LEFT JOIN zc   z   USING (device_id, point_code, hh)
 LEFT JOIN si ON si.dev_key = b.device_id
 LEFT JOIN st ON st.station_id = si.station_id
@@ -755,8 +766,8 @@ ORDER BY
 -- ============================================================================
 -- 6. 三特征独立查询（已验证：Excel 源头重算 288/288 一致，详见会话验证记录）
 --    特征1 单支路偏差率 = (支路电流 - 组串平均电流) / 组串平均电流 * 100%
---    特征2 整体偏差率   = stddev_pop(支路电流) / 组串平均电流 * 100%   （总体标准差 ÷n）
---    特征3 相对极差     = (组串最大电流 - 组串最小电流) / 组串平均电流 * 100%
+--    特征2 组串整体偏差率 = stddev_pop(支路电流) / 组串平均电流 * 100%   （总体标准差 ÷n）
+--    特征3 组串电流相对极差 = (组串最大电流 - 组串最小电流) / 组串平均电流 * 100%
 --    口径：剔除 0A（i_avg IS NOT NULL）、单桶有效采样 ≥3、
 --          快照 ≥2 条支路且 |组串均值| ≥0.5A（低电流防御，与 §3 ds 一致）
 --          支路级 |i| < 0.5A 只打标记「支路低电流」，不剔除（仍参与统计，口径 2）；
@@ -799,29 +810,46 @@ br AS (
 ds AS (
     SELECT device_id, bucket,
            avg(i)        AS i_mean,
-           stddev_pop(i) AS i_std,
-           min(i)        AS i_min,
-           max(i)        AS i_max,
            count(*)      AS branch_cnt,
            sum(zero_cnt) AS zero_cnt,
            sum(sample_cnt) AS sample_cnt,
            count(*) FILTER (WHERE abs(i) < 0.5) AS low_cnt
     FROM br
     GROUP BY device_id, bucket
+),
+st AS (                                         -- 电站维表（与 §3 一致）
+    SELECT station_id, station_name, region_company_name
+    FROM pv_station_info
+    WHERE constituent_name = '国电电力'
+    GROUP BY station_id, station_name, region_company_name
+),
+si AS (                                         -- 逆变器维表（与 §3 一致）
+    SELECT DISTINCT ON (upper(inverter_id))
+           upper(inverter_id) AS dev_key,
+           station_id,
+           inverter_name
+    FROM pv_station_invert
+    WHERE inverter_id IS NOT NULL
+      AND inverter_id <> ''
+    ORDER BY upper(inverter_id), station_id, inverter_name
 )
-SELECT to_char(br.bucket AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI') AS "快照",
-       substring(br.point_code FROM '^STRING_BRANCH([0-9]+)_A$')::int         AS "支路",
+SELECT to_char(br.bucket AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI') AS "时间戳",
+       st.region_company_name                                               AS "公司",
+       st.station_name                                                      AS "场站",
+       si.inverter_name                                                     AS "组串编号",
+       br.device_id                                                         AS "逆变器ID",
+       substring(br.point_code FROM '^STRING_BRANCH([0-9]+)_A$')::int        AS "支路",
+       br.point_code                                                        AS "支路点位",
        round(br.i::numeric, 3)                                              AS "支路电流(A)",
        round(d.i_mean::numeric, 3)                                          AS "组串平均电流(A)",
        round(((br.i - d.i_mean) / d.i_mean * 100)::numeric, 2)               AS "单支路偏差率(%)",
-       round((d.i_std / d.i_mean * 100)::numeric, 2)                         AS "整体偏差率(%)",
-       round(((d.i_max - d.i_min) / d.i_mean * 100)::numeric, 2)             AS "相对极差(%)",
-       d.branch_cnt                                                         AS "支路数",
        br.sample_cnt                                                        AS "有效采样数",
        br.zero_cnt                                                          AS "零值采样数",
        CASE WHEN abs(br.i) < 0.5 THEN '是' ELSE '' END                       AS "支路低电流"
 FROM br
 JOIN ds d USING (device_id, bucket)
+LEFT JOIN si ON si.dev_key = br.device_id
+LEFT JOIN st ON st.station_id = si.station_id
 WHERE d.branch_cnt >= 2 AND abs(d.i_mean) >= 0.5
 ORDER BY br.bucket, "支路";
 
@@ -884,12 +912,32 @@ snap AS (                                       -- 窗口内全部 5 分钟桶�
       AND bucket >= timestamptz '2026-11-04 10:00:00+08'          -- ← 时间范围（半开区间）
       AND bucket <  timestamptz '2026-11-04 11:00:00+08'
       AND point_code ~ '^STRING_BRANCH([1-9]|[1-3][0-9]|40)_A$'
+),
+st AS (                                         -- 电站维表（与 §3 一致）
+    SELECT station_id, station_name, region_company_name
+    FROM pv_station_info
+    WHERE constituent_name = '国电电力'
+    GROUP BY station_id, station_name, region_company_name
+),
+si AS (                                         -- 逆变器维表（与 §3 一致）
+    SELECT DISTINCT ON (upper(inverter_id))
+           upper(inverter_id) AS dev_key,
+           station_id,
+           inverter_name
+    FROM pv_station_invert
+    WHERE inverter_id IS NOT NULL
+      AND inverter_id <> ''
+    ORDER BY upper(inverter_id), station_id, inverter_name
 )
-SELECT to_char(s.bucket AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI') AS "快照",
-       coalesce(ds.branch_cnt, 0)                                            AS "支路数",
+SELECT to_char(s.bucket AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI') AS "时间戳",
+       st.region_company_name                                               AS "公司",
+       st.station_name                                                      AS "场站",
+       si.inverter_name                                                     AS "组串编号",
+       s.device_id                                                          AS "逆变器ID",
+       coalesce(ds.branch_cnt, 0)                                           AS "支路数",
        round(ds.i_mean::numeric, 3)                                          AS "组串平均电流(A)",
-       round((ds.i_std / ds.i_mean * 100)::numeric, 2)                        AS "整体偏差率(%)",
-       round(((ds.i_max - ds.i_min) / ds.i_mean * 100)::numeric, 2)           AS "相对极差(%)",
+       round((ds.i_std / ds.i_mean * 100)::numeric, 2)                        AS "组串整体偏差率(%)",
+       round(((ds.i_max - ds.i_min) / ds.i_mean * 100)::numeric, 2)           AS "组串电流相对极差(%)",
        coalesce(ds.zero_cnt, 0) + coalesce(z.allzero_samples, 0)              AS "零值采样数",
        round(((coalesce(ds.zero_cnt, 0) + coalesce(z.allzero_samples, 0))::numeric
               / nullif(coalesce(ds.zero_cnt, 0) + coalesce(z.allzero_samples, 0)
@@ -899,6 +947,8 @@ SELECT to_char(s.bucket AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI') AS "
 FROM snap s
 LEFT JOIN ds     ON ds.device_id = s.device_id AND ds.bucket = s.bucket
 LEFT JOIN zbr z  ON z.device_id  = s.device_id AND z.bucket  = s.bucket
+LEFT JOIN si ON si.dev_key = s.device_id
+LEFT JOIN st ON st.station_id = si.station_id
 WHERE ds.branch_cnt IS NULL                     -- 全零快照：保留一行（支路数=0）
    OR (ds.branch_cnt >= 2 AND abs(ds.i_mean) >= 0.5)
 ORDER BY s.bucket;

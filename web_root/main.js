@@ -859,6 +859,7 @@ const AlarmCharts = ({items, pick, onTypeClick}) => {
     : '';
   const g1h = gaugeRow && gaugeRow.range_1h != null ? Number(gaugeRow.range_1h) : 0;
   const g20s = gaugeRow && gaugeRow.range_20s != null ? Number(gaugeRow.range_20s) : 0;
+  const gtype = gaugeRow && gaugeRow.alarm_type ? gaugeRow.alarm_type : '';
   useEffect(() => {
     if (!hasEcharts) return undefined;
     const ring = window.echarts.init(ringRef.current);
@@ -965,6 +966,9 @@ const AlarmCharts = ({items, pick, onTypeClick}) => {
       <div class="alarm-chart" ref=${gaugeRef}></div>
       <div class="alarm-gauge-info">
         <div class="gi-dev" title=${gaugeCap}>${gaugeCap}</div>
+        <div class="gi-row" title="告警类型">${gtype
+          ? html`<span class="atype-badge${alarmTypeCls(gtype)}">${gtype}</span>`
+          : html`<span class="gi-none">告警类型 —</span>`}</div>
         <div class="gi-row"><span class="gi-dot gi-cy"></span>1h极差 <b class="gi-cy">${g1h.toFixed(2)}</b></div>
         <div class="gi-row"><span class="gi-dot gi-am"></span>20s极差 <b class="gi-am">${g20s.toFixed(2)}</b></div>
       </div>

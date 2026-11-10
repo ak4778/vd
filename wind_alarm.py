@@ -159,6 +159,19 @@ ALARM_TYPE_MAP = {
 
 TS_FMT = "%Y-%m-%d %H:%M:%S"
 
+# 时间戳解析失败累计（全局，心跳时输出），避免上游改格式后静默丢点：
+# 优先 ISO 解析（兼容毫秒、T 分隔、时区后缀），失败再回退 TS_FMT。
+_ts_parse_fail = 0
+
+
+def parse_ts(ts_str):
+    """容错解析 ts：优先 fromisoformat，失败回退 TS_FMT；均失败抛 ValueError。"""
+    s = ts_str.strip()
+    try:
+        return datetime.fromisoformat(s.replace('Z', '+00:00')).timestamp()
+    except ValueError:
+        return datetime.strptime(s, TS_FMT).timestamp()
+
 # 日志轮转：最新内容始终写 wind_alarm.log；写满 100MB 后旧文件依次后移为
 # wind_alarm_1.log ~ wind_alarm_5.log（编号越大越旧，_5 最旧并删除），保留最近 5 份。
 # 外部读句柄（Get-Content/tail 等）在 Windows 下可能阻止改名：此时继续追加到
@@ -365,11 +378,11 @@ def discover_devices():
 # ============================== 内存滑窗 ==============================
 class SlidingBuffer:
     """单台风机的时间序列滑窗，按 ts 去重，保留 WINDOW_KEEP 秒。"""
-    __slots__ = ('points', 'seen_ts')
+    __slots__ = ('points', 'seen_epoch')
 
     def __init__(self):
         self.points = deque()      # (epoch:float, value:float)，升序
-        self.seen_ts = set()       # ts 原始字符串，用于去重
+        self.seen_epoch = set()    # 已处理的 epoch（float，保留毫秒精度）
 
     def add_raw(self, raw_items, now_epoch):
         """写入接口返回的原始点（按 ts 去重），并裁剪到 WINDOW_KEEP 秒。
@@ -378,26 +391,32 @@ class SlidingBuffer:
         视为接口吐的脏数据（历史上接口曾吐 2026-10-28 未来日期数据，污染 CSV），
         丢弃并打印警告，避免 CSV 再次被污染。
         返回新增记录列表 [(ts_str, epoch, pv_str, value)]。"""
+        global _ts_parse_fail
         new_records = []
         dropped_future = 0
         future_threshold = now_epoch + 3600  # 比当前时间晚 1h 视为脏数据
         for it in raw_items:
             ts_str = it.get('ts')
             pv = it.get('pointValue', '')
-            if not ts_str or ts_str in self.seen_ts:
+            if not ts_str:
                 continue
             try:
-                epoch = datetime.strptime(ts_str, TS_FMT).timestamp()
+                epoch = parse_ts(ts_str)
+            except (TypeError, ValueError):
+                _ts_parse_fail += 1   # 上游格式变更时可通过心跳发现，不再静默
+                continue
+            if epoch in self.seen_epoch:
+                continue
+            try:
                 value = float(pv)
             except (TypeError, ValueError):
-                self.seen_ts.add(ts_str)  # 坏点不参与计算，但也不再重复处理
+                self.seen_epoch.add(epoch)  # 坏值不参与计算，但也不再重复处理
                 continue
+            self.seen_epoch.add(epoch)
             # 未来时间防御：接口脏数据丢弃，标记已处理避免日志刷屏
             if epoch > future_threshold:
                 dropped_future += 1
-                self.seen_ts.add(ts_str)
                 continue
-            self.seen_ts.add(ts_str)
             new_records.append((ts_str, epoch, pv, value))
         if dropped_future:
             log(f"丢弃 {dropped_future} 条未来时间脏数据（ts > now + 1h），"
@@ -408,9 +427,10 @@ class SlidingBuffer:
         cutoff = now_epoch - WINDOW_KEEP
         while self.points and self.points[0][0] < cutoff:
             self.points.popleft()
-        # seen_ts 周期性重建，防止无限增长
-        if len(self.seen_ts) > 5000:
-            self.seen_ts = {datetime.fromtimestamp(e).strftime(TS_FMT) for e, _ in self.points}
+        # 去重集合只需覆盖 points 窗口（补拉窗口 1200s 远小于 WINDOW_KEEP），
+        # 超过即按 points 重建：内存随窗口走，而不是涨到定值 5000 才回收。
+        if len(self.seen_epoch) > max(600, len(self.points) * 2):
+            self.seen_epoch = {e for e, _ in self.points}
         return new_records
 
     def window_values(self, now_epoch, seconds):
@@ -1033,7 +1053,8 @@ def run():
             tick += 1
             if tick % HEARTBEAT_TICKS == 0:
                 log(f"heartbeat tick={tick} 设备={len(devices)} 测点={len(POINT_CODES)} "
-                    f"拉取错误={fetch_errs} 当前活跃告警={engine.active_count()} 超温累计={exceed_total}")
+                    f"拉取错误={fetch_errs} 当前活跃告警={engine.active_count()} "
+                    f"超温累计={exceed_total} 时间戳解析失败={_ts_parse_fail}")
 
             elapsed = time.time() - t0
             sleep_s = POLL_INTERVAL - elapsed
