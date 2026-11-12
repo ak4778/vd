@@ -25,6 +25,7 @@
 --   §1 建表（一次性）
 --   §2 汇总表刷新（采集时段每 5 分钟；窗口结束后再补一次最近 90 分钟）
 --   §3 查询 A：快照明细（支路 × 5 分钟）
+--   §3-A 查询 A 原始表版：直接聚合 pv_string_branch，仅出快照级指标（不含 20 分钟块）
 --   §4 查询 B：窗口报警（支路 × 1 小时）
 --   §5 查询 C：零电流（断路）清单（支路 × 20 分钟块）
 --
@@ -338,6 +339,146 @@ LEFT JOIN dblk_dev dd
        ON dd.device_id = bs.device_id
       AND dd.point_code = bs.point_code
       AND dd.block_20m = bs.block_20m
+LEFT JOIN si ON si.dev_key = bs.device_id
+LEFT JOIN st ON st.station_id = si.station_id
+ORDER BY
+    st.region_company_name,
+    st.station_name,
+    si.inverter_name,
+    bs.device_id,
+    bs.snap,
+    substring(bs.point_code FROM 'STRING_BRANCH([0-9]+)_A')::int;
+
+
+-- ============================================================================
+-- 3-A. 查询 A（原始表版）：明细（支路 × 原始采样）
+-- ----------------------------------------------------------------------------
+-- 与 §3 的区别：
+--   ① 数据来源：§3   -> pv_string_branch_5min（5 分钟汇总表，依赖 §2 刷新过）
+--                §3-A -> pv_string_branch（原始秒级表）
+--   ② 不做 5 分钟分桶：每条原始记录一行，snap = ts、i = point_value 原值，不取平均；
+--      point_value = 0 的记录不输出、也不参与组串统计（与 §3 的零值口径一致）
+--   ③ 组串指标按"同一时间戳"对齐：仅当多个支路 ts 完全相同时才能算出
+--      组串平均电流 / 单支路偏差率 / 组串整体偏差率 / 相对极差；
+--      单支路时刻这些列为空。实测各支路采样时点大多不一致，
+--      故大部分行组串指标为空属正常现象。
+--   ④ 不计算 20 分钟块指标（块起始 / 20 分钟偏差变化 / 速率 / 20 分钟相对极差）。
+-- 适用场景：查看原始逐点电流、追溯某时刻各支路读数、或汇总表未覆盖的日期。
+--
+-- ★ 原始表缺少 §2.1 写入时施加的两道过滤，br 内必须自带：
+--     ① point_code ~ '^STRING_BRANCH([1-9]|[1-3][0-9]|40)_A$'
+--        （否则电压/功率/其他测点会被一并输出）
+--     ② 时间过滤写在 ts 上（触发 ts 日分区裁剪）
+--
+-- 性能：不再做大聚合与排序；主要成本是扫日分区（实测单日 1.37 亿行 / 27GB）。
+--   现有索引（见 create_pv_string_branch.py）：
+--     PK (device_id, ts, point_code) / idx_(ts DESC) / idx_(point_code)
+--   本查询无 device_id 等值条件，正则 ~ 又不走 point_code 索引，
+--   实际只有 idx_(ts DESC) 做范围扫，device_id/point_code/point_value 逐行回表。
+--   → 需要提速时加一条覆盖索引（前导列取过滤列 ts，其余列 INCLUDE 免回表）。
+--     父表建索引会自动下推到全部现有与未来分区；非 CONCURRENTLY，
+--     建索引期间阻塞写入，务必在低峰执行：
+--   CREATE INDEX IF NOT EXISTS idx_pv_string_branch_ts_cover
+--       ON pv_string_branch (ts) INCLUDE (device_id, point_code, point_value);
+--   → 之后必须 ANALYZE（大分区缺统计信息时规划器易选错，退化比缺索引更严重）：
+--   ANALYZE pv_string_branch;
+--   → 若只是偶发查询、单次几分钟可接受，可不加索引直接跑；先
+--     EXPLAIN (ANALYZE, BUFFERS) 看实际耗时与 Heap Fetches 再决定。
+-- ============================================================================
+WITH ex AS (                                    -- 已标记异常的逆变器+支路（与 §3 一致）
+    SELECT DISTINCT
+        upper(inverter_id)                                                     AS dev_key,
+        'STRING_BRANCH' || substring(branch_name FROM '支路([0-9]+)') || '_A'  AS point_code
+    FROM pv_inverter_branch_abnormal
+    WHERE branch_name ~ '支路[0-9]+'
+),
+br AS (                                         -- 支路 × 原始采样：不分桶，保持原始时间戳
+    SELECT
+        b.device_id,
+        b.point_code,
+        b.ts           AS snap,                 -- ★ 原始时间戳
+        b.point_value  AS i                     -- ★ 原始电流值，不做平均
+    FROM pv_string_branch b                     -- ★ 原始秒级表（ts 日分区）
+    WHERE b.ts >= TIMESTAMPTZ '2026-11-04 10:00:00+08'     -- ★ 日期下界
+      AND b.ts <  TIMESTAMPTZ '2026-11-04 16:00:00+08'     -- ★ 日期上界
+      AND (
+            (b.ts >= TIMESTAMPTZ '2026-11-04 10:00:00+08' AND b.ts < TIMESTAMPTZ '2026-11-04 11:00:00+08')
+         OR (b.ts >= TIMESTAMPTZ '2026-11-04 12:00:00+08' AND b.ts < TIMESTAMPTZ '2026-11-04 13:00:00+08')
+         OR (b.ts >= TIMESTAMPTZ '2026-11-04 14:00:00+08' AND b.ts < TIMESTAMPTZ '2026-11-04 15:00:00+08')
+         OR (b.ts >= TIMESTAMPTZ '2026-11-04 15:00:00+08' AND b.ts < TIMESTAMPTZ '2026-11-04 16:00:00+08')
+      )
+      AND b.point_code ~ '^STRING_BRANCH([1-9]|[1-3][0-9]|40)_A$'   -- ★ 1~40（原表无此过滤）
+      AND b.point_value <> 0                    -- ★ 保留零值过滤：0A 不输出、不参与统计
+      AND NOT EXISTS (                          -- 排除已标记异常的逆变器+支路
+            SELECT 1 FROM ex
+            WHERE ex.dev_key = b.device_id AND ex.point_code = b.point_code
+      )
+),
+ds AS (                                         -- 设备 × 同一时间戳：组串均值 / 标准差 / 极值
+    SELECT
+        device_id,
+        snap,
+        avg(i)        AS i_mean,                -- 支路等权平均（仅同 ts 的支路）
+        stddev_pop(i) AS i_std,                 -- 总体标准差（分母 n）
+        count(*)      AS branch_cnt,
+        min(i)        AS i_min,
+        max(i)        AS i_max,
+        CASE WHEN count(*) >= 2 AND abs(avg(i)) >= 0.5
+             THEN NULL ELSE 'low_current' END   AS snap_flag   -- 同 ts 支路不足 2 条或均值过小
+    FROM br
+    GROUP BY device_id, snap
+),
+bs AS (                                         -- 支路偏差率 / 整体偏差率 / 快照极差
+    SELECT
+        b.device_id,
+        b.point_code,
+        b.snap,
+        b.i,
+        d.i_mean,
+        d.i_std,
+        d.branch_cnt,
+        d.i_min,
+        d.i_max,
+        d.snap_flag,
+        CASE WHEN d.snap_flag IS NULL
+             THEN (b.i - d.i_mean) / d.i_mean * 100 END AS dev_pct,      -- 带符号
+        CASE WHEN d.snap_flag IS NULL
+             THEN d.i_std / d.i_mean * 100 END          AS cv_pct,       -- 带符号，不做 abs
+        CASE WHEN d.snap_flag IS NULL
+             THEN (d.i_max - d.i_min) / d.i_mean * 100 END AS range_pct
+    FROM br b
+    JOIN ds d USING (device_id, snap)
+),
+st AS (                                         -- 电站维表
+    SELECT station_id, station_name, region_company_name
+    FROM pv_station_info
+    WHERE constituent_name = '国电电力'
+    GROUP BY station_id, station_name, region_company_name
+),
+si AS (                                         -- 逆变器维表（逆变器 = 组串）
+    SELECT DISTINCT ON (upper(inverter_id))
+           upper(inverter_id) AS dev_key,
+           station_id,
+           inverter_name
+    FROM pv_station_invert
+    WHERE inverter_id IS NOT NULL
+      AND inverter_id <> ''
+    ORDER BY upper(inverter_id), station_id, inverter_name
+)
+SELECT
+    bs.snap AT TIME ZONE 'Asia/Shanghai'                            AS "时间戳",
+    st.region_company_name                                          AS "公司",
+    st.station_name                                                 AS "场站",
+    si.inverter_name                                                AS "组串编号",
+    bs.device_id                                                    AS "逆变器ID",
+    substring(bs.point_code FROM 'STRING_BRANCH([0-9]+)_A')::int    AS "支路编号",
+    bs.point_code                                                   AS "支路点位",
+    round(bs.i::numeric, 3)                                         AS "支路电流",
+    round(bs.i_mean::numeric, 3)                                    AS "组串平均电流",
+    round(bs.dev_pct::numeric, 2)                                   AS "单支路当前偏差率(%)",
+    round(bs.cv_pct::numeric, 2)                                    AS "组串整体偏差率(%)",
+    round(bs.range_pct::numeric, 2)                                 AS "组串电流相对极差(%)"
+FROM bs
 LEFT JOIN si ON si.dev_key = bs.device_id
 LEFT JOIN st ON st.station_id = si.station_id
 ORDER BY
