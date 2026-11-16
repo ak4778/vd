@@ -41,7 +41,7 @@ import psycopg2
 import requests
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # 让 Windows 控制台中文输出尽量不报错
 try:
@@ -108,6 +108,9 @@ FETCH_LOOKBACK = 90       # 每轮拉取最近多少秒（重叠窗口，防延�
 # 把迟到的点补进滑窗；滞后超过该上限的序列放弃补拉（超温 CSV 会乱序追加），
 # 防止永久掉线设备把查询窗口无限拉大。只补数据，不改三条规则的判定逻辑。
 CATCHUP_MAX_SECONDS = 1200
+# 补拉窗口降频：落后设备的 20 分钟窗口重扫代价高（实测约 8s），每 N 轮做一次，
+# 其余轮次只拉近窗（约 0.4s）。迟到点最多晚 N*POLL_INTERVAL 秒进入滑窗。
+CATCHUP_EVERY_N_ROUNDS = 10
 BOOTSTRAP_HOURS = 1       # 启动回灌历史小时数（规则02启动即可判）
 MAX_WORKERS = 24          # 拉取并发数
 MAX_RETRIES = 3
@@ -815,18 +818,8 @@ def fetch_one(dev, pc, start_str, end_str=None):
         return dev['wid'], pc, [], e
 
 
-def fetch_round_db(conn, start_dt, end_dt, wid_upper, upper2wid, skip_upto=None):
-    """db 模式：一条 SQL 拉窗口内全部白名单设备的两个温度固定列。
-
-    相比 api 模式的「设备×测点」N*2 个请求，这里只有一次查询；宽表行
-    (device_id, ts, tem_gen_driend, tem_gen_nonde) 在 Python 侧按非 NULL
-    列 unpivot 成与接口一致的 {'ts', 'pointValue'} 列表。
-    device_id 入库统一大写，经 upper2wid 映射回 wind_device 白名单原始 id。
-    skip_upto：{(wid, pc): epoch}，该序列已见过的最新点 epoch，
-    ts <= 它的点直接跳过（补拉窗口内绝大多数是旧点，提前跳过省解析）。
-    返回 {(wid_原始, pc): [{'ts','pointValue'}, ...]}（无数据的 key 不出现）。
-    """
-    cols = [POINT_CONFIG[pc]['column'] for pc in POINT_CODES]  # 内部配置，无注入面
+def _query_window_rows(conn, start_dt, end_dt, wids, cols):
+    """按 [start_dt, end_dt) + 设备白名单拉一次宽表行。"""
     sql = f"""
         SELECT device_id, ts, {', '.join(cols)}
         FROM {TABLE_SECONDS}
@@ -834,30 +827,66 @@ def fetch_round_db(conn, start_dt, end_dt, wid_upper, upper2wid, skip_upto=None)
           AND device_id = ANY(%s)
         ORDER BY device_id, ts
     """
-    grouped = {}
     cur = conn.cursor()
     try:
-        cur.execute(sql, (start_dt, end_dt, wid_upper))
-        for dev_upper, ts, *values in cur:
-            wid = upper2wid.get(dev_upper)
-            if wid is None:
-                continue
-            ts_str = ts.strftime(TS_FMT)
-            if skip_upto is not None:
-                ts_ep = ts.timestamp()
-                for pc, value in zip(POINT_CODES, values):
-                    if value is None or ts_ep <= skip_upto.get((wid, pc), 0):
-                        continue
-                    grouped.setdefault((wid, pc), []).append(
-                        {'ts': ts_str, 'pointValue': float(value)})
-            else:
-                for pc, value in zip(POINT_CODES, values):
-                    if value is None:
-                        continue
-                    grouped.setdefault((wid, pc), []).append(
-                        {'ts': ts_str, 'pointValue': float(value)})
+        cur.execute(sql, (start_dt, end_dt, wids))
+        return cur.fetchall()
     finally:
         cur.close()
+
+
+def fetch_round_db(conn, start_dt, end_dt, wid_upper, upper2wid, skip_upto=None,
+                   with_catchup=True):
+    """db 模式：拉本轮新增数据（两个窗口合并），宽表行在 Python 侧 unpivot。
+
+    拆窗原因：补拉窗口最大 1200s，全量设备扫 20 分钟实测单轮 7.6s、23 万行，
+    是告警延迟的主因。拆成两段后：
+      1) 近窗 [end-FETCH_LOOKBACK, end)：覆盖绝大多数正常序列，只返回新行；
+      2) 补拉窗 [start, end-FETCH_LOOKBACK)：仅对「最新点已落后近窗起点」的
+         少数设备查询，兜住上游迟发布/断采恢复的数据。
+    两段行数从 23 万降到约 1.5 万，查询耗时从 ~7.6s 降到 ~1s。
+    skip_upto：{(wid, pc): epoch}，该序列已见过的最新点 epoch，
+    ts <= 它的点直接跳过（窗口内旧点提前跳过省解析）。
+    返回 {(wid_原始, pc): [{'ts','pointValue'}, ...]}（无数据的 key 不出现）。
+    """
+    cols = [POINT_CONFIG[pc]['column'] for pc in POINT_CODES]  # 内部配置，无注入面
+    if skip_upto is None:
+        # 首轮回灌/无游标：按整窗一次性拉全量
+        rows = _query_window_rows(conn, start_dt, end_dt, wid_upper, cols)
+    else:
+        fast_start = end_dt - timedelta(seconds=FETCH_LOOKBACK)
+        rows = _query_window_rows(conn, fast_start, end_dt, wid_upper, cols)
+        if with_catchup and start_dt < fast_start:
+            fast_ep = fast_start.timestamp()
+            dev_min = {}
+            for (wid, _pc), ep in skip_upto.items():
+                known = dev_min.get(wid)
+                if known is None or ep < known:
+                    dev_min[wid] = ep
+            lag_wids = [wid.upper() for wid, ep in dev_min.items()
+                        if ep < fast_ep]
+            if lag_wids:
+                rows += _query_window_rows(conn, start_dt, fast_start,
+                                           lag_wids, cols)
+    grouped = {}
+    for dev_upper, ts, *values in rows:
+        wid = upper2wid.get(dev_upper)
+        if wid is None:
+            continue
+        ts_str = ts.strftime(TS_FMT)
+        if skip_upto is not None:
+            ts_ep = ts.timestamp()
+            for pc, value in zip(POINT_CODES, values):
+                if value is None or ts_ep <= skip_upto.get((wid, pc), 0):
+                    continue
+                grouped.setdefault((wid, pc), []).append(
+                    {'ts': ts_str, 'pointValue': float(value)})
+        else:
+            for pc, value in zip(POINT_CODES, values):
+                if value is None:
+                    continue
+                grouped.setdefault((wid, pc), []).append(
+                    {'ts': ts_str, 'pointValue': float(value)})
     return grouped
 
 
@@ -890,10 +919,11 @@ def run():
     log(f"数据来源 DATA_SOURCE={DATA_SOURCE}"
         + (f"（{TABLE_SECONDS} 固定列）" if DATA_SOURCE == 'db' else '（queryData 接口）'))
 
-    def fetch_all(start_epoch, end_epoch=None, skip_upto=None):
+    def fetch_all(start_epoch, end_epoch=None, skip_upto=None, with_catchup=True):
         """统一拉取入口，返回 ({(wid, pc): items}, 错误数)。
         无数据的 (wid, pc) 由调用方按空列表处理。
-        skip_upto 仅 db 模式使用：{(wid, pc): 已见最新点 epoch}，见 fetch_round_db。"""
+        skip_upto 仅 db 模式使用：{(wid, pc): 已见最新点 epoch}，见 fetch_round_db。
+        with_catchup=False 时本轮只拉近窗，跳过落后设备补拉（降频执行用）。"""
         if DATA_SOURCE == 'api':
             start_str = datetime.fromtimestamp(start_epoch).strftime(TS_FMT)
             end_str = (datetime.fromtimestamp(end_epoch).strftime(TS_FMT)
@@ -924,7 +954,7 @@ def run():
                 return {}, 1
         try:
             return fetch_round_db(pg_conn, start_dt, end_dt, wid_upper, upper2wid,
-                                  skip_upto), 0
+                                  skip_upto, with_catchup), 0
         except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
             # 连接失效：关掉旧连接置空，本轮空过，下轮重建（重连失败不崩进程）
             log(f"PG 连接异常，下轮重连重试: {e}")
@@ -980,16 +1010,19 @@ def run():
                 if lt[0] >= floor_ep and (lag_most is None or lt[0] < lag_most):
                     lag_most = lt[0]
             start_ep = t0 - FETCH_LOOKBACK
+            with_catchup = (tick % CATCHUP_EVERY_N_ROUNDS == 0)
             if lag_most is not None and lag_most < start_ep:
                 start_ep = lag_most
 
-            fetched, fetch_errs = fetch_all(start_ep, t0, skip_upto)
+            fetched, fetch_errs = fetch_all(start_ep, t0, skip_upto,
+                                            with_catchup=with_catchup)
 
             lookback_used = int(t0 - start_ep)
             if lookback_used > FETCH_LOOKBACK:
                 log(f"=== round {tick + 1} 补拉窗口 {lookback_used}s"
                     f"（最落后活跃序列 {time.strftime('%H:%M:%S', time.localtime(lag_most))}，"
-                    f"活跃序列 {len(skip_upto)}）===")
+                    f"活跃序列 {len(skip_upto)}"
+                    f"{'' if with_catchup else '，本轮仅近窗'}）===")
             else:
                 log(f"=== round {tick + 1} 拉取最近 {FETCH_LOOKBACK}s 数据 ===")
             round_new = 0

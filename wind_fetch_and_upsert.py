@@ -37,6 +37,7 @@ import logging
 import os
 import random
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -201,6 +202,11 @@ def merge_points(messages):
     return [(dev, ts, merged[(dev, ts)]) for dev, ts in merged]
 
 
+# 入库写锁：实时采集主线程与延迟回补线程共用一个进程内串行点，避免并发写
+# 同一分区表引发 deadlock（两条大事务插入顺序不一致导致）。
+_INGEST_LOCK = threading.Lock()
+
+
 def ingest_raw(messages):
     """messages: iterable of raw dicts with tagName/pointValue/ts.
 
@@ -242,9 +248,13 @@ def ingest_raw(messages):
     conn = connect()
     try:
         cur = conn.cursor()
-        execute_values(cur, MERGE_SQL_BATCH, rows,
-                       template=_ROW_TEMPLATE, page_size=1000)
-        conn.commit()
+        # 实时采集与延迟回补会并发写同一张分区表；两条大事务的插入顺序不同
+        # 时偶发 deadlock（实测 09:04 触发过一次，整轮被丢弃重拉）。用进程内
+        # 写锁串行化入库，代价是回补写入期间实时 tick 等待若干秒。
+        with _INGEST_LOCK:
+            execute_values(cur, MERGE_SQL_BATCH, rows,
+                           template=_ROW_TEMPLATE, page_size=1000)
+            conn.commit()
         return len(parsed)
     except Exception:
         conn.rollback()
@@ -285,6 +295,19 @@ OUTAGE_ALERT_SECONDS = 1200     # 20 分钟无数据判定为断流
 OUTAGE_REPEAT_SECONDS = 1800    # 断流期间每 30 分钟提醒一次
 MOCK = False                    # True = 不请求真实接口，用模拟数据
 LOG_LEVEL = 'INFO'               # DEBUG=打印每条入库/每个查询明细；INFO=只留主干；WARNING=只留异常
+
+# ---------------- 迟到数据回补 ----------------
+# 上游对部分设备/测点是"迟到发布"：点已产生，但接口要过几分钟才查得到。
+# 实时窗口只回退 OVERLAP_SECONDS(50s)，超出即永久漏采（实测某设备 2 小时
+# 上游有 21 个点、库里只有 1 个）。这里另起一个后台线程，持续回扫
+# 「已过发布延迟带」的一段窗口，靠幂等 upsert 把漏掉的行补回。
+# 代价：数据量约为实时采集的 1 倍；游标超前（没有待补块）时只睡眠等待。
+REFETCH_LAG_SECONDS = 900       # 块结束必须早于 now-该值（即至少晚 15 分钟）
+REFETCH_BLOCK_SECONDS = 300     # 每次回补 5 分钟
+REFETCH_MAX_BACKLOG_HOURS = 6   # 停机很久时只回补最近该时长，避免无限追赶
+REFETCH_POLL_SECONDS = 20       # 无待补块时的轮询间隔
+REFETCH_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'wind_refetch.json')
 
 TS_FMT = '%Y-%m-%d %H:%M:%S'
 SOURCE = 'fjmjsj'
@@ -595,9 +618,22 @@ def save_watermark(last_ts):
 
 
 # ---------------- 接口客户端 ----------------
+# 上游偶发 ChunkedEncodingError/超时时，重试日志按分钟聚合，避免每小时数百条刷屏。
+_retry_log_at = [0.0]
+
+
+def _log_retry(attempt, err, delay):
+    now = time.time()
+    if now - _retry_log_at[0] >= 60:
+        _retry_log_at[0] = now
+        log.warning('[retry %s/%s] 请求异常: %s，%.1fs 后重试（同类告警每分钟最多 1 条）',
+                    attempt, MAX_RETRIES, err.__class__.__name__, delay)
+
+
 def post_json(payload):
     """发一次请求并解析 JSON。网络错误 / HTTP 非 2xx / JSON 解析失败均重试；
-    业务错误（data 为空，重试无意义）直接抛出。"""
+    业务错误（data 为空，重试无意义）直接抛出。
+    重试用指数退避(5s/10s/20s)+抖动，避免上游抖动期固定 5s 反复打满。"""
     headers = {'zb-token': API_TOKEN, 'Content-Type': 'application/json'}
     last_err = None
     for attempt in range(1, MAX_RETRIES + 1):
@@ -616,10 +652,9 @@ def post_json(payload):
                 requests.HTTPError, ValueError) as e:
             last_err = e
             if attempt < MAX_RETRIES:
-                log.warning('[retry %s/%s] 请求异常: %s，%ss 后重试...',
-                            attempt, MAX_RETRIES, e.__class__.__name__,
-                            RETRY_INTERVAL)
-                time.sleep(RETRY_INTERVAL)
+                delay = RETRY_INTERVAL * (2 ** (attempt - 1)) + random.uniform(0, 1)
+                _log_retry(attempt, e, delay)
+                time.sleep(delay)
             else:
                 raise
     raise last_err
@@ -786,6 +821,73 @@ def tick(now=None):
 MODE_LABELS = {'window': '整窗拉取', 'like': '按测点后缀like', 'tag': '按tag精准'}
 
 
+# ---------------- 迟到数据回补 ----------------
+def load_refetch_cursor():
+    try:
+        with open(REFETCH_STATE_FILE, encoding='utf-8') as f:
+            s = json.load(f).get('cursor')
+        return datetime.strptime(s, TS_FMT) if s else None
+    except (OSError, ValueError):
+        return None
+
+
+def save_refetch_cursor(dt):
+    tmp = REFETCH_STATE_FILE + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump({'cursor': dt.strftime(TS_FMT)}, f, ensure_ascii=False)
+    os.replace(tmp, REFETCH_STATE_FILE)
+
+
+def _align_block(dt, block_seconds):
+    """向下取整到块边界（块必须是整分钟）。"""
+    step = max(1, block_seconds // 60)
+    return dt.replace(minute=dt.minute - dt.minute % step,
+                      second=0, microsecond=0)
+
+
+def refetch_step(now=None):
+    """回补一块「已过发布延迟带」的窗口。
+
+    块结束必须早于 now-REFETCH_LAG_SECONDS，即补的是 15 分钟以前的数据，
+    与实时采集窗口（最近几分钟）不重叠。成功才推进游标，失败保持原位重试。
+    返回是否真的拉取了一块。
+    """
+    if now is None:
+        now = datetime.now().replace(microsecond=0)
+    block = timedelta(seconds=REFETCH_BLOCK_SECONDS)
+    target = now - timedelta(seconds=REFETCH_LAG_SECONDS)
+    cur = load_refetch_cursor()
+    if cur is None:
+        cur = _align_block(target - block, REFETCH_BLOCK_SECONDS)
+    earliest = target - timedelta(hours=REFETCH_MAX_BACKLOG_HOURS)
+    if cur < earliest:
+        log.info('延迟回补游标过旧（%s），直接跳到 %s 开始',
+                 cur.strftime(TS_FMT), earliest.strftime(TS_FMT))
+        cur = _align_block(earliest, REFETCH_BLOCK_SECONDS)
+    if cur + block > target:
+        return False                     # 已追平，等待下一段进入补拉带
+    a, b = cur.strftime(TS_FMT), (cur + block).strftime(TS_FMT)
+    try:
+        raw = fetch_window(a, b)
+        n = ingest_raw(raw)
+    except Exception as e:
+        log.warning('延迟回补 [%s, %s) 失败，游标不动下轮重试: %r', a, b, e)
+        return False
+    save_refetch_cursor(cur + block)
+    log.info('延迟回补 [%s, %s) 拉取 %s 条，补写 %s 条', a, b, len(raw), n)
+    return True
+
+
+def _refetch_worker():
+    while True:
+        try:
+            if refetch_step():
+                continue            # 有积压就连续补，尽快追平
+        except Exception as e:
+            log.warning('延迟回补异常（稍后重试）: %r', e)
+        time.sleep(REFETCH_POLL_SECONDS)
+
+
 def main():
     setup_logging()
     mode = '模拟' if MOCK else '真实接口'
@@ -814,6 +916,9 @@ def main():
         ensure_partitions()
     except Exception as e:
         log.warning('分区维护失败（不影响采集，但跨天可能报错）: %r', e)
+    log.info('迟到数据回补已启用：延迟带 %ss，块 %ss，游标文件 %s',
+             REFETCH_LAG_SECONDS, REFETCH_BLOCK_SECONDS, REFETCH_STATE_FILE)
+    threading.Thread(target=_refetch_worker, name='refetch', daemon=True).start()
     # 分钟聚合已停用：不做分钟聚合。
     # startup_min = datetime.now().strftime(TS_FMT)[:16]
     # last_rollup_min = startup_min
