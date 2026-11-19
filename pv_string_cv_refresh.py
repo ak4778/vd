@@ -9,8 +9,8 @@
   5) 更新 string_cv.cv_pct，并重算 similarity_pct
 
 口径与 pv_string_branch.sql 保持一致：
-  - 剔除 point_value = 0（zero_cnt 仅计数，不参与均值）
-  - 支路均值 i_avg 非空、|i_avg| < 50、单桶有效采样 >= 3
+  - 剔除 |point_value| <= 1（含 0、±1）；zero_cnt 仅计数，不参与均值
+  - 支路均值 |i_avg| > 1（不设上限）、单桶有效采样 >= 3
   - 剔除 pv_inverter_branch_abnormal 已标记的逆变器+支路
   - 快照支路数 < 2 或 |组串均值| < 0.5A 记 low_current，cv_pct 记 NULL
   - cv_pct = stddev_samp(i_avg) / avg(i_avg) * 100（带符号，不取 abs）
@@ -79,11 +79,11 @@ def refresh_5min(cur, day):
         SELECT device_id,
                point_code,
                to_timestamp(floor(extract(epoch FROM ts) / 300) * 300) AS bucket,
-               count(*) FILTER (WHERE point_value <> 0) AS sample_cnt,
-               count(*) FILTER (WHERE point_value  = 0) AS zero_cnt,
-               avg(point_value) FILTER (WHERE point_value <> 0) AS i_avg,
-               max(point_value) FILTER (WHERE point_value <> 0) AS sec_max,
-               min(point_value) FILTER (WHERE point_value <> 0) AS sec_min
+               count(*) FILTER (WHERE abs(point_value) > 1) AS sample_cnt,
+               count(*) FILTER (WHERE point_value  = 0)     AS zero_cnt,
+               avg(point_value) FILTER (WHERE abs(point_value) > 1) AS i_avg,
+               max(point_value) FILTER (WHERE abs(point_value) > 1) AS sec_max,
+               min(point_value) FILTER (WHERE abs(point_value) > 1) AS sec_min
         FROM pv_string_branch
         WHERE ts >= {ts(day, DAY_START)}
           AND ts <  {ts(day, DAY_END)}
@@ -118,7 +118,7 @@ def build_qa(cur, day):
           AND b.bucket <  {ts(day, DAY_END)}
           AND ({window_clause(day, 'b.bucket')})
           AND b.i_avg IS NOT NULL
-          AND abs(b.i_avg) < 50
+          AND abs(b.i_avg) > 1
           AND b.sample_cnt >= 3
           AND NOT EXISTS (
                 SELECT 1 FROM ex

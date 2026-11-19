@@ -7,6 +7,9 @@ CSV 列（17 列）：
 其中后 5 列（运行/开路/低效/异常/场站总数）已从 string_cv 删除，导入时忽略。
 CSV 第 2 行是中文说明行，导入时跳过。
 
+注意：源 CSV 的 dispersionRatio 是小数（如 0.2545 表示 25.45%），
+入库时统一乘以 100 转成百分数，与 cv_pct 量纲一致。
+
 用法：
   python import_string_cv_csv.py                 # 默认导入 C:\\s\\20261113~15
   python import_string_cv_csv.py C:\\s\\20261116  # 指定目录（可多个）或单个 csv 文件
@@ -67,7 +70,7 @@ INSERT INTO string_cv (
     station_name, station_id, data_date, inverter_name, dispersion_ratio,
     device_type, inverter_id, branch_total, normal_cnt, abnormal_cnt,
     exception_cnt, opencircuit_cnt)
-SELECT station_name, station_id, data_date, inverter_name, dispersion_ratio,
+SELECT station_name, station_id, data_date, inverter_name, dispersion_ratio * 100,
        device_type, inverter_id, branch_total, normal_cnt, abnormal_cnt,
        exception_cnt, opencircuit_cnt
 FROM stg_string_cv

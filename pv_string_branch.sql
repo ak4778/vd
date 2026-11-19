@@ -8,11 +8,11 @@
 -- 20 分钟: 每个窗口固定 3 块（:00-:20 / :20-:40 / :40-:00），不滚动
 --
 -- 定稿口径（务必与业务确认一致后再改）:
---   1. 电流 = 0 的原始行最先剔除，不参与均值/标准差/偏差率/任何条数；
---      但 zero_cnt 仍写入汇总表，用于单独的零电流（断路）清单。
---   2. 不设上限，所有非零电流（含负值、>15A）均参与计算。
+--   1. 原始电流 |point_value| <= 1（含 0、±1）最先剔除，不参与均值/标准差/偏差率/任何条数；
+--      但 point_value = 0 的条数仍写入 zero_cnt，用于单独的零电流（断路）清单。
+--   2. 不设上限，所有 |point_value| > 1 的电流（含负值、>15A）均参与计算。
 --   3. 组串平均电流 = 同一快照下各支路均值的等权平均（一支路一票）。
---   4. CV 分母带符号：cv = stddev_pop(i_b)/i_mean*100，不做 abs。
+--   4. CV 分母带符号：cv = stddev_samp(i_b)/i_mean*100，不做 abs（样本标准差，分母 n-1）。
 --   5. 异常条数分档互斥：>=5% 列只统计 5%<=dev<10%，>=10% 列单独统计。
 --   6. 零值判定 = 偏差率为 0（|dev_pct| <= 1e-6 个百分点，等价于 i_b = i_mean，
 --      留容差以免 float8 累加误差 1e-16~1e-14 造成漏判），且同组串同快照存在其他异常支路才计入。
@@ -57,11 +57,11 @@ CREATE TABLE IF NOT EXISTS pv_string_branch_5min (
     device_id   text        NOT NULL,
     point_code  text        NOT NULL,
     bucket      timestamptz NOT NULL,   -- 5 分钟桶起点 :00/:05/...
-    sample_cnt  int         NOT NULL,   -- point_value <> 0 的采样数（参与均值，无上限）
+    sample_cnt  int         NOT NULL,   -- |point_value| > 1 的采样数（参与均值，无上限）
     zero_cnt    int         NOT NULL,   -- point_value = 0 的采样数（仅记录，不参与计算）
-    i_avg       float8,                 -- 支路桶均值；全零 / 全脏 -> NULL
-    sec_max     float8,                 -- 桶内非零有效采样最大值
-    sec_min     float8,                 -- 桶内非零有效采样最小值
+    i_avg       float8,                 -- 支路桶均值；全零 / 全低电流 / 全脏 -> NULL
+    sec_max     float8,                 -- 桶内 |point_value| > 1 的最大值
+    sec_min     float8,                 -- 桶内 |point_value| > 1 的最小值
     PRIMARY KEY (device_id, point_code, bucket)
 ) PARTITION BY RANGE (bucket);  -- 按天分区；分区键 bucket 已包含在主键内
 
@@ -85,7 +85,7 @@ END;
 $$;
 
 COMMENT ON TABLE  pv_string_branch_5min IS '光伏支路 5 分钟汇总：非零电流参与统计，零电流仅计数用于断路清单';
-COMMENT ON COLUMN pv_string_branch_5min.i_avg      IS '支路桶均值，来源 point_value<>0；可含负值、可>15A';
+COMMENT ON COLUMN pv_string_branch_5min.i_avg      IS '支路桶均值，来源 |point_value|>1；可含负值、可>15A';
 COMMENT ON COLUMN pv_string_branch_5min.zero_cnt   IS 'point_value=0 的采样数，不参与任何均值/偏差率计算';
 
 -- ============================================================================
@@ -106,11 +106,11 @@ FROM (
         device_id,
         point_code,
         to_timestamp(floor(extract(epoch FROM ts) / 300) * 300) AS bucket,
-        count(*) FILTER (WHERE point_value <> 0) AS sample_cnt,
-        count(*) FILTER (WHERE point_value  = 0) AS zero_cnt,
-        avg(point_value) FILTER (WHERE point_value <> 0) AS i_avg,
-        max(point_value) FILTER (WHERE point_value <> 0) AS sec_max,
-        min(point_value) FILTER (WHERE point_value <> 0) AS sec_min
+        count(*) FILTER (WHERE abs(point_value) > 1) AS sample_cnt,
+        count(*) FILTER (WHERE point_value  = 0)     AS zero_cnt,
+        avg(point_value) FILTER (WHERE abs(point_value) > 1) AS i_avg,
+        max(point_value) FILTER (WHERE abs(point_value) > 1) AS sec_max,
+        min(point_value) FILTER (WHERE abs(point_value) > 1) AS sec_min
     FROM pv_string_branch                       -- ★ 换日期时保留父表名即可自动裁剪分区
     WHERE ts >= to_timestamp(floor(extract(epoch FROM now()) / 300) * 300) - interval '90 min'
       AND ts <  to_timestamp(floor(extract(epoch FROM now()) / 300) * 300)
@@ -136,11 +136,11 @@ ON CONFLICT (device_id, point_code, bucket) DO UPDATE SET
 -- FROM (
 --     SELECT device_id, point_code,
 --            to_timestamp(floor(extract(epoch FROM ts) / 300) * 300) AS bucket,
---            count(*) FILTER (WHERE point_value <> 0) AS sample_cnt,
---            count(*) FILTER (WHERE point_value  = 0) AS zero_cnt,
---            avg(point_value) FILTER (WHERE point_value <> 0) AS i_avg,
---            max(point_value) FILTER (WHERE point_value <> 0) AS sec_max,
---            min(point_value) FILTER (WHERE point_value <> 0) AS sec_min
+--            count(*) FILTER (WHERE abs(point_value) > 1) AS sample_cnt,
+--            count(*) FILTER (WHERE point_value  = 0)     AS zero_cnt,
+--            avg(point_value) FILTER (WHERE abs(point_value) > 1) AS i_avg,
+--            max(point_value) FILTER (WHERE abs(point_value) > 1) AS sec_max,
+--            min(point_value) FILTER (WHERE abs(point_value) > 1) AS sec_min
 --     FROM pv_string_branch_20261104              -- ★ 指定日分区
 --     WHERE ts >= TIMESTAMPTZ '2026-11-04 10:00:00+08'
 --       AND ts <  TIMESTAMPTZ '2026-11-04 16:00:00+08'
@@ -188,6 +188,7 @@ br AS (                                         -- 支路 × 5 分钟（仅有�
          OR (bucket >= TIMESTAMPTZ '2026-11-04 15:00:00+08' AND bucket < TIMESTAMPTZ '2026-11-04 16:00:00+08')
       )
       AND i_avg IS NOT NULL
+      AND abs(i_avg) > 1                        -- ★ |point_value|<=1 已剔除，均值仍须落在此区间外
       AND sample_cnt >= 3                       -- ★ 支路单桶最少有效采样
       AND NOT EXISTS (                          -- 排除已标记异常的逆变器+支路
             SELECT 1 FROM ex
@@ -199,7 +200,7 @@ ds AS (                                         -- 设备 × 5 分钟：组串�
         device_id,
         snap,
         avg(i)        AS i_mean,                -- 支路等权平均
-        stddev_pop(i) AS i_std,                 -- 总体标准差（分母 n）
+        stddev_samp(i) AS i_std,                -- 样本标准差（分母 n-1）
         count(*)      AS branch_cnt,
         min(i)        AS i_min,
         max(i)        AS i_max,
@@ -357,7 +358,7 @@ ORDER BY
 --   ① 数据来源：§3   -> pv_string_branch_5min（5 分钟汇总表，依赖 §2 刷新过）
 --                §3-A -> pv_string_branch（原始秒级表）
 --   ② 不做 5 分钟分桶：每条原始记录一行，snap = ts、i = point_value 原值，不取平均；
---      point_value = 0 的记录不输出、也不参与组串统计（与 §3 的零值口径一致）
+--      |point_value| <= 1（含 0、±1）的记录不输出、也不参与组串统计（与 §3 口径一致）
 --   ③ 组串指标按"同一时间戳"对齐：仅当多个支路 ts 完全相同时才能算出
 --      组串平均电流 / 单支路偏差率 / 组串整体偏差率 / 相对极差；
 --      单支路时刻这些列为空。实测各支路采样时点大多不一致，
@@ -408,7 +409,7 @@ br AS (                                         -- 支路 × 原始采样：不�
          OR (b.ts >= TIMESTAMPTZ '2026-11-04 15:00:00+08' AND b.ts < TIMESTAMPTZ '2026-11-04 16:00:00+08')
       )
       AND b.point_code ~ '^STRING_BRANCH([1-9]|[1-3][0-9]|40)_A$'   -- ★ 1~40（原表无此过滤）
-      AND b.point_value <> 0                    -- ★ 保留零值过滤：0A 不输出、不参与统计
+      AND abs(b.point_value) > 1                -- ★ |point_value|<=1（含 ±1）全部剔除，不输出、不参与统计
       AND NOT EXISTS (                          -- 排除已标记异常的逆变器+支路
             SELECT 1 FROM ex
             WHERE ex.dev_key = b.device_id AND ex.point_code = b.point_code
@@ -419,7 +420,7 @@ ds AS (                                         -- 设备 × 同一时间戳：�
         device_id,
         snap,
         avg(i)        AS i_mean,                -- 支路等权平均（仅同 ts 的支路）
-        stddev_pop(i) AS i_std,                 -- 总体标准差（分母 n）
+        stddev_samp(i) AS i_std,                -- 样本标准差（分母 n-1）
         count(*)      AS branch_cnt,
         min(i)        AS i_min,
         max(i)        AS i_max,
@@ -521,6 +522,7 @@ br AS (
          OR (bucket >= TIMESTAMPTZ '2026-11-04 15:00:00+08' AND bucket < TIMESTAMPTZ '2026-11-04 16:00:00+08')
       )
       AND i_avg IS NOT NULL
+      AND abs(i_avg) > 1                        -- ★ |point_value|<=1 已剔除，均值仍须落在此区间外
       AND sample_cnt >= 3
       AND NOT EXISTS (                          -- 排除已标记异常的逆变器+支路
             SELECT 1 FROM ex
@@ -532,7 +534,7 @@ ds AS (
         device_id,
         snap,
         avg(i)        AS i_mean,
-        stddev_pop(i) AS i_std,
+        stddev_samp(i) AS i_std,
         count(*)      AS branch_cnt,
         min(i)        AS i_min,
         max(i)        AS i_max,
@@ -906,14 +908,14 @@ ORDER BY
 -- ============================================================================
 -- 6. 三特征独立查询（已验证：Excel 源头重算 288/288 一致，详见会话验证记录）
 --    特征1 单支路偏差率 = (支路电流 - 组串平均电流) / 组串平均电流 * 100%
---    特征2 组串整体偏差率 = stddev_pop(支路电流) / 组串平均电流 * 100%   （总体标准差 ÷n）
+--    特征2 组串整体偏差率 = stddev_samp(支路电流) / 组串平均电流 * 100%   （样本标准差 ÷(n-1)）
 --    特征3 组串电流相对极差 = (组串最大电流 - 组串最小电流) / 组串平均电流 * 100%
---    口径：剔除 0A（i_avg IS NOT NULL）、单桶有效采样 ≥3、
+--    口径：剔除 |point_value|<=1（即 i_avg 必须 |i_avg|>1）、单桶有效采样 ≥3、
 --          快照 ≥2 条支路且 |组串均值| ≥0.5A（低电流防御，与 §3 ds 一致）
 --          支路级 |i| < 0.5A 只打标记「支路低电流」，不剔除（仍参与统计，口径 2）；
 --          zero_cnt 仅用于暴露 0A，不参与任何均值/偏差率计算（口径 1）；
---          6.2 额外把被 i_avg IS NULL 剔除的全零支路计入 零值采样数/零值占比，
---          并单列「全零支路数」，避免断路支路被静默丢弃
+--          6.2 额外把被 i_avg 剔除的全零/全低电流支路计入 零值采样数/零值占比，
+--          并单列「全零/低电流支路数」，避免断路支路被静默丢弃
 --          已被 pv_inverter_branch_abnormal 标记的逆变器+支路不参与计算与输出
 --          （口径 8；ex CTE + NOT EXISTS，与 §3 完全一致）
 --          6.2 以窗口内全部 5 分钟桶为骨架，全零快照也会输出一行
@@ -940,6 +942,7 @@ br AS (
       AND b.bucket >= timestamptz '2026-11-04 10:00:00+08'        -- ← 时间范围（半开区间）
       AND b.bucket <  timestamptz '2026-11-04 11:00:00+08'
       AND b.i_avg IS NOT NULL
+      AND abs(b.i_avg) > 1
       AND b.sample_cnt >= 3
       AND b.point_code ~ '^STRING_BRANCH([1-9]|[1-3][0-9]|40)_A$' -- 1~40（锚定，与 §2.1 一致）
       AND NOT EXISTS (                            -- 排除已标记异常的逆变器+支路
@@ -1009,6 +1012,7 @@ br AS (
       AND b.bucket >= timestamptz '2026-11-04 10:00:00+08'        -- ← 时间范围（半开区间）
       AND b.bucket <  timestamptz '2026-11-04 11:00:00+08'
       AND b.i_avg IS NOT NULL
+      AND abs(b.i_avg) > 1
       AND b.sample_cnt >= 3
       AND b.point_code ~ '^STRING_BRANCH([1-9]|[1-3][0-9]|40)_A$' -- 1~40（锚定，与 §2.1 一致）
       AND NOT EXISTS (                            -- 排除已标记异常的逆变器+支路
@@ -1019,7 +1023,7 @@ br AS (
 ds AS (
     SELECT device_id, bucket,
            avg(i)        AS i_mean,
-           stddev_pop(i) AS i_std,
+           stddev_samp(i) AS i_std,
            min(i)        AS i_min,
            max(i)        AS i_max,
            count(*)      AS branch_cnt,
@@ -1029,7 +1033,7 @@ ds AS (
     FROM br
     GROUP BY device_id, bucket
 ),
-zbr AS (                                        -- 被剔除的全零支路（i_avg IS NULL），仅用于暴露 0A
+zbr AS (                                        -- 被剔除的全零/全低电流支路（i_avg IS NULL），仅用于暴露 0A
     SELECT b.device_id, b.bucket,
            count(*)                    AS allzero_cnt,
            coalesce(sum(b.zero_cnt), 0) AS allzero_samples
@@ -1083,7 +1087,7 @@ SELECT to_char(s.bucket AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI') AS "
               / nullif(coalesce(ds.zero_cnt, 0) + coalesce(z.allzero_samples, 0)
                        + coalesce(ds.sample_cnt, 0), 0) * 100), 2)            AS "零值占比(%)",
        coalesce(ds.low_cnt, 0)                                               AS "低电流支路数",
-       coalesce(z.allzero_cnt, 0)                                            AS "全零支路数"
+       coalesce(z.allzero_cnt, 0)                                            AS "全零/低电流支路数"
 FROM snap s
 LEFT JOIN ds     ON ds.device_id = s.device_id AND ds.bucket = s.bucket
 LEFT JOIN zbr z  ON z.device_id  = s.device_id AND z.bucket  = s.bucket

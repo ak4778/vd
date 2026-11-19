@@ -105,12 +105,20 @@ EXCEED_CSV = os.path.join(OUTPUT_DIR, "fjmjsj_temgende_exceed.csv")  # 超温原
 POLL_INTERVAL = 30        # 主循环轮询周期（秒）
 FETCH_LOOKBACK = 90       # 每轮拉取最近多少秒（重叠窗口，防延迟/漏点）
 # 补拉窗口上限（秒）：上游延迟发布时，窗口起点自动回追到「最落后的活跃序列」，
-# 把迟到的点补进滑窗；滞后超过该上限的序列放弃补拉（超温 CSV 会乱序追加），
-# 防止永久掉线设备把查询窗口无限拉大。只补数据，不改三条规则的判定逻辑。
+# 把迟到的点补进滑窗；滞后超过该上限的序列由下方「深度补拉」按设备回补，
+# 防止永久掉线设备把每轮查询窗口无限拉大。只补数据，不改三条规则的判定逻辑。
 CATCHUP_MAX_SECONDS = 1200
 # 补拉窗口降频：落后设备的 20 分钟窗口重扫代价高（实测约 8s），每 N 轮做一次，
 # 其余轮次只拉近窗（约 0.4s）。迟到点最多晚 N*POLL_INTERVAL 秒进入滑窗。
 CATCHUP_EVERY_N_ROUNDS = 10
+# 深度补拉（方案B）：滞后超过 CATCHUP_MAX_SECONDS 的序列不再直接放弃，
+# 改为低频按设备水位线回补。单设备最长回补 DEEP_BACKFILL_MAX_SECONDS ——
+# 受滑窗 WINDOW_KEEP(3650s) 约束，更早的点进滑窗也会被裁掉，没有告警价值。
+# 每 DEEP_BACKFILL_EVERY_N_ROUNDS 轮执行一次，每轮最多 DEEP_BACKFILL_MAX_DEVICES 台，
+# 候选列表轮转，避免最落后的固定设备长期占位导致长尾设备永远轮不到。
+DEEP_BACKFILL_MAX_SECONDS = 3600
+DEEP_BACKFILL_EVERY_N_ROUNDS = 60     # 约 30 分钟一次（实测常规轮次几乎无新点可补）
+DEEP_BACKFILL_MAX_DEVICES = 200
 BOOTSTRAP_HOURS = 1       # 启动回灌历史小时数（规则02启动即可判）
 MAX_WORKERS = 24          # 拉取并发数
 MAX_RETRIES = 3
@@ -150,6 +158,10 @@ HEARTBEAT_TICKS = 5       # 每5轮(约5分钟)打印一次心跳
 # 数据源断流检测：所有序列连续该时长无新数据即判定断流，按间隔重复告警，恢复时记一条
 OUTAGE_ALERT_SECONDS = 1200   # 20 分钟无新数据判定为断流
 OUTAGE_REPEAT_SECONDS = 1800  # 断流期间每 30 分钟提醒一次
+# 断流计时口径：True 时只统计「近窗」（now - FETCH_LOOKBACK 之后）的新增点，
+# 深度补拉/补拉带回的历史点不清零断流计时，避免上游已停更却因补拉反复刷新；
+# False 则与改动前一致（任何新增点都算）。
+OUTAGE_COUNT_NEAR_ONLY = True
 
 # 报警类型统一格式：01-绝对值报警 / 02-死值校验 / 03-突变报警
 ALARM_TYPE_MAP = {
@@ -835,18 +847,48 @@ def _query_window_rows(conn, start_dt, end_dt, wids, cols):
         cur.close()
 
 
+def plan_deep_backfill(skip_upto, now_epoch, cursor):
+    """方案B：挑选滞后超过 CATCHUP_MAX_SECONDS 的设备做深度补拉。
+
+    返回 ({wid_upper: 起始 epoch}, 新游标, 候选设备数)。
+    起始点取该设备的序列水位线，最长回补 DEEP_BACKFILL_MAX_SECONDS；
+    从候选列表的 cursor 位置取 DEEP_BACKFILL_MAX_DEVICES 台并轮转，
+    保证永久掉线的设备不会一直占据名额。
+    """
+    floor_ep = now_epoch - CATCHUP_MAX_SECONDS
+    dev_min = {}
+    for (wid, _pc), ep in skip_upto.items():
+        known = dev_min.get(wid)
+        if known is None or ep < known:
+            dev_min[wid] = ep
+    cand = sorted((ep, wid) for wid, ep in dev_min.items() if ep < floor_ep)
+    n = len(cand)
+    if n == 0:
+        return {}, 0, 0
+    start_floor = now_epoch - DEEP_BACKFILL_MAX_SECONDS
+    take = min(DEEP_BACKFILL_MAX_DEVICES, n)
+    picked = {}
+    for i in range(take):
+        ep, wid = cand[(cursor + i) % n]
+        picked[wid.upper()] = max(ep, start_floor)
+    return picked, (cursor + take) % n, n
+
+
 def fetch_round_db(conn, start_dt, end_dt, wid_upper, upper2wid, skip_upto=None,
-                   with_catchup=True):
+                   with_catchup=True, deep_devs=None):
     """db 模式：拉本轮新增数据（两个窗口合并），宽表行在 Python 侧 unpivot。
 
     拆窗原因：补拉窗口最大 1200s，全量设备扫 20 分钟实测单轮 7.6s、23 万行，
     是告警延迟的主因。拆成两段后：
       1) 近窗 [end-FETCH_LOOKBACK, end)：覆盖绝大多数正常序列，只返回新行；
       2) 补拉窗 [start, end-FETCH_LOOKBACK)：仅对「最新点已落后近窗起点」的
-         少数设备查询，兜住上游迟发布/断采恢复的数据。
+         少数设备查询，兜住上游迟发布/断采恢复的数据；
+      3) 深度补拉窗（deep_devs）：滞后超过 CATCHUP_MAX_SECONDS 的设备，
+         按各自水位线回补，每轮只轮转一部分设备。
     两段行数从 23 万降到约 1.5 万，查询耗时从 ~7.6s 降到 ~1s。
     skip_upto：{(wid, pc): epoch}，该序列已见过的最新点 epoch，
     ts <= 它的点直接跳过（窗口内旧点提前跳过省解析）。
+    deep_devs：{wid_upper: 起始 epoch}，由 plan_deep_backfill 生成。
     返回 {(wid_原始, pc): [{'ts','pointValue'}, ...]}（无数据的 key 不出现）。
     """
     cols = [POINT_CONFIG[pc]['column'] for pc in POINT_CODES]  # 内部配置，无注入面
@@ -868,6 +910,20 @@ def fetch_round_db(conn, start_dt, end_dt, wid_upper, upper2wid, skip_upto=None,
             if lag_wids:
                 rows += _query_window_rows(conn, start_dt, fast_start,
                                            lag_wids, cols)
+        # 3) 深度补拉窗 [设备水位线, start_dt)：只针对滞后超过补拉上限的设备，
+        # 起始点逐设备给出，单次最长 DEEP_BACKFILL_MAX_SECONDS；旧点由 skip_upto 过滤。
+        # 终点取 start_dt（而非 fast_start），与上面的补拉窗首尾相接、不重叠，
+        # 避免同一批迟到点被两段查询各返回一次。
+        if deep_devs:
+            deep_start_ep = min(deep_devs.values())
+            if deep_start_ep < start_dt.timestamp():
+                deep_rows = _query_window_rows(
+                    conn, datetime.fromtimestamp(deep_start_ep), start_dt,
+                    list(deep_devs), cols)
+                rows += deep_rows
+                log(f"--- 深度补拉查询：{len(deep_devs)} 台设备，返回 {len(deep_rows)} 行"
+                    f"（窗口 {time.strftime('%H:%M:%S', time.localtime(deep_start_ep))}"
+                    f" ~ {start_dt:%H:%M:%S}）---")
     grouped = {}
     for dev_upper, ts, *values in rows:
         wid = upper2wid.get(dev_upper)
@@ -919,11 +975,13 @@ def run():
     log(f"数据来源 DATA_SOURCE={DATA_SOURCE}"
         + (f"（{TABLE_SECONDS} 固定列）" if DATA_SOURCE == 'db' else '（queryData 接口）'))
 
-    def fetch_all(start_epoch, end_epoch=None, skip_upto=None, with_catchup=True):
+    def fetch_all(start_epoch, end_epoch=None, skip_upto=None, with_catchup=True,
+                  deep_devs=None):
         """统一拉取入口，返回 ({(wid, pc): items}, 错误数)。
         无数据的 (wid, pc) 由调用方按空列表处理。
         skip_upto 仅 db 模式使用：{(wid, pc): 已见最新点 epoch}，见 fetch_round_db。
-        with_catchup=False 时本轮只拉近窗，跳过落后设备补拉（降频执行用）。"""
+        with_catchup=False 时本轮只拉近窗，跳过落后设备补拉（降频执行用）。
+        deep_devs 仅 db 模式使用：{wid_upper: 起始 epoch}，见 plan_deep_backfill。"""
         if DATA_SOURCE == 'api':
             start_str = datetime.fromtimestamp(start_epoch).strftime(TS_FMT)
             end_str = (datetime.fromtimestamp(end_epoch).strftime(TS_FMT)
@@ -954,7 +1012,7 @@ def run():
                 return {}, 1
         try:
             return fetch_round_db(pg_conn, start_dt, end_dt, wid_upper, upper2wid,
-                                  skip_upto, with_catchup), 0
+                                  skip_upto, with_catchup, deep_devs), 0
         except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
             # 连接失效：关掉旧连接置空，本轮空过，下轮重建（重连失败不崩进程）
             log(f"PG 连接异常，下轮重连重试: {e}")
@@ -992,13 +1050,14 @@ def run():
         outage_warned_at = 0.0          # 上次断流告警时刻
         outage_active = False           # 当前是否处于断流状态
         tick = 0
+        deep_cursor = 0                 # 深度补拉候选轮转游标
         while True:
             t0 = time.time()
             now_epoch = t0
 
             # 补拉窗口：起点回追到「最落后的活跃序列」的最新点，上限
             # CATCHUP_MAX_SECONDS；全部序列都在正常节奏时窗口 = FETCH_LOOKBACK，
-            # 与改动前行为一致。滞后超上限的序列不参与起点计算（放弃补拉）。
+            # 与改动前行为一致。滞后超上限的序列不参与起点计算，改走深度补拉。
             floor_ep = t0 - CATCHUP_MAX_SECONDS
             lag_most = None
             skip_upto = {}
@@ -1014,8 +1073,21 @@ def run():
             if lag_most is not None and lag_most < start_ep:
                 start_ep = lag_most
 
+            # 深度补拉（方案B）：低频、按设备水位线回补超上限的滞后序列，
+            # 每轮只轮转一部分设备，代价可控。
+            deep_devs = None
+            if DATA_SOURCE == 'db' and tick > 0 and tick % DEEP_BACKFILL_EVERY_N_ROUNDS == 0:
+                deep_devs, deep_cursor, n_cand = plan_deep_backfill(
+                    skip_upto, t0, deep_cursor)
+                if deep_devs:
+                    oldest = min(deep_devs.values())
+                    log(f"--- 深度补拉：候选 {n_cand} 台，本轮 {len(deep_devs)} 台"
+                        f"（最落后起点 {time.strftime('%H:%M:%S', time.localtime(oldest))}，"
+                        f"单设备最长 {DEEP_BACKFILL_MAX_SECONDS // 60} 分钟）---")
+
             fetched, fetch_errs = fetch_all(start_ep, t0, skip_upto,
-                                            with_catchup=with_catchup)
+                                            with_catchup=with_catchup,
+                                            deep_devs=deep_devs)
 
             lookback_used = int(t0 - start_ep)
             if lookback_used > FETCH_LOOKBACK:
@@ -1026,12 +1098,20 @@ def run():
             else:
                 log(f"=== round {tick + 1} 拉取最近 {FETCH_LOOKBACK}s 数据 ===")
             round_new = 0
+            near_floor = now_epoch - FETCH_LOOKBACK   # 断流计时只看这个时刻之后的新点
+            deep_new = 0                              # 深补设备真正补入的历史新点数
             for d, pc in tasks:
                 wid = d['wid']
                 items = fetched.get((wid, pc), [])
                 buf = buffers[(wid, pc)]
                 new_recs = buf.add_raw(items, now_epoch)
-                round_new += len(new_recs)
+                if deep_devs and wid.upper() in deep_devs:
+                    deep_new += sum(1 for r in new_recs if r[1] < near_floor)
+                if OUTAGE_COUNT_NEAR_ONLY:
+                    # 只把近窗内的新点计入断流计时，深度补拉的历史点不算
+                    round_new += sum(1 for r in new_recs if r[1] >= near_floor)
+                else:
+                    round_new += len(new_recs)
                 exceed_total += write_exceed_points(exceed, dev_map[wid], pc, new_recs)
                 latest = buf.latest()
 
@@ -1068,6 +1148,9 @@ def run():
 
                 # 规则03
                 eval_fluct_tick(buf, now_epoch, engine, wid, pc, stats)
+
+            if deep_devs:
+                log(f"--- 深度补拉实际补入历史新点 {deep_new} 条 ---")
 
             # 断流检测：所有序列连续无新数据超过阈值判定数据源断流，按间隔重复告警
             if round_new > 0:
