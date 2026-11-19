@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="440" viewBox="0 0 900 440" font-family="'Microsoft YaHei','PingFang SC','Noto Sans SC',sans-serif">
+  <defs>
+    <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3a6ea5"/>
+    </marker>
+  </defs>
+  <rect width="900" height="440" fill="#ffffff"/>
+
+  <!-- 左：事件循环线程 -->
+  <rect x="40" y="24" width="400" height="300" rx="8" fill="#f4f8fd" stroke="#b9cfe8"/>
+  <text x="60" y="50" font-size="15" font-weight="700" fill="#1f4e79">事件循环线程（Mongoose 主线程）</text>
+  <line x1="60" y1="60" x2="420" y2="60" stroke="#dbe8f6"/>
+
+  <rect x="64" y="74" width="352" height="48" rx="6" fill="#e8f1fb" stroke="#c7dcf0"/>
+  <text x="78" y="96" font-size="13" fill="#24527a" font-weight="600">alarm_poll_timer（1 s）</text>
+  <text x="78" y="114" font-size="11" fill="#4a6d8c">inflight = 0 时投递查询任务</text>
+
+  <rect x="64" y="150" width="352" height="52" rx="6" fill="#e8f1fb" stroke="#c7dcf0"/>
+  <text x="78" y="172" font-size="13" fill="#24527a" font-weight="600">dispatch_results（20 ms）</text>
+  <text x="78" y="191" font-size="11" fill="#4a6d8c">摘链，inflight 清零</text>
+
+  <rect x="64" y="230" width="352" height="78" rx="6" fill="#e8f1fb" stroke="#c7dcf0"/>
+  <text x="78" y="252" font-size="13" fill="#24527a" font-weight="600">alarm_handle_rows</text>
+  <text x="78" y="272" font-size="11" fill="#4a6d8c">更新游标 s_alarm_last_id；缓存 ≤200 行</text>
+  <text x="78" y="290" font-size="11" fill="#4a6d8c">有订阅者才构建并广播 alarm 帧</text>
+
+  <line x1="224" y1="202" x2="224" y2="224" stroke="#3a6ea5" marker-end="url(#ar3)"/>
+  <text x="234" y="218" font-size="11" fill="#3a6ea5">③ 摘链、清 inflight</text>
+
+  <!-- 右：工作线程 -->
+  <rect x="560" y="24" width="300" height="196" rx="8" fill="#f4f8fd" stroke="#b9cfe8"/>
+  <text x="580" y="50" font-size="15" font-weight="700" fill="#1f4e79">工作线程</text>
+  <line x1="580" y1="60" x2="840" y2="60" stroke="#dbe8f6"/>
+  <rect x="580" y="74" width="260" height="52" rx="6" fill="#e8f1fb" stroke="#c7dcf0"/>
+  <text x="594" y="96" font-size="13" fill="#24527a" font-weight="600">alarm_query_thread</text>
+  <text x="594" y="114" font-size="11" fill="#4a6d8c">libpq 查库（不触碰事件循环）</text>
+  <rect x="580" y="140" width="260" height="56" rx="6" fill="#e8f1fb" stroke="#c7dcf0"/>
+  <text x="594" y="162" font-size="12" fill="#24527a">ds_get_new_alarms(last_id, 100)</text>
+  <text x="594" y="182" font-size="11" fill="#4a6d8c">results_lock() 挂入结果链表</text>
+
+  <!-- 线程间箭头 -->
+  <line x1="440" y1="96" x2="554" y2="96" stroke="#3a6ea5" marker-end="url(#ar3)"/>
+  <text x="444" y="88" font-size="11" fill="#3a6ea5">① 投递</text>
+  <path d="M560,168 L510,168 L510,176 L440,176" fill="none" stroke="#3a6ea5" marker-end="url(#ar3)"/>
+  <text x="444" y="170" font-size="11" fill="#3a6ea5">② 加锁回传</text>
+
+  <!-- 底部说明 -->
+  <rect x="40" y="344" width="820" height="72" rx="8" fill="#f8fbfe" stroke="#d5e4f3"/>
+  <text x="60" y="368" font-size="12" fill="#24527a">④ alarm_handle_rows：s_alarm_last_id = max(row.id)　·　快照缓存满则丢弃最老一行　·　无 watcher 时跳过 JSON 构建</text>
+  <text x="60" y="392" font-size="12" fill="#24527a">查询失败（返回 −1）时游标不推进，下轮自动重拉；同一时刻最多一个查询在途，避免排队堆积</text>
+</svg>

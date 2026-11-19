@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="640" viewBox="0 0 960 640" font-family="'Microsoft YaHei','PingFang SC','Noto Sans SC',sans-serif">
+  <defs>
+    <marker id="s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3a6ea5"/>
+    </marker>
+    <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d97706"/>
+    </marker>
+    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5b6b7c"/>
+    </marker>
+  </defs>
+  <rect width="960" height="640" fill="#ffffff"/>
+
+  <!-- 参与者 -->
+  <g>
+    <rect x="40" y="28" width="170" height="48" rx="6" fill="#e8f1fb" stroke="#c7dcf0"/>
+    <text x="125" y="48" font-size="12.5" font-weight="700" text-anchor="middle" fill="#1f4e79">浏览器</text>
+    <text x="125" y="65" font-size="10.5" text-anchor="middle" fill="#4a6d8c">index.html + main.js</text>
+
+    <rect x="270" y="28" width="170" height="48" rx="6" fill="#dff3e4" stroke="#9ecfae"/>
+    <text x="355" y="48" font-size="12.5" font-weight="700" text-anchor="middle" fill="#1f6b3a">Mongoose 服务</text>
+    <text x="355" y="65" font-size="10.5" text-anchor="middle" fill="#1f6b3a">fn() 事件处理器</text>
+
+    <rect x="500" y="28" width="170" height="48" rx="6" fill="#e8f1fb" stroke="#c7dcf0"/>
+    <text x="585" y="48" font-size="12.5" font-weight="700" text-anchor="middle" fill="#1f4e79">定时器</text>
+    <text x="585" y="65" font-size="10.5" text-anchor="middle" fill="#4a6d8c">mg_timer 1 s</text>
+
+    <rect x="750" y="28" width="170" height="48" rx="6" fill="#e8f1fb" stroke="#c7dcf0"/>
+    <text x="835" y="48" font-size="12.5" font-weight="700" text-anchor="middle" fill="#1f4e79">工作线程</text>
+    <text x="835" y="65" font-size="10.5" text-anchor="middle" fill="#4a6d8c">libpq 查库</text>
+  </g>
+
+  <line x1="125" y1="76" x2="125" y2="566" stroke="#c9d8e8" stroke-dasharray="4 5"/>
+  <line x1="355" y1="76" x2="355" y2="566" stroke="#c9d8e8" stroke-dasharray="4 5"/>
+  <line x1="585" y1="76" x2="585" y2="566" stroke="#c9d8e8" stroke-dasharray="4 5"/>
+  <line x1="835" y1="76" x2="835" y2="566" stroke="#c9d8e8" stroke-dasharray="4 5"/>
+
+  <!-- 1 页面与登录 -->
+  <line x1="125" y1="112" x2="349" y2="112" stroke="#3a6ea5" marker-end="url(#s)"/>
+  <rect x="163" y="98" width="148" height="20" rx="10" fill="#eef2f7" stroke="#dbe4ee"/>
+  <text x="237" y="112" font-size="10" text-anchor="middle" fill="#24527a">GET /（index.html）</text>
+
+  <line x1="355" y1="146" x2="131" y2="146" stroke="#3a6ea5" stroke-dasharray="5 4" marker-end="url(#s)"/>
+  <rect x="157" y="132" width="172" height="20" rx="10" fill="#eef2f7" stroke="#dbe4ee"/>
+  <text x="243" y="146" font-size="10" text-anchor="middle" fill="#24527a">静态资源 + main.js</text>
+
+  <line x1="125" y1="186" x2="349" y2="186" stroke="#3a6ea5" marker-end="url(#s)"/>
+  <rect x="177" y="172" width="126" height="20" rx="10" fill="#eef2f7" stroke="#dbe4ee"/>
+  <text x="240" y="186" font-size="10" text-anchor="middle" fill="#24527a">POST /api/login</text>
+
+  <line x1="355" y1="220" x2="131" y2="220" stroke="#3a6ea5" stroke-dasharray="5 4" marker-end="url(#s)"/>
+  <rect x="143" y="206" width="204" height="20" rx="10" fill="#eef2f7" stroke="#dbe4ee"/>
+  <text x="245" y="220" font-size="10" text-anchor="middle" fill="#24527a">200 + access_token（cookie）</text>
+
+  <!-- 2 升级 -->
+  <line x1="125" y1="260" x2="349" y2="260" stroke="#3a6ea5" marker-end="url(#s)"/>
+  <rect x="139" y="246" width="212" height="20" rx="10" fill="#eef2f7" stroke="#dbe4ee"/>
+  <text x="245" y="260" font-size="10" text-anchor="middle" fill="#24527a">GET /api/alarms/ws（Upgrade）</text>
+
+  <line x1="355" y1="294" x2="131" y2="294" stroke="#3a6ea5" stroke-dasharray="5 4" marker-end="url(#s)"/>
+  <rect x="181" y="280" width="162" height="20" rx="10" fill="#eef2f7" stroke="#dbe4ee"/>
+  <text x="262" y="294" font-size="10" text-anchor="middle" fill="#24527a">101 Switching Protocols</text>
+
+  <!-- 3 首帧 -->
+  <line x1="355" y1="334" x2="131" y2="334" stroke="#d97706" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#o)"/>
+  <rect x="183" y="320" width="158" height="20" rx="10" fill="#fdf1e3" stroke="#f0d9a8"/>
+  <text x="262" y="334" font-size="10" text-anchor="middle" fill="#b45309">hello{supported:true}</text>
+
+  <line x1="355" y1="368" x2="131" y2="368" stroke="#d97706" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#o)"/>
+  <rect x="143" y="354" width="238" height="20" rx="10" fill="#fdf1e3" stroke="#f0d9a8"/>
+  <text x="262" y="368" font-size="10" text-anchor="middle" fill="#b45309">snapshot（≤200 行，不计未读）</text>
+
+  <!-- 4 周期 -->
+  <line x1="585" y1="408" x2="361" y2="408" stroke="#3a6ea5" stroke-dasharray="5 4" marker-end="url(#s)"/>
+  <rect x="395" y="394" width="156" height="20" rx="10" fill="#eef2f7" stroke="#dbe4ee"/>
+  <text x="473" y="408" font-size="10" text-anchor="middle" fill="#24527a">每 1 s 触发（定时器）</text>
+
+  <line x1="355" y1="442" x2="829" y2="442" stroke="#3a6ea5" marker-end="url(#s)"/>
+  <rect x="514" y="428" width="204" height="20" rx="10" fill="#eef2f7" stroke="#dbe4ee"/>
+  <text x="616" y="442" font-size="10" text-anchor="middle" fill="#24527a">投递查库（id 游标，LIMIT 100）</text>
+
+  <line x1="835" y1="476" x2="361" y2="476" stroke="#3a6ea5" stroke-dasharray="5 4" marker-end="url(#s)"/>
+  <rect x="518" y="462" width="196" height="20" rx="10" fill="#eef2f7" stroke="#dbe4ee"/>
+  <text x="616" y="476" font-size="10" text-anchor="middle" fill="#24527a">结果链表（加锁挂链）</text>
+
+  <line x1="355" y1="510" x2="131" y2="510" stroke="#d97706" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#o)"/>
+  <rect x="155" y="496" width="208" height="20" rx="10" fill="#fdf1e3" stroke="#f0d9a8"/>
+  <text x="259" y="510" font-size="10" text-anchor="middle" fill="#b45309">alarm 帧（增量 ≤100 行）</text>
+
+  <!-- 5 断线自环 -->
+  <path d="M125,536 C196,540 196,566 131,566" fill="none" stroke="#5b6b7c" stroke-dasharray="5 4" marker-end="url(#g)"/>
+  <text x="206" y="552" font-size="10" fill="#5b6b7c">断线：2 s→30 s 指数退避重连</text>
+
+  <!-- 图例 -->
+  <line x1="40" y1="600" x2="76" y2="600" stroke="#3a6ea5" marker-end="url(#s)"/>
+  <text x="84" y="604" font-size="10.5" fill="#4a6d8c">请求 / 同步调用</text>
+  <line x1="206" y1="600" x2="242" y2="600" stroke="#3a6ea5" stroke-dasharray="5 4" marker-end="url(#s)"/>
+  <text x="250" y="604" font-size="10.5" fill="#4a6d8c">响应 / 异步触发</text>
+  <line x1="382" y1="600" x2="418" y2="600" stroke="#d97706" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#o)"/>
+  <text x="426" y="604" font-size="10.5" fill="#b45309">核心推送路径</text>
+  <text x="574" y="604" font-size="10.5" fill="#7d8899">重连后重收 hello + snapshot，视图收敛不重复计未读</text>
+</svg>

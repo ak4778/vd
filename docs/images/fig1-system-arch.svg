@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="640" viewBox="0 0 960 640" font-family="'Microsoft YaHei','PingFang SC','Noto Sans SC',sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3a6ea5"/>
+    </marker>
+    <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d97706"/>
+    </marker>
+  </defs>
+  <rect width="960" height="640" fill="#ffffff"/>
+
+  <!-- ① 采集层 -->
+  <rect x="20" y="18" width="920" height="122" rx="8" fill="#f8fbfe" stroke="#d5e4f3"/>
+  <text x="40" y="40" font-size="13" font-weight="700" fill="#1f4e79">① 采集层（Python）</text>
+  <rect x="40" y="52" width="420" height="72" rx="6" fill="#e8f1fb" stroke="#c7dcf0"/>
+  <text x="58" y="76" font-size="12.5" font-weight="700" fill="#1f4e79">wind_fetch_and_upsert.py</text>
+  <text x="58" y="96" font-size="10.5" fill="#4a6d8c">水位线增量拉取 · 重叠窗口 50 s · 分页取尽</text>
+  <text x="58" y="113" font-size="10.5" fill="#4a6d8c">原子落盘 → INSERT … ON CONFLICT 幂等 upsert</text>
+
+  <rect x="500" y="52" width="420" height="72" rx="6" fill="#dff3e4" stroke="#9ecfae"/>
+  <text x="518" y="76" font-size="12.5" font-weight="700" fill="#1f6b3a">wind_alarm.py</text>
+  <text x="518" y="96" font-size="10.5" fill="#1f6b3a">1 h / 20 s 双窗口 · 测点级阈值 · 5 个规则码</text>
+  <text x="518" y="113" font-size="10.5" fill="#1f6b3a">边沿触发 ALARM / RECOVER → 三处落盘</text>
+
+  <line x1="250" y1="140" x2="250" y2="166" stroke="#3a6ea5" marker-end="url(#a)"/>
+  <rect x="262" y="144" width="88" height="20" rx="10" fill="#eef2f7" stroke="#dbe4ee"/>
+  <text x="306" y="158" font-size="9.5" text-anchor="middle" fill="#24527a">秒级明细</text>
+  <line x1="710" y1="140" x2="710" y2="166" stroke="#d97706" marker-end="url(#o)"/>
+  <rect x="722" y="144" width="104" height="20" rx="10" fill="#fdf1e3" stroke="#f0d9a8"/>
+  <text x="774" y="158" font-size="9.5" text-anchor="middle" fill="#b45309">告警事件流水</text>
+
+  <!-- ② 存储层 -->
+  <rect x="20" y="174" width="920" height="118" rx="8" fill="#f8fbfe" stroke="#d5e4f3"/>
+  <text x="40" y="196" font-size="13" font-weight="700" fill="#1f4e79">② 存储层（PostgreSQL）</text>
+  <rect x="40" y="208" width="284" height="66" rx="6" fill="#ffffff" stroke="#b9cfe8"/>
+  <text x="58" y="230" font-size="11.5" font-weight="700" fill="#24527a">wind_seconds_di</text>
+  <text x="58" y="248" font-size="10" fill="#4a6d8c">秒级明细，RANGE(ts) 日分区</text>
+  <text x="58" y="264" font-size="10" fill="#4a6d8c">主键 (device_id, ts)</text>
+
+  <rect x="338" y="208" width="284" height="66" rx="6" fill="#ffffff" stroke="#b9cfe8"/>
+  <text x="356" y="230" font-size="11.5" font-weight="700" fill="#24527a">wind_minutes_di</text>
+  <text x="356" y="248" font-size="10" fill="#4a6d8c">分钟聚合 rollup（avg / max / min）</text>
+  <text x="356" y="264" font-size="10" fill="#4a6d8c">视图叠加质量标记 ok / sparse</text>
+
+  <rect x="636" y="208" width="284" height="66" rx="6" fill="#fdf1e3" stroke="#f0d9a8"/>
+  <text x="654" y="230" font-size="11.5" font-weight="700" fill="#b45309">wind_alarm</text>
+  <text x="654" y="248" font-size="10" fill="#b45309">追加式事件流水（bigserial 主键）</text>
+  <text x="654" y="264" font-size="10" fill="#b45309">主键即推送游标，重启可回放</text>
+
+  <line x1="480" y1="292" x2="480" y2="318" stroke="#3a6ea5" marker-end="url(#a)"/>
+  <rect x="492" y="296" width="86" height="20" rx="10" fill="#eef2f7" stroke="#dbe4ee"/>
+  <text x="535" y="310" font-size="9.5" text-anchor="middle" fill="#24527a">分区裁剪</text>
+
+  <!-- ③ 服务层 -->
+  <rect x="20" y="326" width="920" height="166" rx="8" fill="#f8fbfe" stroke="#d5e4f3"/>
+  <text x="40" y="348" font-size="13" font-weight="700" fill="#1f4e79">③ 服务层（C / Mongoose）</text>
+  <rect x="40" y="360" width="420" height="116" rx="6" fill="#e8f1fb" stroke="#c7dcf0"/>
+  <text x="58" y="382" font-size="12" font-weight="700" fill="#1f4e79">事件循环线程</text>
+  <text x="58" y="400" font-size="10" fill="#4a6d8c">fn() 处理 HTTP / WS，所有 mg_* 单线程调用</text>
+  <text x="58" y="418" font-size="10" fill="#4a6d8c">alarm_poll_timer（1 s）→ 投递查库</text>
+  <text x="58" y="436" font-size="10" fill="#4a6d8c">dispatch_results（20 ms）：摘链、清 inflight</text>
+  <text x="58" y="454" font-size="10" fill="#4a6d8c">alarm_handle_rows：缓存 ≤200 + WS 广播</text>
+  <text x="58" y="470" font-size="10" fill="#4a6d8c">背压：send 缓冲 &gt; 8 MB 主动断开</text>
+
+  <rect x="500" y="360" width="420" height="116" rx="6" fill="#ffffff" stroke="#b9cfe8"/>
+  <text x="518" y="382" font-size="12" font-weight="700" fill="#24527a">工作线程池</text>
+  <text x="518" y="400" font-size="10" fill="#4a6d8c">alarm_query_thread：libpq 增量查询</text>
+  <text x="518" y="418" font-size="10" fill="#4a6d8c">ds_get_new_alarms(last_id, 100)</text>
+  <text x="518" y="436" font-size="10" fill="#4a6d8c">结果链表 + 互斥锁交接</text>
+  <text x="518" y="454" font-size="10" fill="#4a6d8c">查询失败：游标不动，下轮重拉</text>
+  <text x="518" y="470" font-size="10" fill="#4a6d8c">无订阅者：跳过 JSON 构建</text>
+
+  <line x1="460" y1="390" x2="496" y2="390" stroke="#3a6ea5" marker-end="url(#a)"/>
+  <line x1="500" y1="432" x2="464" y2="432" stroke="#3a6ea5" marker-end="url(#a)"/>
+  <rect x="452" y="370" width="42" height="18" rx="9" fill="#eef2f7" stroke="#dbe4ee"/>
+  <text x="473" y="383" font-size="9" text-anchor="middle" fill="#24527a">投递</text>
+  <rect x="452" y="440" width="42" height="18" rx="9" fill="#eef2f7" stroke="#dbe4ee"/>
+  <text x="473" y="453" font-size="9" text-anchor="middle" fill="#24527a">回传</text>
+
+  <line x1="480" y1="492" x2="480" y2="518" stroke="#d97706" marker-end="url(#o)"/>
+  <rect x="492" y="496" width="238" height="20" rx="10" fill="#fdf1e3" stroke="#f0d9a8"/>
+  <text x="611" y="510" font-size="9.5" text-anchor="middle" fill="#b45309">WebSocket：hello / snapshot / alarm 帧</text>
+
+  <!-- ④ 前端 -->
+  <rect x="20" y="526" width="920" height="96" rx="8" fill="#f8fbfe" stroke="#d5e4f3"/>
+  <text x="40" y="548" font-size="13" font-weight="700" fill="#1f4e79">④ 前端（Preact SPA + 独立大屏页）</text>
+  <rect x="40" y="558" width="284" height="50" rx="6" fill="#e8f1fb" stroke="#c7dcf0"/>
+  <text x="58" y="577" font-size="11" font-weight="700" fill="#24527a">App 级 WS 生命周期</text>
+  <text x="58" y="594" font-size="9.5" fill="#4a6d8c">登录建连 · 指数退避重连 · 会话失效识别</text>
+
+  <rect x="338" y="558" width="284" height="50" rx="6" fill="#e8f1fb" stroke="#c7dcf0"/>
+  <text x="356" y="577" font-size="11" font-weight="700" fill="#24527a">#/alarms 页</text>
+  <text x="356" y="594" font-size="9.5" fill="#4a6d8c">列表 · 环形图 · 三指针仪表盘 · 未读徽标</text>
+
+  <rect x="636" y="558" width="284" height="50" rx="6" fill="#e8f1fb" stroke="#c7dcf0"/>
+  <text x="654" y="577" font-size="11" font-weight="700" fill="#24527a">bigscreen.html</text>
+  <text x="654" y="594" font-size="9.5" fill="#4a6d8c">KPI · TOP5 · 趋势 · 无缝实时流</text>
+</svg>

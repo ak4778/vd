@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" font-family="'Microsoft YaHei','PingFang SC','Noto Sans SC',sans-serif">
+  <defs>
+    <marker id="aw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3a6ea5"/>
+    </marker>
+    <marker id="awd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8a9bb0"/>
+    </marker>
+  </defs>
+  <rect width="960" height="540" fill="#ffffff"/>
+
+  <!-- A 启动与恢复 -->
+  <rect x="20" y="14" width="920" height="76" rx="8" fill="#f8fbfe" stroke="#d5e4f3"/>
+  <text x="36" y="34" font-size="12.5" font-weight="700" fill="#1f4e79">A 启动与恢复（一次性）</text>
+  <g font-size="11" text-anchor="middle">
+    <rect x="40" y="42" width="200" height="38" rx="5" fill="#e8f1fb" stroke="#c7dcf0"/>
+    <text x="140" y="58" fill="#24527a" font-weight="600">发现设备</text>
+    <text x="140" y="72" font-size="10" fill="#4a6d8c">wind_device 白名单</text>
+    <rect x="256" y="42" width="200" height="38" rx="5" fill="#e8f1fb" stroke="#c7dcf0"/>
+    <text x="356" y="58" fill="#24527a" font-weight="600">幂等建表</text>
+    <text x="356" y="72" font-size="10" fill="#4a6d8c">ensure_alarm_table()</text>
+    <rect x="472" y="42" width="200" height="38" rx="5" fill="#e8f1fb" stroke="#c7dcf0"/>
+    <text x="572" y="58" fill="#24527a" font-weight="600">冷启动回填</text>
+    <text x="572" y="72" font-size="10" fill="#4a6d8c">近 1 h 历史，避免空窗</text>
+    <rect x="688" y="42" width="232" height="38" rx="5" fill="#e8f1fb" stroke="#c7dcf0"/>
+    <text x="804" y="58" fill="#24527a" font-weight="600">回放末条事件 load_state()</text>
+    <text x="804" y="72" font-size="10" fill="#4a6d8c">恢复 active 状态与冷却起点</text>
+  </g>
+  <line x1="240" y1="61" x2="252" y2="61" stroke="#3a6ea5" marker-end="url(#aw)"/>
+  <line x1="456" y1="61" x2="468" y2="61" stroke="#3a6ea5" marker-end="url(#aw)"/>
+  <line x1="672" y1="61" x2="684" y2="61" stroke="#3a6ea5" marker-end="url(#aw)"/>
+
+  <line x1="480" y1="90" x2="480" y2="102" stroke="#3a6ea5" marker-end="url(#aw)"/>
+
+  <!-- B 数据接入 -->
+  <rect x="20" y="108" width="920" height="92" rx="8" fill="#f8fbfe" stroke="#d5e4f3"/>
+  <text x="36" y="128" font-size="12.5" font-weight="700" fill="#1f4e79">B 数据接入（30 s 节拍）</text>
+  <g font-size="11">
+    <rect x="40" y="136" width="200" height="24" rx="4" fill="#e8f1fb" stroke="#c7dcf0"/>
+    <text x="140" y="152" font-size="10.5" text-anchor="middle" fill="#24527a">wind_seconds_di（db 模式）</text>
+    <rect x="40" y="166" width="200" height="24" rx="4" fill="#e8f1fb" stroke="#c7dcf0"/>
+    <text x="140" y="182" font-size="10.5" text-anchor="middle" fill="#24527a">queryData 接口（api 模式）</text>
+
+    <rect x="268" y="132" width="404" height="60" rx="5" fill="#e8f1fb" stroke="#c7dcf0"/>
+    <text x="470" y="150" font-size="11.5" font-weight="600" text-anchor="middle" fill="#24527a">fetch_all：按（设备 × 测点）拉取</text>
+    <text x="470" y="167" font-size="10" text-anchor="middle" fill="#4a6d8c">回看 90 s 重叠 · 补拉 ≤ 1200 s · 24 并发 · 重试 3 次 · PG 断连自动重连</text>
+    <text x="470" y="183" font-size="10" text-anchor="middle" fill="#4a6d8c">db 模式单条 SELECT（分区裁剪，autocommit 只读）</text>
+
+    <rect x="700" y="136" width="220" height="52" rx="5" fill="#e8f1fb" stroke="#c7dcf0"/>
+    <text x="810" y="156" font-size="11" text-anchor="middle" fill="#24527a" font-weight="600">归并为 (wid, point) 数据点</text>
+    <text x="810" y="173" font-size="10" text-anchor="middle" fill="#4a6d8c">去重、按 ts 升序</text>
+  </g>
+  <line x1="240" y1="148" x2="264" y2="158" stroke="#3a6ea5" marker-end="url(#aw)"/>
+  <line x1="240" y1="178" x2="264" y2="168" stroke="#3a6ea5" marker-end="url(#aw)"/>
+  <line x1="672" y1="162" x2="696" y2="162" stroke="#3a6ea5" marker-end="url(#aw)"/>
+
+  <line x1="480" y1="200" x2="480" y2="212" stroke="#3a6ea5" marker-end="url(#aw)"/>
+
+  <!-- C 内存检测 -->
+  <rect x="20" y="218" width="920" height="112" rx="8" fill="#f8fbfe" stroke="#d5e4f3"/>
+  <text x="36" y="238" font-size="12.5" font-weight="700" fill="#1f4e79">C 内存检测（每设备 × 每测点独立）</text>
+  <g>
+    <rect x="40" y="246" width="200" height="70" rx="5" fill="#ffffff" stroke="#b9cfe8"/>
+    <text x="140" y="264" font-size="11" font-weight="600" text-anchor="middle" fill="#24527a">SlidingBuffer</text>
+    <text x="140" y="281" font-size="10" text-anchor="middle" fill="#4a6d8c">deque 保留 3650 s</text>
+    <text x="140" y="297" font-size="10" text-anchor="middle" fill="#4a6d8c">超出窗口自动淘汰</text>
+
+    <rect x="256" y="246" width="200" height="70" rx="5" fill="#ffffff" stroke="#b9cfe8"/>
+    <text x="356" y="264" font-size="11" font-weight="600" text-anchor="middle" fill="#24527a">compute_stats</text>
+    <text x="356" y="281" font-size="10" text-anchor="middle" fill="#4a6d8c">temp / range_1h / range_20s</text>
+    <text x="356" y="297" font-size="10" text-anchor="middle" fill="#4a6d8c">同时输出窗口跨度与样本数</text>
+
+    <rect x="472" y="246" width="200" height="70" rx="5" fill="#fdf6e8" stroke="#ecd7ab"/>
+    <text x="572" y="264" font-size="11" font-weight="600" text-anchor="middle" fill="#8a5a00">规则判定</text>
+    <text x="572" y="281" font-size="9.5" text-anchor="middle" fill="#8a5a00">C01_FAULT / HIGH / LOW</text>
+    <text x="572" y="295" font-size="9.5" text-anchor="middle" fill="#8a5a00">C02_FROZEN（span ≥ 2700 s）</text>
+    <text x="572" y="309" font-size="9.5" text-anchor="middle" fill="#8a5a00">C03_FLUCT（20 s &gt; 20 ℃）</text>
+
+    <rect x="688" y="246" width="232" height="70" rx="5" fill="#fdf6e8" stroke="#ecd7ab"/>
+    <text x="804" y="264" font-size="11" font-weight="600" text-anchor="middle" fill="#8a5a00">AlarmEngine 状态机</text>
+    <text x="804" y="281" font-size="9.5" text-anchor="middle" fill="#8a5a00">边沿触发：ALARM / RECOVER</text>
+    <text x="804" y="295" font-size="9.5" text-anchor="middle" fill="#8a5a00">600 s 冷却 · 30 min 断采显式恢复</text>
+    <text x="804" y="309" font-size="9.5" text-anchor="middle" fill="#8a5a00">线程锁保护 active 集合</text>
+  </g>
+  <line x1="240" y1="281" x2="252" y2="281" stroke="#3a6ea5" marker-end="url(#aw)"/>
+  <line x1="456" y1="281" x2="468" y2="281" stroke="#3a6ea5" marker-end="url(#aw)"/>
+  <line x1="672" y1="281" x2="684" y2="281" stroke="#3a6ea5" marker-end="url(#aw)"/>
+
+  <line x1="480" y1="330" x2="480" y2="342" stroke="#3a6ea5" marker-end="url(#aw)"/>
+
+  <!-- D 输出 -->
+  <rect x="20" y="348" width="920" height="84" rx="8" fill="#f8fbfe" stroke="#d5e4f3"/>
+  <text x="36" y="368" font-size="12.5" font-weight="700" fill="#1f4e79">D 事件输出（三处落盘 + 日志）</text>
+  <g font-size="10.5" text-anchor="middle">
+    <rect x="40" y="376" width="200" height="44" rx="5" fill="#e8f1fb" stroke="#c7dcf0"/>
+    <text x="140" y="394" fill="#24527a" font-weight="600">ALARM_CSV</text>
+    <text x="140" y="410" font-size="10" fill="#4a6d8c">12 列，追加写</text>
+    <rect x="256" y="376" width="200" height="44" rx="5" fill="#e8f1fb" stroke="#c7dcf0"/>
+    <text x="356" y="394" fill="#24527a" font-weight="600">wind_alarm（PG）</text>
+    <text x="356" y="410" font-size="10" fill="#4a6d8c">事件流水，失败仅记日志</text>
+    <rect x="472" y="376" width="200" height="44" rx="5" fill="#fdf6e8" stroke="#ecd7ab"/>
+    <text x="572" y="394" fill="#8a5a00" font-weight="600">EXCEED_CSV</text>
+    <text x="572" y="410" font-size="10" fill="#8a5a00">越限原始点，供追溯</text>
+    <rect x="688" y="376" width="232" height="44" rx="5" fill="#e8f1fb" stroke="#c7dcf0"/>
+    <text x="804" y="394" fill="#24527a" font-weight="600">控制台日志</text>
+    <text x="804" y="410" font-size="10" fill="#4a6d8c">拉取错误数 / 每轮统计</text>
+  </g>
+
+  <!-- E 闭环 -->
+  <rect x="20" y="450" width="920" height="76" rx="8" fill="#f8fbfe" stroke="#d5e4f3"/>
+  <text x="36" y="470" font-size="12.5" font-weight="700" fill="#1f4e79">E 闭环：重启与断连不丢状态</text>
+  <text x="40" y="492" font-size="10.5" fill="#4a6d8c">进程重启 → 回放 wind_alarm 末条事件 → 恢复 active 与冷却起点 → 继续实时流，不重复告警</text>
+  <text x="40" y="512" font-size="10.5" fill="#4a6d8c">PG 不可用 → 本轮跳过并重连（不崩进程），CSV 与内存状态继续；api 模式失败仅累加错误计数，下轮补拉</text>
+  <path d="M356,420 L356,440 L900,440 L900,320 L924,320" fill="none" stroke="#8a9bb0" stroke-dasharray="5 4" marker-end="url(#awd)"/>
+  <text x="690" y="436" font-size="9.5" fill="#8a9bb0">回放</text>
+</svg>
