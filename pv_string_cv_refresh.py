@@ -20,8 +20,10 @@
   python pv_string_cv_refresh.py 2026-11-12
   python pv_string_cv_refresh.py 2026-11-12 --skip-5min     # 汇总表已刷新，只重跑查询A与更新
   python pv_string_cv_refresh.py 2026-11-12 --dry-run       # 只统计不提交
+  python pv_string_cv_refresh.py 2026-11-12 --export-csv     # 按 SQL §3 查询A 导出支路明细 CSV，不改库
 """
 import argparse
+import codecs
 import json
 import os
 import time
@@ -168,6 +170,204 @@ def update_string_cv(cur):
     return cv_updated, sim_updated
 
 
+def build_query_a_detail_sql(day):
+    """pv_string_branch.sql §3 查询A：支路 × 5 分钟快照明细（含 20 分钟块指标）。"""
+    return f"""
+    WITH ex AS (
+        SELECT DISTINCT
+            upper(inverter_id)                                                    AS dev_key,
+            'STRING_BRANCH' || substring(branch_name FROM '支路([0-9]+)') || '_A' AS point_code
+        FROM pv_inverter_branch_abnormal
+        WHERE branch_name ~ '支路[0-9]+'
+    ),
+    br AS (
+        SELECT
+            device_id,
+            point_code,
+            bucket      AS snap,
+            i_avg       AS i,
+            sample_cnt  AS n,
+            zero_cnt
+        FROM pv_string_branch_5min b
+        WHERE bucket >= {ts(day, DAY_START)}
+          AND bucket <  {ts(day, DAY_END)}
+          AND ({window_clause(day, 'bucket')})
+          AND i_avg IS NOT NULL
+          AND abs(i_avg) > 1
+          AND sample_cnt >= 3
+          AND NOT EXISTS (
+                SELECT 1 FROM ex
+                WHERE ex.dev_key = b.device_id AND ex.point_code = b.point_code
+          )
+    ),
+    ds AS (
+        SELECT
+            device_id,
+            snap,
+            avg(i)         AS i_mean,
+            stddev_samp(i) AS i_std,
+            count(*)       AS branch_cnt,
+            min(i)         AS i_min,
+            max(i)         AS i_max,
+            CASE WHEN count(*) >= 2 AND abs(avg(i)) >= 0.5
+                 THEN NULL ELSE 'low_current' END AS snap_flag
+        FROM br
+        GROUP BY device_id, snap
+    ),
+    bs AS (
+        SELECT
+            b.device_id,
+            b.point_code,
+            b.snap,
+            b.i,
+            b.zero_cnt,
+            d.i_mean,
+            d.i_std,
+            d.branch_cnt,
+            d.i_min,
+            d.i_max,
+            d.snap_flag,
+            to_timestamp(floor(extract(epoch FROM b.snap) / 1200) * 1200) AS block_20m,
+            extract(hour FROM b.snap AT TIME ZONE 'Asia/Shanghai')          AS hh,
+            CASE WHEN d.snap_flag IS NULL
+                 THEN (b.i - d.i_mean) / d.i_mean * 100 END AS dev_pct,
+            CASE WHEN d.snap_flag IS NULL
+                 THEN d.i_std / d.i_mean * 100 END          AS cv_pct,
+            CASE WHEN d.snap_flag IS NULL
+                 THEN (d.i_max - d.i_min) / d.i_mean * 100 END AS range_pct
+        FROM br b
+        JOIN ds d USING (device_id, snap)
+    ),
+    bok AS (
+        SELECT * FROM bs
+        WHERE snap_flag IS NULL AND dev_pct IS NOT NULL
+    ),
+    bb_win AS (
+        SELECT
+            device_id, point_code, block_20m, snap, i, i_mean, dev_pct,
+            first_value(dev_pct) OVER w AS dev_first,
+            last_value(dev_pct)  OVER w AS dev_last,
+            count(dev_pct)       OVER w AS dev_cnt
+        FROM bok
+        WINDOW w AS (
+            PARTITION BY device_id, point_code, block_20m
+            ORDER BY snap
+            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+        )
+    ),
+    bb AS (
+        SELECT
+            device_id,
+            point_code,
+            block_20m,
+            max(dev_first) AS dev_first,
+            max(dev_last)  AS dev_last,
+            max(dev_cnt)   AS dev_cnt,
+            min(snap)      AS block_start,
+            max(snap)      AS block_end,
+            extract(hour FROM block_20m AT TIME ZONE 'Asia/Shanghai') AS hh,
+            CASE WHEN max(dev_cnt) >= 2 THEN max(dev_last) - max(dev_first) END AS chg_20m,
+            CASE WHEN max(dev_cnt) >= 2 THEN (max(dev_last) - max(dev_first)) / 15 END AS rate_pm
+        FROM bb_win
+        GROUP BY device_id, point_code, block_20m
+    ),
+    dblk AS (
+        SELECT
+            device_id,
+            point_code,
+            block_20m,
+            max(i)               AS blk_i_max,
+            min(i)               AS blk_i_min,
+            count(DISTINCT snap) AS blk_snap_cnt
+        FROM bok
+        GROUP BY device_id, point_code, block_20m
+    ),
+    dblk_mean AS (
+        SELECT
+            d.device_id,
+            d.point_code,
+            d.block_20m,
+            d.blk_i_max,
+            d.blk_i_min,
+            d.blk_snap_cnt,
+            avg(s.i_mean) AS blk_mean_i
+        FROM dblk d
+        JOIN (SELECT DISTINCT device_id, snap, block_20m, i_mean FROM bok) s
+          ON s.device_id = d.device_id AND s.block_20m = d.block_20m
+        GROUP BY 1, 2, 3, 4, 5, 6
+    ),
+    dblk_dev AS (
+        SELECT
+            *,
+            CASE WHEN blk_snap_cnt >= 2 AND abs(blk_mean_i) >= 0.5
+                 THEN (blk_i_max - blk_i_min) / blk_mean_i * 100 END AS range20_pct
+        FROM dblk_mean
+    ),
+    st AS (
+        SELECT station_id, station_name, region_company_name
+        FROM pv_station_info
+        WHERE constituent_name = '国电电力'
+        GROUP BY station_id, station_name, region_company_name
+    ),
+    si AS (
+        SELECT DISTINCT ON (upper(inverter_id))
+               upper(inverter_id) AS dev_key,
+               station_id,
+               inverter_name
+        FROM pv_station_invert
+        WHERE inverter_id IS NOT NULL
+          AND inverter_id <> ''
+        ORDER BY upper(inverter_id), station_id, inverter_name
+    )
+    SELECT
+        bs.snap AT TIME ZONE 'Asia/Shanghai'                            AS "时间戳",
+        st.region_company_name                                          AS "公司",
+        st.station_name                                                 AS "场站",
+        si.inverter_name                                                AS "组串编号",
+        bs.device_id                                                    AS "逆变器ID",
+        substring(bs.point_code FROM 'STRING_BRANCH([0-9]+)_A')::int    AS "支路编号",
+        bs.point_code                                                   AS "支路点位",
+        round(bs.i::numeric, 3)                                         AS "支路电流",
+        round(bs.i_mean::numeric, 3)                                    AS "组串平均电流",
+        round(bs.dev_pct::numeric, 2)                                   AS "单支路当前偏差率(%)",
+        round(bs.cv_pct::numeric, 2)                                    AS "组串整体偏差率(%)",
+        round(bs.range_pct::numeric, 2)                                 AS "组串电流相对极差(%)",
+        bb.block_20m AT TIME ZONE 'Asia/Shanghai'                       AS "20分钟块起始",
+        round(bb.chg_20m::numeric, 2)                                   AS "20分钟偏差变化(pp)",
+        round(bb.rate_pm::numeric, 3)                                   AS "偏差率变化速率(%/m)",
+        round(dd.range20_pct::numeric, 2)                               AS "20分钟相对极差(%)"
+    FROM bs
+    LEFT JOIN bb
+           ON bb.device_id = bs.device_id
+          AND bb.point_code = bs.point_code
+          AND bb.block_20m = bs.block_20m
+    LEFT JOIN dblk_dev dd
+           ON dd.device_id = bs.device_id
+          AND dd.point_code = bs.point_code
+          AND dd.block_20m = bs.block_20m
+    LEFT JOIN si ON si.dev_key = bs.device_id
+    LEFT JOIN st ON st.station_id = si.station_id
+    ORDER BY
+        st.region_company_name,
+        st.station_name,
+        si.inverter_name,
+        bs.device_id,
+        bs.snap,
+        substring(bs.point_code FROM 'STRING_BRANCH([0-9]+)_A')::int
+    """
+
+
+def export_query_a_csv(cur, day, path):
+    """按 §3 查询A 导出 CSV（UTF-8 BOM），返回数据行数。"""
+    with open(path, 'wb') as f:
+        f.write(codecs.BOM_UTF8)
+        cur.copy_expert(
+            'COPY (' + build_query_a_detail_sql(day) + ') '
+            "TO STDOUT WITH (FORMAT csv, HEADER true)", f)
+    with open(path, 'rb') as f:
+        return sum(1 for _ in f) - 1
+
+
 def stats(cur):
     cur.execute("""
     SELECT (SELECT count(*) FROM qa) AS qa_rows,
@@ -187,7 +387,11 @@ def main():
     ap = argparse.ArgumentParser(description='按日期刷新 秒级 -> 5分钟汇总 -> 查询A -> string_cv')
     ap.add_argument('day', help='日期，例如 2026-11-12')
     ap.add_argument('--skip-5min', action='store_true', help='跳过汇总表刷新，直接跑查询A与更新')
+    ap.add_argument('--only-5min', action='store_true', help='只生成5分钟汇总表，不跑查询A与更新')
     ap.add_argument('--dry-run', action='store_true', help='只统计不提交（回滚）')
+    ap.add_argument('--export-csv', nargs='?', const='', default=None,
+                    help='按 pv_string_branch.sql §3 查询A 导出支路明细 CSV（可指定路径），'
+                         '默认 pv_queryA_<日期>.csv；导出后直接退出，不改库')
     args = ap.parse_args()
 
     day = datetime.strptime(args.day, '%Y-%m-%d').strftime('%Y-%m-%d')
@@ -199,6 +403,15 @@ def main():
 
     t_all = time.time()
     try:
+        if args.export_csv is not None:
+            out = os.path.abspath(args.export_csv or os.path.join(
+                BASE_DIR, f'pv_queryA_{day.replace("-", "")}.csv'))
+            print(f'导出查询A 明细 {day} -> {out}', flush=True)
+            n = export_query_a_csv(cur, day, out)
+            conn.rollback()
+            print(f'已导出 {n} 行，用时 {time.time() - t_all:.1f}s', flush=True)
+            return
+
         if not args.skip_5min:
             t0 = time.time()
             part = ensure_partition(cur, day)
@@ -213,6 +426,10 @@ def main():
             print(f'[3/4] ANALYZE 完成，用时 {time.time() - t0:.1f}s', flush=True)
         else:
             print('[1-3/4] 已跳过汇总表刷新', flush=True)
+
+        if args.only_5min:
+            print(f'完成（仅 5 分钟汇总表），总用时 {time.time() - t_all:.1f}s', flush=True)
+            return
 
         t0 = time.time()
         build_qa(cur, day)
