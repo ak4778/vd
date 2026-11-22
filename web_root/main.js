@@ -988,6 +988,7 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
   const [hist, setHist] = useState([]);        // 历史页数据（page >= 2）
   const [histLoading, setHistLoading] = useState(false);
   const [histError, setHistError] = useState('');
+  const [histTick, setHistTick] = useState(0);  // 过滤模式下有新告警时触发第 1 页重取
   // 过滤：测点精确匹配（下拉，选项从已见告警累积）+ 事件类型；跨页生效
   const [pointFilter, setPointFilter] = useState('');
   const [eventFilter, setEventFilter] = useState('');
@@ -1031,6 +1032,9 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
   const rxRef = useRef(0);
   rxRef.current = alarmRx;
   const baseRxRef = useRef(0);
+  // 过滤模式第 1 页的实时重取节奏：待触发的计时器 + 上次重取时间（节流用）
+  const histTickTimerRef = useRef(null);
+  const lastHistFetchRef = useRef(0);
 
   // 告警类型过滤生效条件：全选 = 不过滤；部分勾选 = 只显示选中类型；
   // 全部取消 = 0 条（与视频设备「设备类型」清空全部一致）
@@ -1077,11 +1081,12 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
   // 按日期/区间导出 CSV：走 GET 附件下载，cookie 自动携带，无需前端拼接内容
   const exportCsv = () => {
     let q = '';
+    const fixed = '发动机驱动端-非驱动端-绕组报警.xlsx';
     let name = '';
     if (exportMode === 'day') {
       if (!exportDate) return;
       q = `date=${encodeURIComponent(exportDate)}`;
-      name = `alarms_${exportDate}.csv`;
+      name = `${exportDate}_${fixed}`;
     } else {
       const st = toApiTs(exportStart);
       const en = toApiTs(exportEnd);
@@ -1090,7 +1095,7 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
         return;
       }
       q = `start=${encodeURIComponent(st)}&end=${encodeURIComponent(en)}`;
-      name = `alarms_${st.replace(/[ :]/g, '-')}_${en.replace(/[ :]/g, '-')}.csv`;
+      name = `${st.replace(/[ :]/g, '-')}_${en.replace(/[ :]/g, '-')}_${fixed}`;
     }
     const a = document.createElement('a');
     a.href = `api/alarms/export?${q}`;
@@ -1153,6 +1158,27 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
     if (add > 0) setFilteredRx(c => c + add);
   }, [items, pointFilter, eventFilter, alarmTypeKey, searchKw]);
 
+  // 过滤状态下第 1 页保持实时：有新匹配行时重取第 1 页。
+  // 这里必须用「节流」而不是防抖：持续插入告警时防抖计时器会被不断重置，
+  // 导致过滤视图永远等不到刷新（表现为一直是历史快照）。节流保证最迟 1s 刷新一次。
+  useEffect(() => {
+    if (!filterActive || page !== 1 || filteredRx <= 0) return;
+    if (histTickTimerRef.current !== null) return;  // 已排队：合并期间到达的新行
+    const wait = Math.max(0, 1000 - (Date.now() - lastHistFetchRef.current));
+    histTickTimerRef.current = setTimeout(() => {
+      histTickTimerRef.current = null;
+      lastHistFetchRef.current = Date.now();
+      setHistTick(x => x + 1);
+    }, wait);
+  }, [filteredRx, filterActive, page, pointFilter, eventFilter, alarmTypeKey, searchKw]);
+  // 组件卸载时清理尚未触发的重取计时器
+  useEffect(() => () => {
+    if (histTickTimerRef.current !== null) {
+      clearTimeout(histTickTimerRef.current);
+      histTickTimerRef.current = null;
+    }
+  }, []);
+
   // 总数：进入页面 / WS 重连成功 / 过滤条件变化时向服务端取一次；失败时用已加载条数兜底
   useEffect(() => {
     fetchWithTimeout(`api/alarms/get?page=1&pageSize=1${filterQuery()}&t=${Date.now()}`, { method: 'GET', cache: 'no-cache', credentials: 'include' })
@@ -1180,23 +1206,25 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
         if (cancelled) return;
         setHist(r.items || []);
         if (typeof r.total === 'number') { baseRxRef.current = rxRef.current; setTotal(r.total); }
+        // 后台重取已包含最新行，清掉增量计数，避免总数重复累加
+        setFilteredRx(0);
         setHistLoading(false);
       })
       .catch(() => {
         if (cancelled) return;
-        setHist([]);
+        // 后台刷新失败时保留已有行，只有首次加载失败才落到空态提示
         setHistError('历史数据加载失败，请稍后重试');
         setHistLoading(false);
       });
     return () => { cancelled = true; };
-  }, [page, filterActive, pointFilter, eventFilter, alarmTypeKey, searchKw]);
+  }, [page, filterActive, pointFilter, eventFilter, alarmTypeKey, searchKw, histTick]);
 
-  // 自动滚动：items 前插新告警后把滚动条拉回顶部（仅实时页=第1页且无过滤）
+  // 自动滚动：第 1 页有新数据（实时前插 / 过滤后台重取）时把滚动条拉回顶部
   useEffect(() => {
-    if (page !== 1 || filterActive || !autoScroll) return;
+    if (page !== 1 || !autoScroll) return;
     const el = scrollRef.current;
     if (el) el.scrollTop = 0;
-  }, [items, page, filterActive, autoScroll]);
+  }, [items, hist, page, autoScroll]);
 
   const toggleAutoScroll = checked => {
     setAutoScroll(checked);
@@ -1210,8 +1238,9 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
     }
   };
 
-  // 冻结边界：取消自动滚动后，id 大于边界的告警先不插入表格，只累计计数
-  const frozenBound = autoScroll
+  // 冻结边界：取消自动滚动后，id 大于边界的告警先不插入表格，只累计计数；
+  // 过滤视图始终跟随最新（由后台重取实现），不做冻结
+  const frozenBound = (autoScroll || filterActive)
     ? null
     : (frozenMaxId === null ? (items.length ? items[0].id : 0) : frozenMaxId);
   const visibleAll = frozenBound === null ? items : items.filter(x => x.id <= frozenBound);
@@ -1240,8 +1269,8 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
     : total + Math.max(0, alarmRx - baseRxRef.current);
   const shownTotal = (page === 1 && !filterActive) ? Math.max(liveTotal, filtered.length) : Math.max(liveTotal, hist.length);
   const latest = (page === 1 && !filterActive) ? (items.length > 0 ? items[0].ts : '') : (hist.length > 0 ? hist[0].ts : '');
-  const realtimeMode = page === 1 && !filterActive;
-  const showBanner = realtimeMode && pendingNew > 0;
+  const realtimeMode = page === 1 && !filterActive;   // 无过滤的第 1 页为纯内存实时视图
+  const showBanner = page === 1 && pendingNew > 0;
   return html`
   <div class="flex-1 min-h-0 flex flex-col p-2">
     <div class="ind-panel flex-1 min-h-0 flex flex-col">
@@ -1254,8 +1283,8 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
       ${!wsOk && authLost && html`<button type="button" class="alarm-reauth text-sm px-2 py-0.5 rounded border border-amber-400 text-amber-600 hover:bg-amber-50" onclick=${onReauth}>重新登录<//>`}
       <span class="text-sm ind-dim">共 ${shownTotal} 条</span>
       ${latest && html`<span class="text-sm ind-dim">最新: ${latest}<//>`}
-      ${!realtimeMode && html`<span class="alarm-hist-hint" title="新告警仍会实时进入第 1 页">历史浏览中<//>`}
-      <label class="alarm-auto-scroll ${!realtimeMode ? 'opacity-40' : ''}" title=${!realtimeMode ? '仅第 1 页无过滤时实时视图可用' : '勾选：新告警自动滚到顶部；取消：冻结当前列表，只提示新告警数量'}>
+      ${page > 1 && html`<span class="alarm-hist-hint" title="翻页后为历史快照，返回第 1 页恢复实时">历史浏览中<//>`}
+      <label class="alarm-auto-scroll ${!realtimeMode ? 'opacity-40' : ''}" title=${!realtimeMode ? (page === 1 ? '过滤视图自动跟随最新数据' : '仅第 1 页可用') : '勾选：新告警自动滚到顶部；取消：冻结当前列表，只提示新告警数量'}>
         <svg class="turbine-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
           <path d="M12 12.6 L12 21" />
           <path d="M9 21 L15 21" />
@@ -1266,7 +1295,7 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
             <circle cx="12" cy="11" r="1.4" />
           </g>
         </svg>
-        <input type="checkbox" checked=${autoScroll} disabled=${!realtimeMode} onchange=${e => toggleAutoScroll(e.target.checked)} />
+        <input type="checkbox" checked=${realtimeMode ? autoScroll : true} disabled=${!realtimeMode} onchange=${e => toggleAutoScroll(e.target.checked)} />
         自动滚动
       <//>
     <//>

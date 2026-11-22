@@ -970,7 +970,7 @@ int pg_get_alarms_range(const char *start, const char *end,
       " FROM wind_alarm"
       " WHERE ts >= $1::timestamp"
       " AND ts < ($2::timestamp + interval '1 second')"
-      " ORDER BY id ASC LIMIT $3";
+      " ORDER BY ts ASC, id ASC LIMIT $3";
 
   static const char *SQL_ALARM_ONLY =
       "SELECT id, event,"
@@ -986,7 +986,7 @@ int pg_get_alarms_range(const char *start, const char *end,
       " WHERE ts >= $1::timestamp"
       " AND ts < ($2::timestamp + interval '1 second')"
       " AND event = 'ALARM'"
-      " ORDER BY id ASC LIMIT $3";
+      " ORDER BY ts ASC, id ASC LIMIT $3";
 
   // CSV 导出固定只取 ALARM（不受 event_type 开关影响）
   const char *sql = SQL_ALARM_ONLY;

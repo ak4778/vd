@@ -683,6 +683,17 @@ static void push_result(unsigned long conn_id, int http_status,
   push_result_headers(conn_id, http_status, body, len, NULL);
 }
 
+static const char *status_text(int code) {
+  switch (code) {
+    case 200: return "OK";
+    case 400: return "Bad Request";
+    case 404: return "Not Found";
+    case 500: return "Internal Server Error";
+    case 503: return "Service Unavailable";
+    default: return "OK";
+  }
+}
+
 static void dispatch_results(void *arg) {
   struct mg_mgr *mgr = (struct mg_mgr *) arg;
   results_lock();
@@ -695,9 +706,17 @@ static void dispatch_results(void *arg) {
     struct mg_connection *c;
     for (c = mgr->conns; c != NULL; c = c->next) {
       if (c->id == r->conn_id) {
-        mg_http_reply(c, r->http_status,
-                      r->headers != NULL ? r->headers : s_json_header,
-                      "%.*s", (int) r->len, r->body);
+        // 不能用 mg_http_reply("%.*s")：它按 C 字符串格式化，二进制内容
+        // （如 XLSX 的 ZIP 包头）遇到 \0 会被截断。这里手动写头 + mg_send
+        // 按长度发送原始字节。
+        mg_printf(c, "HTTP/1.1 %d %s\r\n%s", r->http_status,
+                  status_text(r->http_status),
+                  r->headers != NULL ? r->headers : s_json_header);
+        mg_printf(c, "Content-Length: %lu\r\n\r\n", (unsigned long) r->len);
+        if (r->body != NULL && r->len > 0) mg_send(c, r->body, r->len);
+        // 与 mg_http_reply 末尾一致：标记响应完成。漏掉这一步会导致
+        // 浏览器认为响应尚未结束，标签页一直转圈。
+        c->pfn_data = NULL;
         break;
       }
     }
@@ -1464,16 +1483,18 @@ static void handle_alarms_get(struct mg_connection *c,
   start_thread(alarm_page_thread, w);
 }
 
-// ---- 告警 CSV 导出（/api/alarms/export?date=... 或 start=...&end=...，仅 PG 模式） ----
-// 与分页查询同一异步模型：worker 线程按时间区间查库 -> 组装 CSV（UTF-8 BOM）
+// ---- 告警 XLSX 导出（/api/alarms/export?date=... 或 start=...&end=...，仅 PG 模式） ----
+// 与分页查询同一异步模型：worker 线程按时间区间查库 -> 组装 XLSX（OOXML 包）
 // -> 事件循环线程带附件响应头回写。行数上限防止超大导出耗尽内存。
 #define ALARM_EXPORT_MAX 20000  // 单次导出行数上限（超出部分截断）
+// 导出文件名固定后缀（前缀为所选日期/时间区间）
+#define ALARM_EXPORT_NAME "发动机驱动端-非驱动端-绕组报警"
 
 struct alarm_export_work {
   unsigned long long conn_id;
   char start[24];  // 归一化 'YYYY-MM-DD HH:MM:SS'
   char end[24];    // 归一化 'YYYY-MM-DD HH:MM:SS'
-  char fname[96];  // 下载文件名（仅含日期/时间，无特殊字符）
+  char fname[128]; // 下载文件名（日期/区间 + 固定中文后缀）
 };
 
 // 动态增长字符串缓冲：失败后置 failed，后续写入全部跳过
@@ -1513,69 +1534,315 @@ static void csv_put(struct csv_out *o, const char *s, size_t n) {
   o->buf[o->len] = '\0';
 }
 
-static void csv_put_str(struct csv_out *o, const char *s) {
-  csv_put(o, s, strlen(s));
+// ===== XLSX 导出：生成真正的 OOXML 包（ZIP store），避免 Excel 的扩展名/格式不一致提示 =====
+struct zip_entry {
+  const char *name;
+  unsigned int crc;  // 运行中的 CRC32（初始 0xFFFFFFFF，收尾时取反）
+  unsigned int len;
+  size_t hdr;        // 本地文件头在输出缓冲中的偏移
+};
+
+struct zip_writer {
+  struct csv_out out;
+  struct zip_entry ent[8];
+  int n;
+  unsigned int tab[256];  // 每实例一份 CRC 表，避免多线程导出时静态初始化竞争
+};
+
+static void zw_u16(struct csv_out *o, unsigned v) {
+  char b[2];
+  b[0] = (char) (v & 0xff);
+  b[1] = (char) ((v >> 8) & 0xff);
+  csv_put(o, b, 2);
 }
 
-// RFC4180 字段转义：含逗号/引号/换行时整体加引号，内部引号双写
-static void csv_field(struct csv_out *o, const char *s) {
-  int quote = 0;
-  for (const char *p = s; *p != '\0'; p++) {
-    if (*p == ',' || *p == '"' || *p == '\n' || *p == '\r') {
-      quote = 1;
-      break;
+static void zw_u32(struct csv_out *o, unsigned v) {
+  char b[4];
+  b[0] = (char) (v & 0xff);
+  b[1] = (char) ((v >> 8) & 0xff);
+  b[2] = (char) ((v >> 16) & 0xff);
+  b[3] = (char) ((v >> 24) & 0xff);
+  csv_put(o, b, 4);
+}
+
+static void zip_begin(struct zip_writer *z, const char *name) {
+  struct zip_entry *e = &z->ent[z->n++];
+  size_t nl = strlen(name);
+  e->name = name;
+  e->crc = 0xFFFFFFFFu;
+  e->len = 0;
+  e->hdr = z->out.len;
+  // 本地文件头（store，无压缩；bit11 标记文件名为 UTF-8）
+  zw_u32(&z->out, 0x04034b50u);
+  zw_u16(&z->out, 20);      // version needed
+  zw_u16(&z->out, 0x0800);  // flags: UTF-8 name
+  zw_u16(&z->out, 0);       // method: store
+  zw_u16(&z->out, 0);       // mod time
+  zw_u16(&z->out, 23925);   // mod date: 2026-11-21
+  zw_u32(&z->out, 0);       // crc（收尾回填）
+  zw_u32(&z->out, 0);       // compressed size（收尾回填）
+  zw_u32(&z->out, 0);       // uncompressed size（收尾回填）
+  zw_u16(&z->out, (unsigned) nl);
+  zw_u16(&z->out, 0);
+  csv_put(&z->out, name, nl);
+}
+
+static void zip_put(struct zip_writer *z, const char *d, size_t n) {
+  struct zip_entry *e = &z->ent[z->n - 1];
+  unsigned int c = e->crc;
+  for (size_t i = 0; i < n; i++) {
+    c = z->tab[(c ^ (unsigned char) d[i]) & 0xff] ^ (c >> 8);
+  }
+  e->crc = c;
+  e->len += (unsigned int) n;
+  csv_put(&z->out, d, n);
+}
+
+static void zip_str(struct zip_writer *z, const char *s) {
+  zip_put(z, s, strlen(s));
+}
+
+static void zip_end(struct zip_writer *z) {
+  struct zip_entry *e = &z->ent[z->n - 1];
+  unsigned int crc = e->crc ^ 0xFFFFFFFFu;
+  size_t p = e->hdr + 30 + strlen(e->name);
+  if (z->out.failed || p + 12 > z->out.len) return;
+  unsigned char *h = (unsigned char *) z->out.buf + e->hdr + 14;
+  h[0] = (unsigned char) (crc & 0xff);
+  h[1] = (unsigned char) ((crc >> 8) & 0xff);
+  h[2] = (unsigned char) ((crc >> 16) & 0xff);
+  h[3] = (unsigned char) ((crc >> 24) & 0xff);
+  h[4] = (unsigned char) (e->len & 0xff);
+  h[5] = (unsigned char) ((e->len >> 8) & 0xff);
+  h[6] = (unsigned char) ((e->len >> 16) & 0xff);
+  h[7] = (unsigned char) ((e->len >> 24) & 0xff);
+  h[8] = h[4];
+  h[9] = h[5];
+  h[10] = h[6];
+  h[11] = h[7];
+}
+
+static int zip_finish(struct zip_writer *z, char **body, size_t *len) {
+  size_t cd = z->out.len;
+  for (int i = 0; i < z->n; i++) {
+    struct zip_entry *e = &z->ent[i];
+    unsigned int crc = e->crc ^ 0xFFFFFFFFu;
+    size_t nl = strlen(e->name);
+    zw_u32(&z->out, 0x02014b50u);
+    zw_u16(&z->out, 20);      // version made by
+    zw_u16(&z->out, 20);      // version needed
+    zw_u16(&z->out, 0x0800);  // flags
+    zw_u16(&z->out, 0);       // method
+    zw_u16(&z->out, 0);       // time
+    zw_u16(&z->out, 23925);   // date
+    zw_u32(&z->out, crc);
+    zw_u32(&z->out, e->len);
+    zw_u32(&z->out, e->len);
+    zw_u16(&z->out, (unsigned) nl);
+    zw_u16(&z->out, 0);       // extra len
+    zw_u16(&z->out, 0);       // comment len
+    zw_u16(&z->out, 0);       // disk start
+    zw_u16(&z->out, 0);       // internal attrs
+    zw_u32(&z->out, 0);       // external attrs
+    zw_u32(&z->out, (unsigned) e->hdr);
+    csv_put(&z->out, e->name, nl);
+  }
+  size_t cd_size = z->out.len - cd;
+  zw_u32(&z->out, 0x06054b50u);
+  zw_u16(&z->out, 0);
+  zw_u16(&z->out, 0);
+  zw_u16(&z->out, (unsigned) z->n);
+  zw_u16(&z->out, (unsigned) z->n);
+  zw_u32(&z->out, (unsigned) cd_size);
+  zw_u32(&z->out, (unsigned) cd);
+  zw_u16(&z->out, 0);
+  if (z->out.failed) {
+    free(z->out.buf);
+    return 0;
+  }
+  *body = z->out.buf;
+  *len = z->out.len;
+  return 1;
+}
+
+static void xlsx_escaped(struct zip_writer *z, const char *s) {
+  const char *p = s;
+  while (*p != '\0') {
+    const char *q = p;
+    while (*q != '\0' && *q != '&' && *q != '<' && *q != '>' && *q != '"' &&
+           *q != '\'') {
+      q++;
     }
+    if (q > p) zip_put(z, p, (size_t) (q - p));
+    if (*q == '\0') break;
+    switch (*q) {
+      case '&': zip_str(z, "&amp;"); break;
+      case '<': zip_str(z, "&lt;"); break;
+      case '>': zip_str(z, "&gt;"); break;
+      case '"': zip_str(z, "&quot;"); break;
+      default: zip_str(z, "&apos;"); break;
+    }
+    p = q + 1;
   }
-  if (!quote) {
-    csv_put_str(o, s);
-    return;
-  }
-  csv_put(o, "\"", 1);
-  for (const char *p = s; *p != '\0'; p++) {
-    if (*p == '"') csv_put(o, "\"\"", 2);
-    else csv_put(o, p, 1);
-  }
-  csv_put(o, "\"", 1);
 }
 
-// 数值列：NULL/NaN/Infinity 输出空单元格（Excel 显示为空）
-static void csv_num(struct csv_out *o, double v, const char *fmt) {
-  if (!isfinite(v)) return;
-  char tmp[64];
-  snprintf(tmp, sizeof(tmp), fmt, v);
-  csv_put_str(o, tmp);
+static void xlsx_ref(char *buf, size_t cap, int row, int col) {
+  snprintf(buf, cap, "%c%d", (char) ('A' + col), row);
 }
 
-static void csv_sep(struct csv_out *o) {
-  csv_put(o, ",", 1);
+static void xlsx_cell_str(struct zip_writer *z, int row, int col,
+                          const char *v) {
+  if (v == NULL || v[0] == '\0') return;  // 空值直接省略单元格
+  char ref[16];
+  xlsx_ref(ref, sizeof(ref), row, col);
+  zip_str(z, "<c r=\"");
+  zip_str(z, ref);
+  zip_str(z, "\" t=\"inlineStr\"><is><t>");
+  xlsx_escaped(z, v);
+  zip_str(z, "</t></is></c>");
+}
+
+static void xlsx_cell_num(struct zip_writer *z, int row, int col, double v) {
+  if (!isfinite(v)) return;  // NULL/NaN/Infinity 输出空单元格
+  char ref[16], tmp[64];
+  xlsx_ref(ref, sizeof(ref), row, col);
+  snprintf(tmp, sizeof(tmp), "%.2f", v);
+  zip_str(z, "<c r=\"");
+  zip_str(z, ref);
+  zip_str(z, "\"><v>");
+  zip_str(z, tmp);
+  zip_str(z, "</v></c>");
 }
 
 // 导出固定 12 列，不输出「事件类型」「规则」两列（与 event_type 配置无关）
-static void csv_alarm_row(struct csv_out *o, const struct ds_alarm *r) {
-  csv_field(o, r->ts);
-  csv_sep(o);
-  csv_field(o, r->region_company_name);
-  csv_sep(o);
-  csv_field(o, r->station_name);
-  csv_sep(o);
-  csv_field(o, r->device_id);
-  csv_sep(o);
-  csv_field(o, r->device_name);
-  csv_sep(o);
-  csv_field(o, r->point_code);
-  csv_sep(o);
-  csv_field(o, r->point_name);
-  csv_sep(o);
-  csv_num(o, r->temperature, "%.2f");
-  csv_sep(o);
-  csv_num(o, r->range_1h, "%.2f");
-  csv_sep(o);
-  csv_num(o, r->range_20s, "%.2f");
-  csv_sep(o);
-  csv_field(o, r->alarm_type);
-  csv_sep(o);
-  csv_num(o, r->alarm_value, "%.2f");
-  csv_put(o, "\r\n", 2);
+static void xlsx_alarm_row(struct zip_writer *z, int row,
+                           const struct ds_alarm *r) {
+  char tag[24];
+  snprintf(tag, sizeof(tag), "<row r=\"%d\">", row);
+  zip_str(z, tag);
+  xlsx_cell_str(z, row, 0, r->ts);
+  xlsx_cell_str(z, row, 1, r->region_company_name);
+  xlsx_cell_str(z, row, 2, r->station_name);
+  xlsx_cell_str(z, row, 3, r->device_id);
+  xlsx_cell_str(z, row, 4, r->device_name);
+  xlsx_cell_str(z, row, 5, r->point_code);
+  xlsx_cell_str(z, row, 6, r->point_name);
+  xlsx_cell_num(z, row, 7, r->temperature);
+  xlsx_cell_num(z, row, 8, r->range_1h);
+  xlsx_cell_num(z, row, 9, r->range_20s);
+  xlsx_cell_str(z, row, 10, r->alarm_type);
+  xlsx_cell_num(z, row, 11, r->alarm_value);
+  zip_str(z, "</row>");
+}
+
+static int build_alarm_xlsx(const struct ds_alarm *rows, int n, char **body,
+                            size_t *len) {
+  static const char *head[12] = {
+      "时间戳", "公司",   "场站",     "机组编号",   "机组名称", "测点编码",
+      "测点名称", "温度", "1小时温度极差", "20秒温度极差", "报警类型", "报警值"};
+  struct zip_writer z;
+  memset(&z, 0, sizeof(z));
+  for (unsigned int i = 0; i < 256; i++) {
+    unsigned int c = i;
+    for (int k = 0; k < 8; k++) {
+      c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+    }
+    z.tab[i] = c;
+  }
+
+  zip_begin(&z, "[Content_Types].xml");
+  zip_str(&z,
+          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+          "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/"
+          "content-types\">"
+          "<Default Extension=\"rels\" ContentType=\"application/"
+          "vnd.openxmlformats-package.relationships+xml\"/>"
+          "<Default Extension=\"xml\" ContentType=\"application/xml\"/>"
+          "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/"
+          "vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>"
+          "<Override PartName=\"/xl/worksheets/sheet1.xml\" "
+          "ContentType=\"application/vnd.openxmlformats-officedocument."
+          "spreadsheetml.worksheet+xml\"/>"
+          "<Override PartName=\"/xl/styles.xml\" ContentType=\"application/"
+          "vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>"
+          "</Types>");
+  zip_end(&z);
+
+  zip_begin(&z, "_rels/.rels");
+  zip_str(&z,
+          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+          "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/"
+          "2006/relationships\">"
+          "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/"
+          "officeDocument/2006/relationships/officeDocument\" "
+          "Target=\"xl/workbook.xml\"/>"
+          "</Relationships>");
+  zip_end(&z);
+
+  zip_begin(&z, "xl/workbook.xml");
+  zip_str(&z,
+          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+          "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/"
+          "2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/"
+          "officeDocument/2006/relationships\">"
+          "<sheets><sheet name=\"告警数据\" sheetId=\"1\" r:id=\"rId1\"/>"
+          "</sheets></workbook>");
+  zip_end(&z);
+
+  zip_begin(&z, "xl/_rels/workbook.xml.rels");
+  zip_str(&z,
+          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+          "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/"
+          "2006/relationships\">"
+          "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/"
+          "officeDocument/2006/relationships/worksheet\" "
+          "Target=\"worksheets/sheet1.xml\"/>"
+          "<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/"
+          "officeDocument/2006/relationships/styles\" "
+          "Target=\"styles.xml\"/>"
+          "</Relationships>");
+  zip_end(&z);
+
+  zip_begin(&z, "xl/styles.xml");
+  zip_str(&z,
+          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+          "<styleSheet xmlns=\"http://schemas.openxmlformats.org/"
+          "spreadsheetml/2006/main\">"
+          "<fonts count=\"1\"><font><sz val=\"11\"/>"
+          "<name val=\"Calibri\"/><family val=\"2\"/>"
+          "</font></fonts>"
+          "<fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill>"
+          "<fill><patternFill patternType=\"gray125\"/></fill></fills>"
+          "<borders count=\"1\"><border><left/><right/><top/><bottom/>"
+          "<diagonal/></border></borders>"
+          "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" "
+          "fillId=\"0\" borderId=\"0\"/></cellStyleXfs>"
+          "<cellXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" "
+          "borderId=\"0\" xfId=\"0\"/></cellXfs>"
+          "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" "
+          "builtinId=\"0\"/></cellStyles>"
+          "</styleSheet>");
+  zip_end(&z);
+
+  zip_begin(&z, "xl/worksheets/sheet1.xml");
+  zip_str(&z,
+          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>"
+          "<worksheet xmlns=\"http://schemas.openxmlformats.org/"
+          "spreadsheetml/2006/main\">");
+  {
+    char dim[64];
+    snprintf(dim, sizeof(dim), "<dimension ref=\"A1:L%d\"/>", n + 1);
+    zip_str(&z, dim);
+  }
+  zip_str(&z, "<sheetData>");
+  zip_str(&z, "<row r=\"1\">");
+  for (int c = 0; c < 12; c++) xlsx_cell_str(&z, 1, c, head[c]);
+  zip_str(&z, "</row>");
+  for (int i = 0; i < n; i++) xlsx_alarm_row(&z, i + 2, &rows[i]);
+  zip_str(&z, "</sheetData></worksheet>");
+  zip_end(&z);
+
+  return zip_finish(&z, body, len);
 }
 
 static void alarm_export_thread(void *param) {
@@ -1594,35 +1861,27 @@ static void alarm_export_thread(void *param) {
     status = 503;
     body = strdup("{\"error\":\"Alarm export unsupported or query failed\"}");
   } else {
-    struct csv_out o;
-    memset(&o, 0, sizeof(o));
-    csv_put(&o, "\xEF\xBB\xBF", 3);  // UTF-8 BOM：Excel 直接识别中文
-    csv_put_str(&o, "时间戳,公司,场站,机组编号,机组名称,"
-                    "测点编码,测点名称,温度,1小时温度极差,"
-                    "20秒温度极差,报警类型,报警值\r\n");
-    for (int i = 0; i < n; i++) csv_alarm_row(&o, &rows[i]);
-    if (o.failed) {
-      free(o.buf);
+    // 生成真正的 .xlsx（OOXML + ZIP store），Excel 打开不再提示格式与扩展名不一致
+    if (!build_alarm_xlsx(rows, n, &body, &len)) {
       status = 500;
       body = strdup("{\"error\":\"Memory allocation failed\"}");
-    } else {
-      body = o.buf;
-      len = o.len;
+      len = 0;
     }
   }
   if (rows != NULL) free(rows);
 
-  // 附件响应头：浏览器直接下载为 alarms_<date>.csv
+  // 附件响应头：浏览器按「日期/区间 + 固定中文后缀」下载 .xlsx
   if (status == 200) {
-    headers = (char *) malloc(256);
+    headers = (char *) malloc(384);
     if (headers == NULL) {
       if (body != NULL) free(body);
       status = 500;
       body = strdup("{\"error\":\"Memory allocation failed\"}");
       len = 0;
     } else {
-      snprintf(headers, 256,
-               "Content-Type: text/csv; charset=utf-8\r\n"
+      snprintf(headers, 384,
+               "Content-Type: application/vnd.openxmlformats-officedocument."
+               "spreadsheetml.sheet\r\n"
                "Content-Disposition: attachment; filename=\"%s\"\r\n"
                "Cache-Control: no-cache\r\n",
                w->fname);
@@ -1656,7 +1915,12 @@ static int parse_ts_param(const char *s, int is_end, char *out, size_t cap) {
           (s[3] - '0');
   int m = (s[5] - '0') * 10 + (s[6] - '0');
   int d = (s[8] - '0') * 10 + (s[9] - '0');
-  if (y < 2000 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) return 0;
+  if (y < 2000 || y > 2100 || m < 1 || m > 12 || d < 1) return 0;
+  static const int month_days[12] = {31, 28, 31, 30, 31, 30,
+                                     31, 31, 30, 31, 30, 31};
+  int max_day = month_days[m - 1];
+  if (m == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0)) max_day = 29;
+  if (d > max_day) return 0;
 
   int hh = 0, mm = 0, ss = 0;
   if (len == 19) {
@@ -1695,7 +1959,7 @@ static void make_export_filename(char *out, size_t cap, const char *start,
     b[j++] = (end[i] == ' ' || end[i] == ':') ? '-' : end[i];
   }
   b[j] = '\0';
-  snprintf(out, cap, "alarms_%s_%s.csv", a, b);
+  snprintf(out, cap, "%s_%s_%s.xlsx", a, b, ALARM_EXPORT_NAME);
 }
 
 static void handle_alarms_export(struct mg_connection *c,
@@ -1743,8 +2007,9 @@ static void handle_alarms_export(struct mg_connection *c,
   snprintf(w->start, sizeof(w->start), "%s", norm_start);
   snprintf(w->end, sizeof(w->end), "%s", norm_end);
   if (date[0] != '\0') {
-    // 单日模式文件名简洁：alarms_YYYY-MM-DD.csv
-    snprintf(w->fname, sizeof(w->fname), "alarms_%s.csv", date);
+    // 单日模式：YYYY-MM-DD_发动机驱动端-非驱动端-绕组报警.xlsx
+    snprintf(w->fname, sizeof(w->fname), "%s_%s.xlsx", date,
+             ALARM_EXPORT_NAME);
   } else {
     make_export_filename(w->fname, sizeof(w->fname), norm_start, norm_end);
   }
