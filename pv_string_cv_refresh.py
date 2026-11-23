@@ -1,25 +1,18 @@
 # -*- coding: utf-8 -*-
-"""按日期刷新光伏支路全链路：秒级原始 -> 5 分钟汇总 -> 查询A -> string_cv。
+"""按日期生成光伏支路 5 分钟汇总，或按查询A 导出支路明细 CSV（不再更新 string_cv）。
 
-链路（全部幂等，可重复执行）：
+链路（幂等，可重复执行）：
   1) pv_string_branch_5min 当日分区兜底（pv_string_branch_5min_ensure_partition）
   2) 从 pv_string_branch 聚合当日 10:00-16:00 写入 pv_string_branch_5min（ON CONFLICT 覆盖）
   3) ANALYZE pv_string_branch_5min
-  4) 查询 A：设备 × 5 分钟快照 的组串整体偏差率 cv_pct
-  5) 更新 string_cv.cv_pct，并重算 similarity_pct
 
-口径与 pv_string_branch.sql 保持一致：
+汇总口径与 pv_string_branch.sql 保持一致：
   - 剔除 |point_value| <= 1（含 0、±1）；zero_cnt 仅计数，不参与均值
   - 支路均值 |i_avg| > 1（不设上限）、单桶有效采样 >= 3
   - 剔除 pv_inverter_branch_abnormal 已标记的逆变器+支路
-  - 快照支路数 < 2 或 |组串均值| < 0.5A 记 low_current，cv_pct 记 NULL
-  - cv_pct = stddev_samp(i_avg) / avg(i_avg) * 100（带符号，不取 abs）
-  - similarity_pct = GREATEST(0, 100 - abs(dispersion_ratio - cv_pct))
 
 用法：
-  python pv_string_cv_refresh.py 2026-11-12
-  python pv_string_cv_refresh.py 2026-11-12 --skip-5min     # 汇总表已刷新，只重跑查询A与更新
-  python pv_string_cv_refresh.py 2026-11-12 --dry-run       # 只统计不提交
+  python pv_string_cv_refresh.py 2026-11-12                 # 生成当日 5 分钟汇总
   python pv_string_cv_refresh.py 2026-11-12 --export-csv     # 按 SQL §3 查询A 导出支路明细 CSV，不改库
 """
 import argparse
@@ -101,73 +94,6 @@ def refresh_5min(cur, day):
     """
     cur.execute(sql)
     return cur.rowcount
-
-
-def build_qa(cur, day):
-    """查询 A：设备 × 5 分钟快照 的 cv_pct，落临时表 qa。"""
-    sql = f"""
-    CREATE TEMP TABLE qa ON COMMIT PRESERVE ROWS AS
-    WITH ex AS (
-        SELECT DISTINCT upper(inverter_id) AS dev_key,
-               'STRING_BRANCH' || substring(branch_name FROM '支路([0-9]+)') || '_A' AS point_code
-        FROM pv_inverter_branch_abnormal
-        WHERE branch_name ~ '支路[0-9]+'
-    ),
-    br AS (
-        SELECT b.device_id, b.point_code, b.bucket AS snap, b.i_avg AS i
-        FROM pv_string_branch_5min b
-        WHERE b.bucket >= {ts(day, DAY_START)}
-          AND b.bucket <  {ts(day, DAY_END)}
-          AND ({window_clause(day, 'b.bucket')})
-          AND b.i_avg IS NOT NULL
-          AND abs(b.i_avg) > 1
-          AND b.sample_cnt >= 3
-          AND NOT EXISTS (
-                SELECT 1 FROM ex
-                WHERE ex.dev_key = b.device_id AND ex.point_code = b.point_code
-          )
-    ),
-    ds AS (
-        SELECT device_id, snap,
-               avg(i)         AS i_mean,
-               stddev_samp(i) AS i_std,
-               count(*)       AS branch_cnt,
-               CASE WHEN count(*) >= 2 AND abs(avg(i)) >= 0.5
-                    THEN NULL ELSE 'low_current' END AS snap_flag
-        FROM br
-        GROUP BY device_id, snap
-    )
-    SELECT device_id, snap,
-           CASE WHEN snap_flag IS NULL THEN i_std / i_mean * 100 END AS cv_pct
-    FROM ds
-    """
-    cur.execute('DROP TABLE IF EXISTS qa')
-    cur.execute(sql)
-
-
-def update_string_cv(cur):
-    """按 (inverter_id, 5分钟桶) 对齐全量更新 cv_pct，再重算 similarity_pct。"""
-    cur.execute("""
-    UPDATE string_cv s
-    SET cv_pct = q.cv_pct
-    FROM qa q
-    WHERE upper(s.inverter_id) = q.device_id
-      AND s.data_date >= q.snap
-      AND s.data_date <  q.snap + interval '5 min'
-      AND s.cv_pct IS DISTINCT FROM q.cv_pct
-    """)
-    cv_updated = cur.rowcount
-
-    cur.execute("""
-    UPDATE string_cv
-    SET similarity_pct = CASE WHEN cv_pct IS NOT NULL
-                              THEN GREATEST(0, 100 - abs(dispersion_ratio - cv_pct)) END
-    WHERE similarity_pct IS DISTINCT FROM
-          CASE WHEN cv_pct IS NOT NULL
-               THEN GREATEST(0, 100 - abs(dispersion_ratio - cv_pct)) END
-    """)
-    sim_updated = cur.rowcount
-    return cv_updated, sim_updated
 
 
 def build_query_a_detail_sql(day):
@@ -368,27 +294,9 @@ def export_query_a_csv(cur, day, path):
         return sum(1 for _ in f) - 1
 
 
-def stats(cur):
-    cur.execute("""
-    SELECT (SELECT count(*) FROM qa) AS qa_rows,
-           (SELECT count(*) FROM qa WHERE cv_pct IS NOT NULL) AS qa_with_cv,
-           count(*) AS matched,
-           count(*) FILTER (WHERE q.cv_pct IS NOT NULL AND s.cv_pct IS NOT NULL) AS both_cv
-    FROM qa q
-    JOIN string_cv s
-      ON upper(s.inverter_id) = q.device_id
-     AND s.data_date >= q.snap
-     AND s.data_date <  q.snap + interval '5 min'
-    """)
-    return cur.fetchone()
-
-
 def main():
-    ap = argparse.ArgumentParser(description='按日期刷新 秒级 -> 5分钟汇总 -> 查询A -> string_cv')
+    ap = argparse.ArgumentParser(description='按日期生成 5 分钟汇总，或按查询A 导出支路明细 CSV')
     ap.add_argument('day', help='日期，例如 2026-11-12')
-    ap.add_argument('--skip-5min', action='store_true', help='跳过汇总表刷新，直接跑查询A与更新')
-    ap.add_argument('--only-5min', action='store_true', help='只生成5分钟汇总表，不跑查询A与更新')
-    ap.add_argument('--dry-run', action='store_true', help='只统计不提交（回滚）')
     ap.add_argument('--export-csv', nargs='?', const='', default=None,
                     help='按 pv_string_branch.sql §3 查询A 导出支路明细 CSV（可指定路径），'
                          '默认 pv_queryA_<日期>.csv；导出后直接退出，不改库')
@@ -412,41 +320,17 @@ def main():
             print(f'已导出 {n} 行，用时 {time.time() - t_all:.1f}s', flush=True)
             return
 
-        if not args.skip_5min:
-            t0 = time.time()
-            part = ensure_partition(cur, day)
-            print(f'[1/4] 分区: {part}', flush=True)
-            n = refresh_5min(cur, day)
-            conn.commit()
-            print(f'[2/4] 5分钟汇总 UPSERT {n} 行，用时 {time.time() - t0:.1f}s', flush=True)
-
-            t0 = time.time()
-            cur.execute('ANALYZE pv_string_branch_5min')
-            conn.commit()
-            print(f'[3/4] ANALYZE 完成，用时 {time.time() - t0:.1f}s', flush=True)
-        else:
-            print('[1-3/4] 已跳过汇总表刷新', flush=True)
-
-        if args.only_5min:
-            print(f'完成（仅 5 分钟汇总表），总用时 {time.time() - t_all:.1f}s', flush=True)
-            return
+        t0 = time.time()
+        part = ensure_partition(cur, day)
+        print(f'[1/3] 分区: {part}', flush=True)
+        n = refresh_5min(cur, day)
+        conn.commit()
+        print(f'[2/3] 5分钟汇总 UPSERT {n} 行，用时 {time.time() - t0:.1f}s', flush=True)
 
         t0 = time.time()
-        build_qa(cur, day)
-        print(f'[4/4] 查询A 完成，用时 {time.time() - t0:.1f}s', flush=True)
-
-        qa_rows, qa_with_cv, matched, both_cv = stats(cur)
-        print(f'      查询A {qa_rows} 行（有 cv {qa_with_cv}），匹配 string_cv {matched} 行'
-              f'（双方均有 cv {both_cv}）', flush=True)
-
-        cv_updated, sim_updated = update_string_cv(cur)
-        if args.dry_run:
-            conn.rollback()
-            print(f'      [dry-run] 将更新 cv_pct {cv_updated} 行、similarity_pct {sim_updated} 行，已回滚', flush=True)
-        else:
-            conn.commit()
-            print(f'      已提交：cv_pct 更新 {cv_updated} 行、similarity_pct 更新 {sim_updated} 行', flush=True)
-
+        cur.execute('ANALYZE pv_string_branch_5min')
+        conn.commit()
+        print(f'[3/3] ANALYZE 完成，用时 {time.time() - t0:.1f}s', flush=True)
         print(f'完成，总用时 {time.time() - t_all:.1f}s', flush=True)
     except Exception as e:
         conn.rollback()
