@@ -1210,10 +1210,12 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
         setFilteredRx(0);
         setHistLoading(false);
       })
-      .catch(() => {
+      .catch(err => {
         if (cancelled) return;
         // 后台刷新失败时保留已有行，只有首次加载失败才落到空态提示
-        setHistError('历史数据加载失败，请稍后重试');
+        setHistError(err && err.message === 'HTTP 403'
+          ? '未登录或登录已过期，请重新登录'
+          : '历史数据加载失败，请稍后重试');
         setHistLoading(false);
       });
     return () => { cancelled = true; };
@@ -1386,9 +1388,11 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
         <//>
         <tbody>
           ${rows.length === 0 ? html`<tr><td colspan=${columns.length} class="text-center py-8 text-gray-500">
-            ${page === 1
-              ? (wsOk ? '暂无告警，等待新事件...' : '未连接告警服务，等待重连...')
-              : (histLoading ? '加载中...' : (histError || '本页暂无数据'))}
+            ${page !== 1
+              ? (histLoading ? '加载中...' : (histError || '本页暂无数据'))
+              : (filterActive
+                ? (histLoading ? '加载中...' : (histError || '暂无匹配的告警记录'))
+                : (wsOk ? '暂无告警，等待新事件...' : '未连接告警服务，等待重连...'))}
           <//></tr>` :
           rows.map(a => h(AlarmRow, {key: a.id, a, compact,
             sel: a.id === selId,
@@ -1511,7 +1515,7 @@ const App = function({}) {
 
   if (loading) return '';  // Show blank page on initial load
   if (!user) return html`<${Login} loginFn=${login} logoIcon=${Logo}
-    title="Device Dashboard Login" />`; // If not logged in, show login screen
+    title="Alarm System Login" />`; // If not logged in, show login screen
 
   return html`
 <div class="h-screen bg-slate-100 ind-shell flex flex-col overflow-hidden">
