@@ -14,6 +14,7 @@
 用法：
   python pv_string_cv_refresh.py 2026-11-12                 # 生成当日 5 分钟汇总
   python pv_string_cv_refresh.py 2026-11-12 --export-csv     # 按 SQL §3 查询A 导出支路明细 CSV，不改库
+  python pv_string_cv_refresh.py 2026-11-12 --export-csv --start 10 --end 11   # 只导出 10:00-11:00
 """
 import argparse
 import codecs
@@ -60,6 +61,25 @@ def window_clause(day, col):
     return '\n         OR '.join(parts)
 
 
+def parse_hms(text):
+    """把 10 / 10:00 / 10:00:00 统一成 HH:MM:SS。"""
+    parts = str(text).strip().split(':')
+    if not 1 <= len(parts) <= 3:
+        raise ValueError(f'时间格式错误: {text}，示例 10 或 10:30 或 10:30:00')
+    try:
+        h, m, s = [int(x) for x in (parts + ['0', '0'][len(parts) - 1:])[:3]]
+    except ValueError:
+        raise ValueError(f'时间格式错误: {text}，应为 小时[:分钟[:秒]]') from None
+    if not (0 <= h <= 23 and 0 <= m <= 59 and 0 <= s <= 59):
+        raise ValueError(f'时间超出范围: {text}')
+    return f'{h:02d}:{m:02d}:{s:02d}'
+
+
+def range_clause(day, col, start, end):
+    """自定义时间区间（左闭右开）。"""
+    return f'{col} >= {ts(day, start)} AND {col} < {ts(day, end)}'
+
+
 def ensure_partition(cur, day):
     cur.execute('SELECT pv_string_branch_5min_ensure_partition(%s::date)', (day,))
     return cur.fetchone()[0]
@@ -96,8 +116,15 @@ def refresh_5min(cur, day):
     return cur.rowcount
 
 
-def build_query_a_detail_sql(day):
-    """pv_string_branch.sql §3 查询A：支路 × 5 分钟快照明细（含 20 分钟块指标）。"""
+def build_query_a_detail_sql(day, start=None, end=None):
+    """pv_string_branch.sql §3 查询A：支路 × 5 分钟快照明细（含 20 分钟块指标）。
+
+    start/end 为空时用 4 个采集窗口；否则用 [start, end) 单区间。
+    """
+    if start and end:
+        bucket_filter = range_clause(day, 'bucket', start, end)
+    else:
+        bucket_filter = f"bucket >= {ts(day, DAY_START)}\n          AND bucket <  {ts(day, DAY_END)}\n          AND ({window_clause(day, 'bucket')})"
     return f"""
     WITH ex AS (
         SELECT DISTINCT
@@ -115,9 +142,7 @@ def build_query_a_detail_sql(day):
             sample_cnt  AS n,
             zero_cnt
         FROM pv_string_branch_5min b
-        WHERE bucket >= {ts(day, DAY_START)}
-          AND bucket <  {ts(day, DAY_END)}
-          AND ({window_clause(day, 'bucket')})
+        WHERE {bucket_filter}
           AND i_avg IS NOT NULL
           AND abs(i_avg) > 1
           AND sample_cnt >= 3
@@ -283,12 +308,12 @@ def build_query_a_detail_sql(day):
     """
 
 
-def export_query_a_csv(cur, day, path):
+def export_query_a_csv(cur, day, path, start=None, end=None):
     """按 §3 查询A 导出 CSV（UTF-8 BOM），返回数据行数。"""
     with open(path, 'wb') as f:
         f.write(codecs.BOM_UTF8)
         cur.copy_expert(
-            'COPY (' + build_query_a_detail_sql(day) + ') '
+            'COPY (' + build_query_a_detail_sql(day, start, end) + ') '
             "TO STDOUT WITH (FORMAT csv, HEADER true)", f)
     with open(path, 'rb') as f:
         return sum(1 for _ in f) - 1
@@ -300,7 +325,25 @@ def main():
     ap.add_argument('--export-csv', nargs='?', const='', default=None,
                     help='按 pv_string_branch.sql §3 查询A 导出支路明细 CSV（可指定路径），'
                          '默认 pv_queryA_<日期>.csv；导出后直接退出，不改库')
+    ap.add_argument('--start', default=None,
+                    help='导出起始时间（左闭），如 10 或 10:30；默认沿用 4 个采集窗口')
+    ap.add_argument('--end', default=None,
+                    help='导出结束时间（右开），如 11 或 11:30；需与 --start 同时给')
     args = ap.parse_args()
+
+    if args.export_csv is None and (args.start or args.end):
+        ap.error('--start/--end 只能与 --export-csv 一起使用')
+
+    start = end = None
+    if args.start or args.end:
+        if not (args.start and args.end):
+            ap.error('--start 和 --end 必须同时指定')
+        try:
+            start, end = parse_hms(args.start), parse_hms(args.end)
+        except ValueError as e:
+            ap.error(str(e))
+        if start >= end:
+            ap.error(f'--start 必须早于 --end（{start} >= {end}）')
 
     day = datetime.strptime(args.day, '%Y-%m-%d').strftime('%Y-%m-%d')
 
@@ -312,10 +355,14 @@ def main():
     t_all = time.time()
     try:
         if args.export_csv is not None:
-            out = os.path.abspath(args.export_csv or os.path.join(
-                BASE_DIR, f'pv_queryA_{day.replace("-", "")}.csv'))
-            print(f'导出查询A 明细 {day} -> {out}', flush=True)
-            n = export_query_a_csv(cur, day, out)
+            default_name = f'pv_queryA_{day.replace("-", "")}.csv'
+            if start:
+                default_name = (f'pv_queryA_{day.replace("-", "")}'
+                                f'_{start[:5].replace(":", "")}-{end[:5].replace(":", "")}.csv')
+            out = os.path.abspath(args.export_csv or os.path.join(BASE_DIR, default_name))
+            span = f'{start}~{end}' if start else '4个采集窗口'
+            print(f'导出查询A 明细 {day} [{span}] -> {out}', flush=True)
+            n = export_query_a_csv(cur, day, out, start, end)
             conn.rollback()
             print(f'已导出 {n} 行，用时 {time.time() - t_all:.1f}s', flush=True)
             return
