@@ -981,6 +981,12 @@ const localDateStr = (d = new Date()) => {
   const p = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 };
+// 相对当天偏移 N 天的本地日期（-1 = 昨天），用于区间导出默认值
+const localDateStrOffset = (days) => {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return localDateStr(d);
+};
 
 function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
   const [page, setPage] = useState(1);
@@ -1011,11 +1017,11 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
   }, [showTypeDropdown]);
   // event_type=false（alarmEventAll=false）时整个事件过滤下拉不渲染，eventFilter 恒为 ''
   const [pointOptions, setPointOptions] = useState([]);  // [{code, name}]
-  // 按日期导出 CSV：默认当天（本地时区）；区间模式默认当天 00:00:00 ~ 23:59:59
+  // 按日期导出 CSV：默认当天（本地时区）；区间模式默认前一日 17:00:00 ~ 当日 16:59:59
   const [exportMode, setExportMode] = useState('day');  // 'day' | 'range'
   const [exportDate, setExportDate] = useState(() => localDateStr());
-  const [exportStart, setExportStart] = useState(() => `${localDateStr()} 00:00:00`);
-  const [exportEnd, setExportEnd] = useState(() => `${localDateStr()} 23:59:59`);
+  const [exportStart, setExportStart] = useState(() => `${localDateStrOffset(-1)} 17:00:00`);
+  const [exportEnd, setExportEnd] = useState(() => `${localDateStr()} 16:59:59`);
   // 过滤激活时的实时总数增量：仅统计匹配过滤条件的 WS 新行
   const [filteredRx, setFilteredRx] = useState(0);
   const seenMaxIdRef = useRef(0);
@@ -1103,6 +1109,17 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
     document.body.appendChild(a);
     a.click();
     a.remove();
+  };
+
+  // 切到区间模式时重置为前一日 17:00:00 ~ 当日 16:59:59（风机日报周期）
+  const toggleExportMode = () => {
+    if (exportMode === 'day') {
+      setExportStart(`${localDateStrOffset(-1)} 17:00:00`);
+      setExportEnd(`${localDateStr()} 16:59:59`);
+      setExportMode('range');
+    } else {
+      setExportMode('day');
+    }
   };
 
   // 测点下拉选项：从 WS 实时列表与历史页响应中累积去重（按编码排序）。
@@ -1370,7 +1387,7 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
         <button type="button" class="alarm-filter-clear" onclick=${exportCsv}
                 title="导出所选范围为 CSV（UTF-8 BOM，Excel 可直接打开）">导出 CSV<//>
         <button type="button" class="alarm-export-mode"
-                onclick=${() => setExportMode(m => (m === 'day' ? 'range' : 'day'))}
+                onclick=${toggleExportMode}
                 title="切换 单日 / 自定义区间">${exportMode === 'day' ? '切到区间' : '切到单日'}<//>
       <//>
     <//>
