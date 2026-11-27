@@ -1270,7 +1270,6 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
     ? total + filteredRx
     : total + Math.max(0, alarmRx - baseRxRef.current);
   const shownTotal = (page === 1 && !filterActive) ? Math.max(liveTotal, filtered.length) : Math.max(liveTotal, hist.length);
-  const latest = (page === 1 && !filterActive) ? (items.length > 0 ? items[0].ts : '') : (hist.length > 0 ? hist[0].ts : '');
   const realtimeMode = page === 1 && !filterActive;   // 无过滤的第 1 页为纯内存实时视图
   const showBanner = page === 1 && pendingNew > 0;
   return html`
@@ -1284,7 +1283,6 @@ function Alarms({items, wsOk, alarmRx, authLost, onReauth, alarmEventAll}) {
       <//>
       ${!wsOk && authLost && html`<button type="button" class="alarm-reauth text-sm px-2 py-0.5 rounded border border-amber-400 text-amber-600 hover:bg-amber-50" onclick=${onReauth}>重新登录<//>`}
       <span class="text-sm ind-dim">共 ${shownTotal} 条</span>
-      ${latest && html`<span class="text-sm ind-dim">最新: ${latest}<//>`}
       ${page > 1 && html`<span class="alarm-hist-hint" title="翻页后为历史快照，返回第 1 页恢复实时">历史浏览中<//>`}
       <label class="alarm-auto-scroll ${!realtimeMode ? 'opacity-40' : ''}" title=${!realtimeMode ? (page === 1 ? '过滤视图自动跟随最新数据' : '仅第 1 页可用') : '勾选：新告警自动滚到顶部；取消：冻结当前列表，只提示新告警数量'}>
         <svg class="turbine-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
